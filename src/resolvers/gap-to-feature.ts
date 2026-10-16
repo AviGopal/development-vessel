@@ -1448,6 +1448,10 @@ export async function escalateToDecomposition(gap: Record<string, unknown>, why:
       body: JSON.stringify({
         goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400).replace(/^(.{400})$/s, (_m, t) => t.replace(/\s\S*$/, "")),
         tags: ["escalated_from:" + parentId],
+        // CHANGE-35: the builder KNOWS the gap and the product: say so, structured, instead of leaving goal-host to
+        // recover them from the text. The walk binds decompose_gap_id; the reach oracle reads gap X for a product.
+        expected_output_shapes: ["gapDecomposition"],
+        variables: { decompose_gap_id: parentId },
       }),
     }).catch(() => { });
   })();
@@ -2182,7 +2186,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
           await resolveDispatchGoal({ type: "dispatch_goal", goal: "skipping reconcile gap " + String(gap.id) + " after " + failedAttempts + " failed attempts: " + String(gap.summary ?? "").slice(0, 240) } as never);
           return { shape: "gapToFeatureReport", body: { ok: true, stage: "route", routed: "skip_reconcile", gap_id: gap.id, reason: "failed_attempts", predicted_p: predR.p } };
         }
-        await resolveDispatchGoal({ type: "dispatch_goal", goal: "investigate gap " + String(gap.id) + " before composing (" + reason + ", predicted_p=" + predR.p.toFixed(2) + "): " + String(gap.summary ?? "").slice(0, 240) } as never);
+        await resolveDispatchGoal({ type: "dispatch_goal", goal: "investigate gap " + String(gap.id) + " before composing (" + reason + ", predicted_p=" + predR.p.toFixed(2) + "): " + String(gap.summary ?? "").slice(0, 240), expected_output_shapes: ["gapDecomposition"], variables: { decompose_gap_id: String(gap.id) } } as never);
         const invMeta = { ...mR, investigated_at: new Date().toISOString(), investigation_reason: reason, last_predicted_p: predR.p };
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...gap, classification_metadata: invMeta, status: String(gap.status ?? "open") } } as never);
         return { shape: "gapToFeatureReport", body: { ok: true, stage: "route", routed: "investigation", gap_id: gap.id, reason, predicted_p: predR.p } };

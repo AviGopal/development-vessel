@@ -63,6 +63,8 @@ const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 
 export interface DispatchGoalPointer {
+  /** The goal's target shapes, sent as run-goal's expected_output_shapes (CHANGE-35: a builder that KNOWS the target says so). */
+  expected_output_shapes?: string[];
   type: "dispatch_goal";
   goal: string;
   variables?: Record<string, unknown>;
@@ -91,6 +93,7 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
 
   const body: Record<string, unknown> = { goal };
   if (pointer.variables) body["variables"] = pointer.variables;
+  if (Array.isArray(pointer.expected_output_shapes) && pointer.expected_output_shapes.length > 0) body["expected_output_shapes"] = pointer.expected_output_shapes;
   if (pointer.target_template_id) body["targetTemplateId"] = pointer.target_template_id;
   if (pointer.parent_execution_id) body["parent_execution_id"] = pointer.parent_execution_id;
   if (Array.isArray(pointer.composition_chain)) body["composition_chain"] = pointer.composition_chain;

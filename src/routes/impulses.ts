@@ -575,6 +575,24 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       }
       return resolveFeatureCompose({ ...(p as Parameters<typeof resolveFeatureCompose>[0]), spec: fcSpec });
     }
+    case "gapDecomposition": {
+      // CHANGE-35: the EXISTING decomposition contract (resolveGapToFeature's decompose_gap_id branch -> decomposeGap),
+      // advertised. No new writer: it writes the child gaps and decomposed_at exactly as escalation does.
+      const gid = (pointer as { decompose_gap_id?: unknown; gap_id?: unknown }).decompose_gap_id ?? (pointer as { gap_id?: unknown }).gap_id;
+      if (typeof gid !== "string" || !gid) {
+        return { shape: "structuredError", body: { resolver: "gapDecomposition", failure_mode: "missing_input", detail: "gapDecomposition requires decompose_gap_id (the gap to decompose)" } };
+      }
+      // CREATED BY THIS CALL, not merely written: child ids are deterministic (<gap>-step-<k>), so decomposing a gap
+      // that was already decomposed rewrites its existing steps. The parent's recorded children are read BEFORE the
+      // call, and `created` names only the steps that were not already the parent's (the reach oracle counts these).
+      const before = await resolveSubstrateGap({ type: "substrateGap", id: gid } as never).catch(() => null);
+      const parentRow = (((before as { body?: { gaps?: Array<Record<string, unknown>> } } | null)?.body?.gaps) ?? []).find((g) => String(g.id) === gid);
+      const priorChildren = new Set<string>(((((parentRow?.classification_metadata ?? {}) as Record<string, unknown>).decomposition as { children?: unknown } | undefined)?.children as string[] | undefined) ?? []);
+      const r = await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid } as Parameters<typeof resolveGapToFeature>[0]);
+      const body = ((r as { body?: unknown }).body ?? {}) as Record<string, unknown>;
+      const written = Array.isArray(body.children) ? (body.children as unknown[]).filter((c): c is string => typeof c === "string") : [];
+      return { shape: "gapDecomposition", body: { ...body, created: before ? written.filter((c) => !priorChildren.has(c)) : [], prior_children: priorChildren.size } };
+    }
     // @shape-dispatch:private
     case "gap_to_feature":
       return resolveGapToFeature(p as Parameters<typeof resolveGapToFeature>[0]);

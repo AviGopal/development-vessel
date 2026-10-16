@@ -84,7 +84,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-1\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-1\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -481,7 +481,7 @@
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-6\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
    "[policy-read] autonomyScope: asked 1 [local] own producer(s); answered 1 [local]; record found (1 entry) → contained (1 excluded path(s))",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-6\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -656,7 +656,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":\"return base + 1\",\"grounding_has_region\":true,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-8\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-8\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -744,7 +744,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":\"return base + 1\",\"grounding_has_region\":true,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-9\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-9\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -833,7 +833,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-10\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-10\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -930,7 +930,7 @@
    "[spec-refine] skipped",
    "[fc-plan] {\"grounding_len\":1857,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-own-check] {\"gap\":\"ds-11\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":\"test/compute.test.ts\",\"only\":[\"compute > adds two to the scaled value\"],\"ran\":true,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":[\"compute > adds two to the scaled value\"],\"expects\":{\"base\":null,\"draft\":null},\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-11\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1026,7 +1026,7 @@
    "[spec-refine] skipped",
    "[fc-plan] {\"grounding_len\":1762,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-own-check] {\"gap\":\"ds-12\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":\"test/compute.test.ts\",\"only\":[\"compute > adds two to the scaled value\"],\"ran\":true,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":[\"compute > adds two to the scaled value\"],\"expects\":{\"base\":null,\"draft\":null},\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-12\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1118,7 +1118,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-13\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-13\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1210,7 +1210,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-14\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-14\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1301,7 +1301,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-15-step-1\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-15-step-1\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1520,7 +1520,7 @@
    "[fc-plan] {\"grounding_len\":777,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"create_file\",\"path\":\"repos/demo-vessel/src/fresh.ts\",\"old\":\"\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/fresh.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-18\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-18\",\"reachable_symbols\":[],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1615,7 +1615,7 @@
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/extra.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-19\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-19\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1707,7 +1707,7 @@
    "[fc-plan] {\"grounding_len\":984,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-20\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-20\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  },
@@ -1802,7 +1802,7 @@
    "[fc-plan] {\"grounding_len\":798,\"region\":null,\"grounding_has_region\":null,\"ops\":[{\"kind\":\"edit\",\"path\":\"repos/demo-vessel/src/compute.ts\",\"old\":\"  return base + 1;\"}]}",
    "[fc-coverage] TARGET HAS NO TEST FILE: repos/demo-vessel/src/compute.ts — every gate below this point READS the diff; only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.",
    "[fc-own-check] {\"gap\":\"ds-21\",\"vessel\":\"repos/demo-vessel\",\"source\":\"store\",\"test_file\":null,\"only\":[],\"ran\":false,\"red\":[],\"unjudged\":false,\"stray\":[],\"tc_ok\":true,\"base_red\":null,\"expects\":null,\"contract_breach\":null}",
-   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=268). A gate that cannot see must not block the lane.",
+   "[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible (configs_read=2, vocabulary_size=269). A gate that cannot see must not block the lane.",
    "[development-vessel] semantic-gate {\"gap_id\":\"ds-21\",\"reachable_symbols\":[\"compute\"],\"unreachable_symbols\":[],\"addresses\":true,\"on_live_path\":true,\"hard_fail\":false,\"suspected_real_location\":null,\"reason\":\"fixture judge: the change addresses the gap\"}"
   ]
  }

@@ -148,6 +148,7 @@ export const config = {
     "author_composed_capability",
       "feature_compose",
       "gap_compose",
+      "gapDecomposition", // CHANGE-35: decompose ONE named gap into falsifiable child steps (the existing decomposeGap)
       "composeOwnership",
       "contentAddressedVesselId",
       "composerInterruptionReport",
@@ -889,6 +890,12 @@ export const config = {
     // pointer fields were unbindable without one. discovery-registration reads it as
     // optional/backward-compat.
     shapeDescriptions: {
+      // CHANGE-35: the public face of the existing decomposition writer, so an investigation of gap X can PRODUCE
+      // something on X (child steps) through the walk instead of free text nothing records.
+      gapDecomposition:
+        "Decompose ONE named substrate gap into falsifiable child steps, written to the gap store as child gaps " +
+        "(parent_gap_id = the gap) with the parent stamped decomposed_at. Pointer field (required): decompose_gap_id, " +
+        "the gap id. Returns {ok, gap_id, children: [child gap ids], reason}; ok is false when no valid step could be produced.",
       // git_log's pointer fields, advertised so a planner and arg synthesis can bind them: the walk
       // never passed a cwd, and without one git ran in the runtime mirror (no .git, exit 128).
       git_log:

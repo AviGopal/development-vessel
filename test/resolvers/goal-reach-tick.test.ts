@@ -190,6 +190,20 @@ describe("nextAction — waiting → redispatch only when ALL linked gaps are cl
     expect(a.kind).toBe("none");
     expect((a as { reason: string }).reason).toBe("unlinked");
   });
+  it("[MUST-FAIL] an EXPIRY or give-up close after the last attempt does not re-run the goal (it is not a repair)", () => {
+    for (const reason of ["expired_not_redetected", "churned_unlandable", "persistent_compose_failure", "walk_artifact"]) {
+      const gaps = [closed("g1", min(3), reason)];
+      const a = nextAction(recordWith(gaps), gaps, policy);
+      expect(a.kind).toBe("none");
+      expect((a as { reason: string }).reason).toBe("no_new_closure");
+    }
+  });
+  it("[CONTROL] a repair close after the last attempt still re-runs the goal", () => {
+    for (const reason of ["landed_verified", "producer_now_exists", "condition_cleared"]) {
+      const gaps = [closed("g1", min(3), reason)];
+      expect(nextAction(recordWith(gaps), gaps, policy).kind).toBe("redispatch");
+    }
+  });
   it("does not redispatch again when no linked gap closed since the last attempt", () => {
     const gaps = [closed("g1", min(-5))];
     const r = recordWith(gaps);

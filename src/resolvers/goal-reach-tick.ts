@@ -41,6 +41,7 @@
  * `[goal-reach] REDISPATCHED goal_hash=<h> dispatch=<id> cycle=<n>/<max>`. Count re-dispatches from
  * goal-host's records, not from goalReach records.
  */
+import { REALLY_FIXED_REASONS } from "./detector-yield-registry.js";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 import type { ResolverResult } from "./types.js";
@@ -544,7 +545,11 @@ export function nextAction(
   if (open.length > 0 && landedSince.length === 0) return { kind: "wait", waiting_on: open.map((g) => g.id) };
   if (linked.length === 0) return { kind: "none", reason: "unlinked" };
 
-  if (landedSince.length === 0 && !linked.some((g) => gapClosedAt(g) > lastAttempt)) return { kind: "none", reason: "no_new_closure" };
+  // Only a REPAIR closure re-runs the goal. An expiry or give-up close (expired_not_redetected: "we stopped seeing it",
+  // indistinguishable from "we stopped looking"; churned_unlandable; persistent_compose_failure; walk_artifact) is not
+  // evidence the condition is gone, and a reach after it would be scored reached_without_hands, the headline measure
+  // (81% of 487 closes in 10 days were such reasons, 2026-10-16). One "really fixed" rule: detector-yield-registry's.
+  if (landedSince.length === 0 && !linked.some((g) => gapClosedAt(g) > lastAttempt && REALLY_FIXED_REASONS.has(String(g.closed_reason ?? "")))) return { kind: "none", reason: "no_new_closure" };
 
   const unkeyed = rec.landed_write_shapes.filter((w) => !IDEMPOTENT_BY_KEY_WRITE_SHAPES.has(w));
   if (rec.origin !== "autonomous" && unkeyed.length > 0) {

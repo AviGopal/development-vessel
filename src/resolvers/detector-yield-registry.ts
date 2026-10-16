@@ -169,7 +169,7 @@ function isChurned(g: GapRow): boolean {
  * `expired_not_redetected` is the sharpest case: it means "we stopped seeing it", which is
  * indistinguishable from "we stopped looking". It is not evidence the condition is gone.
  */
-const REALLY_FIXED_REASONS = new Set([
+export const REALLY_FIXED_REASONS = new Set([
   "landed_verified",
   "fix_landed_and_verified_by_consequence",
   "producer_now_exists",

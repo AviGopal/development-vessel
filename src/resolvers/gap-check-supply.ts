@@ -58,7 +58,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -282,7 +282,29 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
 }
 const anchorText = (anchors: readonly CheckAnchor[]): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
 
+/**
+ * QUOTE WHAT THE GATE WOULD READ AS AN UNRENDERED BINDING (CHANGE-32a). A check goal is built from a gap's own prose,
+ * and a gap ABOUT placeholders quotes them ({{…}}, {{goal.id}}): pre-gate rows hold them unquoted. The gap-store write
+ * gate (substrate-gap.ts unrenderedBindingToken) then refuses the whole ledger write that carries the goal, so the
+ * supply could never record what it sent. The gate's own definition of a QUOTATION is a token wrapped in backticks;
+ * this wraps exactly the tokens the gate flags, using the gate's own rule, until it flags none. One definition.
+ */
+export function quoteUnrenderedTokens(s: string): string {
+  let out = s;
+  for (let guard = 0; guard < 100; guard++) {
+    const t = unrenderedBindingToken(out);
+    if (t === null) return out;
+    let i = out.indexOf(t);
+    while (i >= 0 && out[i - 1] === "`" && out[i + t.length] === "`") i = out.indexOf(t, i + 1);
+    if (i < 0) return out;
+    out = `${out.slice(0, i)}\`${t}\`${out.slice(i + t.length)}`;
+  }
+  return out;
+}
 export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = []): string {
+  return quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior));
+}
+function checkSupplyGoalText(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = []): string {
   const siteRel = vesselRelativeEditSite(site);
   // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
   // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.

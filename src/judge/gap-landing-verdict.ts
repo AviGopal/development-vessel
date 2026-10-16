@@ -2051,6 +2051,10 @@ const pending = candidates.unheld
         ...meta,
         // Under the lane's own semantic dissent the landing is partial (landedCloseReason), never verified.
         closed_reason: landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta), independentLabel),
+        // The landing's commit, as closeLandedGap stamps it (febc7da3). Since the sweep became the only landed_verified
+        // closer (02f55935) it is the only writer that can carry it; without it scope earn-in's guardCommit (which reads
+        // landed_sha) found no commit for regression rows whose sha was in falsifier_exercise only.
+        landed_sha: sha,
         close_basis: verdict,
         falsifier_exercise: isLiteralOnlyStepClose(meta)
           ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }

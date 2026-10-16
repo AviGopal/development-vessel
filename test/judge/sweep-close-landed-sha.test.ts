@@ -17,3 +17,12 @@ describe("landing closes carry landed_sha", () => {
     expect(src).toMatch(/landed_sha: land\.commit_sha/);
   });
 });
+
+describe("closeLandedGap pays a landing's credit once per (gap, landing)", () => {
+  const fn = src.slice(src.indexOf("export async function closeLandedGap"), src.indexOf("export async function closeLandedGap") + 12000);
+  test("[MUST-FAIL] the class posterior and the detector closure credit are gated on joinDecisionOutcome's result", () => {
+    expect(fn).toMatch(/const credited = joinDecisionOutcome\(meta,/);
+    expect(fn).toMatch(/if \(credited\) updateClassPosterior\(gapClassOf\(gap\), true\);/);
+    expect(fn).toMatch(/if \(credited\) try \{/);
+  });
+});

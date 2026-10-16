@@ -223,7 +223,10 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
     const landRef = await landingDecisionRef(land.commit_sha ?? "", ref.decision_id);
-    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null }, landRef.decision_id ? { decision_id: landRef.decision_id } : {});
+    // ONE CREDIT PER (gap, landing), as the sweep guards it (68e93860): a re-close on a landing already credited is
+    // recorded, but the class posterior and the detector's closure credit are not paid twice.
+    const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null }, landRef.decision_id ? { decision_id: landRef.decision_id } : {});
+    if (!credited) console.log(`[gap-close] gap ${id}: landing ${String(land.commit_sha ?? "").slice(0, 12)} already credited FAVORABLE; closing without a second credit`);
     const landedCloseWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {
@@ -239,10 +242,10 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     if (landedCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(id, meta);
     if (landedCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
-    updateClassPosterior(gapClassOf(gap), true);
-    // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
+    if (credited) updateClassPosterior(gapClassOf(gap), true);
+    // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing), once per (gap, landing).
     // Best-effort — never throw; wrapped in its own try/catch.
-    try {
+    if (credited) try {
       const detectorName: unknown = (gap as Record<string, unknown>).classification_metadata &&
         typeof (gap as Record<string, unknown>).classification_metadata === "object"
         ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).detector

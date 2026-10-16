@@ -1291,12 +1291,22 @@ async function locateStepFile(vessel: string, resolver: string, excerpt: string 
   return loc ? { file: loc.file, method: loc.method } : null;
 }
 
+/**
+ * THE GOAL-HOST THAT RAN A DISPATCH: its tally entry's node (the goal-host that listed it), else THIS node's own goal-host
+ * (entries tallied before nodes were recorded carry none). A run's record lives on the goal-host that ran it; a shared
+ * gap's dispatch ids come from every node, so reading them all from this node's goal-host skipped other nodes' runs as
+ * "unreadable here" (432 per day on one node, 101 on another, 2026-10-16). One rule for every run read (executionIdOf,
+ * producer-dispatch's readRun); restores 7861c76e's origin read, which readRun (1eaff12d) did not take.
+ */
+export async function runOriginBase(entry: { node?: string | null } | undefined, ownGoalHost?: () => Promise<string | null>): Promise<string | null> {
+  return entry?.node ? entry.node.replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "") : await (ownGoalHost ?? ownGoalHostBase)();
+}
 /** The execution id of a counted run: the tally's, else goal-host's own dispatch record on the node that ran it. */
 async function executionIdOf(entry: import("./goal-deficiency.js").TallyEntry | undefined, dispatchId: string, ownGoalHost?: () => Promise<string | null>): Promise<string | null> {
   if (entry?.execution_id) return entry.execution_id;
   // The goal-host that ran it, when the entry names one; else THIS node's own goal-host (entries tallied before
   // execution ids were recorded carry neither). A dispatch this node's goal-host does not know is not this node's run.
-  const node = entry?.node ? entry.node.replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "") : await (ownGoalHost ?? ownGoalHostBase)();
+  const node = await runOriginBase(entry, ownGoalHost);
   if (!node) return null;
   try {
     const r = await fetch(`${node}/executions/${encodeURIComponent(dispatchId)}`, { signal: AbortSignal.timeout(10_000) });
@@ -1713,7 +1723,9 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
             advertised: async (shape) => pd.advertisedFrom(await lookupShape(shape)),
             declaredBy: async (shape) => pd.declaredBy(shape, (await import("../lib/evaluator-tree.js")).evaluatorTreeRoot()),
             readRun: async (id) => {
-              const base = await ownGoalHostBase();
+              // Read the run where it ran (runOriginBase): the dispatch's tally entry names its goal-host.
+              const entry = Object.values(tallies).flatMap((t) => t?.entries ?? []).find((e) => e.dispatch_id === id);
+              const base = await runOriginBase(entry);
               if (!base) return null;
               const r = await fetch(`${base}/executions/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10_000) });
               return r.ok ? ((await r.json()) as Record<string, unknown>) : null;

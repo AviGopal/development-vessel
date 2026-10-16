@@ -1223,6 +1223,10 @@ export async function armDecomposition(
     if (parentCheckNote) refusals.push(parentCheckNote);
   }
 
+  // CHANGE-37a: whether a step of this parent is DIRECTED is decided ONCE, as the child write below records it
+  // (a step of a directed gap is directed too). The scope refusal used opts.directed alone, so a directed parent
+  // decomposed by escalation or the lifecycle scan had its in-scope steps refused although they would be directed.
+  const childDirected = meta.directed === true || opts.directed === true;
   let k = 0;
   for (const st of (parsed.steps ?? []).slice(0, 3)) {
     k++;
@@ -1233,7 +1237,14 @@ export async function armDecomposition(
     if (!sm || !change) { refusals.push(`step ${k}: no single source file or no change`); continue; }
     // Directed decomposition may target the lane core: the scope contains autonomous work, and the
     // compose floor already never checks directed work, so refusing its steps here only blocked it.
-    if (!opts.directed && autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
+    // A cost and closability filter, not the safety guard (admission, the compose floor, the cutover chokepoint and
+    // the settlement check still apply to undirected work): it agrees with the child it would write (CHANGE-37a), and
+    // a tightening hold does not refuse the repair of its own regression (gapInHoldLineage, as admission applies it).
+    {
+      const stepScopeHit = childDirected ? null : autonomyScopeExcludes(scope, stepSite);
+      const stepHold = stepScopeHit ? scopeHoldFor(scope, stepScopeHit) : null;
+      if (stepScopeHit && !(stepHold && gapInHoldLineage(parent, stepHold))) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
+    }
     if (/\b(remove|delete|disable|silence|suppress|skip)\b[^.]{0,40}\b(detector|check|gate|falsifier|scan)\b/i.test(change)) { refusals.push(`step ${k}: would silence a detector or check`); continue; }
     // A helper-only step can never land: the compose semantic gate refuses a new function nothing calls.
     if (/\b(introduce|add|create|define|extract)\b[^.]{0,60}\b(helper|function|utility|method|wrapper)\b/i.test(change) && !/\b(call|calls|use|uses|using|replace|replaces|route|routes|wire|apply|applies)\b/i.test(change)) { refusals.push(`step ${k}: only adds a helper nothing calls, which the compose gate refuses as hollow`); continue; }
@@ -1294,7 +1305,7 @@ export async function armDecomposition(
     if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
     // A step carries its OWN check (the parent's is refused above: one step will not flip it), but the
     // operator's hand-off is the parent's: a step of a directed gap is directed too, or it is withheld.
-    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(meta.directed === true || opts.directed === true ? { directed: true } : {}), ...cleared, ...childPredicate };
+    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(childDirected ? { directed: true } : {}), ...cleared, ...childPredicate };
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
       childVerdict ? { birthVerdict: childVerdict } : undefined,

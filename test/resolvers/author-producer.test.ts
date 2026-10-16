@@ -63,6 +63,10 @@ function installFetch(): void {
       // LLM vessel completion call
       return makeResponse(llmResp);
     }
+    if (u.includes("validation-vessel") && (body["impulse"] as { pointer?: { type?: string } } | undefined)?.pointer?.type === "resolver_schema") {
+      // CHANGE-37d″: author_producer reads the producer's contract once per authoring; it is not a validation attempt.
+      return makeResponse({ ok: true, status: 200, data: { shape: "resolver_schema", body: { shape: "x", known: false } } });
+    }
     if (u.includes("validation-vessel")) {
       // resolver-X validation invocation; one scripted response per attempt.
       const resp = validationResps[validationCallCount] ?? validationResps[validationResps.length - 1]!;

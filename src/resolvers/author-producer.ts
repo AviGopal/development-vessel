@@ -31,7 +31,10 @@
  * a failed mint all degrade to a structuredError rather than throwing.
  */
 
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFile, writeFile, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { unrenderedBindingToken } from "./substrate-gap.js";
 import { resolveLlmCompletionDispatch } from "./llm-completion-dispatch.js";
 import { resolveActivityCreateVariant } from "./activity-create-variant.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
@@ -308,6 +311,81 @@ function extractProbeFilePaths(testPointer: Record<string, unknown>): string[] {
   return Array.from(seen);
 }
 
+// CHANGE-37d (user ruling 2026-10-16T20:05:03Z; qa approved the adjusted design ~20:4xZ). An auto-authored bridge is ONE
+// template per shape that every later goal reuses, so a value the authoring LLM copied from ITS goal into a non-file,
+// non-content field was served to every later goal (RUN 1: pos 15's gap_id frozen into auto-bridge-gapDecomposition,
+// then served to pos 16 and 18). The executor binds only {{impulse:<slot>}} and {{lifecycle.*}} in a task's config; there
+// is no slot that binds a dispatch variable, so such a value cannot be re-bound either: the mint is REFUSED instead.
+
+/** The producer's declared contract for `shape` (CHANGE-37d″): its resolver_schema, asked of the shape's own producer
+ *  through the endpoint validation already uses (the same contract goal-host reads in llmExtractPointerArgs). Only a
+ *  field it declares `constant: true` (resolver-schema.ts ContractField) may hold a concrete value in a reusable bridge.
+ *  An unreachable or unknown contract declares nothing: fail closed. */
+export type ProducerContract = { known: boolean; constant: string[]; reason: string };
+export async function producerContract(shape: string, endpoint?: string | null): Promise<ProducerContract> {
+  // The node key goes ONLY to the producer discovery named (selfAuthHeaders): an endpoint a caller supplies (the test
+  // seam) is asked without it, so no credential follows a caller-supplied URL (test/lib/self-call-auth-sweep.test.ts).
+  const discovered = endpoint === undefined ? await findValidationEndpoint(shape) : null;
+  const ep = endpoint === undefined ? discovered : endpoint;
+  if (!ep) return { known: false, constant: [], reason: "no producer endpoint for its resolver_schema" };
+  try {
+    const res = await fetch(ep, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(ep, discovered ?? "") },
+      body: JSON.stringify({ impulse: { pointer: { type: "resolver_schema", shape } } }),
+      signal: AbortSignal.timeout(4_000),
+    });
+    if (!res.ok) return { known: false, constant: [], reason: `resolver_schema HTTP ${res.status}` };
+    const j = (await res.json()) as { body?: unknown; content?: unknown };
+    const b = (j.body ?? j.content ?? {}) as { known?: unknown; fields?: unknown };
+    if (b.known !== true) return { known: false, constant: [], reason: "the producer declares no contract (known:false)" };
+    const fields = Array.isArray(b.fields) ? (b.fields as Array<Record<string, unknown>>) : [];
+    return { known: true, constant: fields.filter((f) => f["constant"] === true && typeof f["name"] === "string").map((f) => String(f["name"])), reason: "declared" };
+  } catch (err) {
+    return { known: false, constant: [], reason: `resolver_schema unreadable: ${String((err as Error)?.message ?? err).slice(0, 120)}` };
+  }
+}
+/** Fields of an authored task_config that hold a concrete value the producer's contract does not declare constant: one
+ *  call's value frozen into a template every later goal reuses. Decided from the contract alone; no goal text is read. */
+export function frozenFieldsUnderContract(taskConfig: Record<string, unknown>, contract: ProducerContract): string[] {
+  const constant = new Set(contract.constant);
+  return Object.entries(taskConfig).filter(([k, v]) => {
+    if (k === "type" || FILE_FIELD_RE.test(k) || PLURAL_FILE_FIELD_RE.test(k) || CONTENT_FIELD_RE.test(k)) return false;
+    if (typeof v !== "string" || v.includes("{{")) return false;
+    return !constant.has(k);
+  }).map(([k]) => k);
+}
+
+/** The executor-bindable placeholder forms in a task config (ias engine: {{impulse:<slot>}}, {{lifecycle.<path>}}). */
+const EXECUTOR_BINDABLE = /^\{\{\s*(?:impulse:|lifecycle\.)/;
+/** Tokens in a minted bridge's task configs that the gap-store gate's ONE definition (substrate-gap unrenderedBindingToken)
+ *  flags and the executor cannot bind: each would reach a resolver, a pool body or a gap write as literal braces. */
+export function unbindableTokens(tasks: ReadonlyArray<Record<string, unknown>>): string[] {
+  const out: string[] = [];
+  const scan = (v: unknown): void => {
+    if (typeof v === "string") {
+      let rest = v;
+      for (let guard = 0; guard < 50; guard++) {
+        const t = unrenderedBindingToken(rest);
+        if (t === null) break;
+        if (!EXECUTOR_BINDABLE.test(t) && !out.includes(t)) out.push(t);
+        const i = rest.indexOf(t);
+        rest = i >= 0 ? rest.slice(i + t.length) : "";
+      }
+    } else if (Array.isArray(v)) v.forEach(scan);
+    else if (v && typeof v === "object") Object.values(v as Record<string, unknown>).forEach(scan);
+  };
+  for (const t of tasks) scan((t as { config?: unknown }).config);
+  return out;
+}
+
+/** A bridge's id keyed on its contract: the shape, its sorted input shapes and its sorted config keys. The same contract
+ *  is the same template (a re-authoring reuses it); a different one is a different id, never a first-wins of another. */
+export function bridgeTemplateId(shape: string, inputShapes: readonly string[] | undefined, taskConfig: Record<string, unknown>): string {
+  const sig = createHash("sha256").update(JSON.stringify({ i: [...(inputShapes ?? [])].sort(), k: Object.keys(taskConfig).filter((k) => k !== "type").sort() })).digest("hex").slice(0, 8);
+  return `auto-bridge-${shape}-${sig}`;
+}
+
 function buildTestPointer(
   config: Record<string, unknown>,
   shape: string,
@@ -334,9 +412,9 @@ function buildTestPointer(
         // synthesized at runtime by the content-synthesis bridge task).
         out[key] = "author_producer validation probe content.";
       } else {
-        // Generic placeholder: substitute a benign concrete value drawn from
-        // the goal, else a token, so the resolver sees a non-template string.
-        out[key] = fileFromGoal ?? pointer.goal ?? "test";
+        // A generic placeholder has NO binding at validation (CHANGE-37d): the goal text or a filename passed here
+        // made a validation the produce step could never repeat. It is left as the placeholder, so the validation
+        // fails by name below (unboundValidationFields) instead of passing on a value the bridge cannot supply.
       }
     }
   }
@@ -799,6 +877,8 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
   //       a config that genuinely produces X is minted. Network / LLM failures
   //       are treated as a failed attempt and we continue.
   let spec: AuthoredSpec | null = null;
+  // The producer's own contract, read once per authoring: the one source of which config fields may be constant.
+  const contract = await producerContract(shape);
   let prior: { task_config: Record<string, unknown>; error: string } | undefined;
   let lastError = "no attempt produced a validated config";
   let attempts = 0;
@@ -829,8 +909,20 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
       continue;
     }
 
+    const frozen = frozenFieldsUnderContract(candidate.task_config, contract);
+    if (frozen.length > 0) {
+      lastError = `refused: task_config holds a concrete value for [${frozen.join(", ")}] that ${shape}'s resolver_schema does not declare constant (${contract.reason}); a bridge is reused by every later goal, and the executor cannot re-bind such a field. Declare the field constant in the producer's contract, or bind it from a slot`;
+      prior = { task_config: candidate.task_config, error: lastError };
+      continue;
+    }
     // VALIDATE: invoke resolver X for real with a concrete test pointer.
     const testPointer = buildTestPointer(candidate.task_config, shape, pointer);
+    const unboundValidationFields = Object.entries(testPointer).filter(([k, v]) => k !== "type" && typeof v === "string" && v.includes("{{")).map(([k]) => k);
+    if (unboundValidationFields.length > 0) {
+      lastError = `validation: field(s) [${unboundValidationFields.join(", ")}] have no binding (a generic placeholder is never filled from the goal text)`;
+      prior = { task_config: candidate.task_config, error: lastError };
+      continue;
+    }
     if (typeof (pointer as { execution_id?: unknown }).execution_id === "string") (testPointer as Record<string, unknown>).execution_id = (pointer as { execution_id?: string }).execution_id;
     // Snapshot probe file paths before the validation probe so writes can be
     // restored regardless of outcome (fixes gap-author-satisfier-stub-pollution).
@@ -881,8 +973,21 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
   // can sense its write back into the pool (sensed-output validation).
   const senseBack = await findSenseBackReader(shape);
   const bridge = buildBridgeTasks(shape, spec, senseBack);
+  // Only the PRODUCE task carries the authored config (spec.task_config, its file fields rebound to {{impulse:<slot>}} by
+  // buildBridgeTasks). The extract and sense-back tasks are this resolver's own scaffolding, whose placeholders (the
+  // extract task's {{goal}}, the llm_prompt's dotted variables) are bound by their own resolvers, not by task-config
+  // interpolation; scanning them refused every 2-task bridge.
+  const produceTasks = (bridge.tasks as Array<Record<string, unknown>>).filter((t) => (t["config"] as { type?: unknown } | undefined)?.type === shape);
+  const unbindable = unbindableTokens(produceTasks);
+  if (unbindable.length > 0) {
+    return structuredError(
+      `author_producer: refused to mint ${shape}: its config carries ${unbindable.join(", ")}, which the executor cannot bind (it would reach a resolver or a gap write as literal braces)`,
+      { failure_mode: "unbindable_slot", tokens: unbindable, output_shape: shape },
+    );
+  }
+  const templateId = bridgeTemplateId(shape, bridge.templateInputShapes as string[] | undefined, spec.task_config);
   const template = {
-    id: `auto-bridge-${shape}`,
+    id: templateId,
     name: `auto-bridge:${shape}`,
     description:
       `Auto-authored bridge activity that invokes the live ${shape} resolver` +
@@ -908,6 +1013,10 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
     type: "activity_create_variant",
     template,
   });
+  if (mintResult.shape !== "activityRegistryChange" && (mintResult.body as { failure_mode?: string } | undefined)?.failure_mode === "already_exists") {
+    // The SAME contract (the id is its signature) already exists: reuse it, never a first-wins of a different one.
+    return { shape: "author_producer", body: { minted_activity_id: templateId, reused: true, output_shape: shape, input_shapes: bridge.templateInputShapes, task_config: spec.task_config, binds_from: bridge.bindsFrom, two_task_bridge: bridge.twoTask, validated: true, attempts } } as never;
+  }
   if (mintResult.shape !== "activityRegistryChange") {
     const b = mintResult.body as { detail?: string; failure_mode?: string } | undefined;
     return structuredError(`mint failed: ${b?.detail ?? "activity_create_variant rejected the template"}`, {

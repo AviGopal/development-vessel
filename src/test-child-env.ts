@@ -16,10 +16,19 @@
  * install cache under HOME), so none is passed. Every name added here is a loosening point: this file
  * is a judge, and the protected test pins the exact list.
  *
+ * LEARNED STATE STAYS IN THE SCRATCH ROOT (2026-10-17). A scrubbed child also dropped every learned-state redirect
+ * the scrubbed suite env sets, so vessel code under test resolved its live /workspace defaults: the lane's test_suite,
+ * typecheck and mitosis children wrote fixture classes into the live gap-class-posteriors.json. With a scratch root,
+ * every learned-state env name src reads with a /workspace default is given a FIXED value under that root (never the
+ * parent's value). The names are DERIVED by one scan of this vessel's src (`learnedStateDefaults`, the same rule
+ * pull-sync's scrubbed env derives its redirects by); the test harness imports this one definition. Both renderers
+ * carry them. A redirect is a path, not a credential: the passthrough allowlist is unchanged.
+ *
  * Not configurable at runtime, by design: nothing reads an env var or a flag to widen it.
  */
-import { dirname } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 /** Inherited from the parent by name: non-secret, needed to find and run bun. */
@@ -28,6 +37,67 @@ export const TEST_CHILD_ENV_PASSTHROUGH: readonly string[] = Object.freeze(["PAT
 export const TEST_CHILD_ENV_FIXED: Readonly<Record<string, string>> = Object.freeze({ NODE_ENV: "test", TZ: "UTC" });
 
 const DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/** An env read with a /workspace default: `process` `.env.NAME` (or `["NAME"]`), `??` or `||`, a quoted /workspace path. */
+const STATE_DEFAULT = /process\.env(?:\.([A-Z0-9_]+)|\[["']([A-Z0-9_]+)["']\])\s*(?:\?\?|\|\|)\s*["'`](\/workspace[^"'`]*)/g;
+/** A default the renderers can place verbatim (also inside a shell word): plain path characters only. */
+const PLAIN_DEFAULT = /^\/workspace\/[A-Za-z0-9._\/-]+$/;
+/** This vessel's own src directory (this file lives at its top). */
+const OWN_SRC = dirname(fileURLToPath(import.meta.url));
+/** Names a redirect may never take: the passthrough and fixed names, and the scratch root itself. */
+const RESERVED = (): Set<string> => new Set([...TEST_CHILD_ENV_PASSTHROUGH, ...Object.keys(TEST_CHILD_ENV_FIXED), "WORKSPACE_ROOT"]);
+/** Names that change how a child STARTS (loader, runtime, package manager, VCS, ssh), refused as a redirect even with a
+ *  scratch value: the scan reads src at run time, so a lane-written `process.env.NODE_OPTIONS ?? "/workspace/..."` would
+ *  otherwise reach every child it spawns (qa ruling on the route-5 change, 2026-10-17). */
+export const START_SHAPING_NAME = /^(LD_|DYLD_|NODE_|BUN_|NPM_|GIT_|SSH_)|_(OPTIONS|PRELOAD|LOADER)$/;
+let stateDefaultsCache: Map<string, string> | null = null;
+
+/**
+ * Every learned-state env name in src with its /workspace default, scanned once and cached for the vessel's own src.
+ * Excluded: the bare /workspace and source trees under /workspace/git*, test files, node_modules, a default with
+ * anything but plain path characters, the reserved names (a redirect never overrides PATH, HOME or the root), and any
+ * START_SHAPING_NAME (a redirect never changes how the child starts).
+ */
+export function learnedStateDefaults(srcDir: string = OWN_SRC): Map<string, string> {
+  if (stateDefaultsCache && srcDir === OWN_SRC) return stateDefaultsCache;
+  const reserved = RESERVED();
+  const out = new Map<string, string>();
+  const walk = (d: string): void => {
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (statSync(p).isDirectory()) { if (n !== "node_modules") walk(p); continue; }
+      if (!/\.(ts|js)$/.test(n) || /\.test\.ts$/.test(n)) continue;
+      for (const m of readFileSync(p, "utf8").matchAll(STATE_DEFAULT)) {
+        const name = m[1] ?? m[2]!; const dflt = m[3]!;
+        if (dflt === "/workspace" || dflt === "/workspace/" || dflt.startsWith("/workspace/git")) continue;
+        if (!PLAIN_DEFAULT.test(dflt) || reserved.has(name) || START_SHAPING_NAME.test(name)) continue;
+        out.set(name, dflt);
+      }
+    }
+  };
+  walk(srcDir);
+  if (srcDir === OWN_SRC) stateDefaultsCache = out;
+  return out;
+}
+
+/** Where a learned-state default lands under a scratch root: `<root>/<path below /workspace>`, the live layout with
+ *  /workspace replaced by the root (the root stands where /workspace stands for WORKSPACE_ROOT-relative code too). */
+export function scratchStatePath(root: string, dflt: string): string {
+  return join(root, dflt.slice("/workspace".length));
+}
+
+/** The learned-state redirects for a scratch root, name -> fixed scratch path. */
+export function learnedStateRedirects(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, dflt] of learnedStateDefaults()) out[name] = scratchStatePath(root, dflt);
+  return out;
+}
+
+/** The parent directories of the redirected paths below the root, the root itself excluded (the writers are best-effort
+ *  and create none). */
+function redirectParents(): string[] {
+  return [...new Set([...learnedStateDefaults().values()].map((d) => dirname(d.slice("/workspace/".length))))].filter((r) => r !== ".").sort();
+}
 
 /**
  * The scrubbed env object for Bun.spawn / Bun.spawnSync. With an explicit env, argv[0] is resolved on
@@ -48,7 +118,13 @@ export function testChildEnv(
   for (const extra of [...(opts.pathAppend ?? []), dirname(process.execPath)]) if (extra && !dirs.includes(extra)) dirs.push(extra);
   env["PATH"] = dirs.join(":");
   Object.assign(env, TEST_CHILD_ENV_FIXED);
-  if (opts.workspaceRoot) env["WORKSPACE_ROOT"] = opts.workspaceRoot;
+  if (opts.workspaceRoot) {
+    env["WORKSPACE_ROOT"] = opts.workspaceRoot;
+    Object.assign(env, learnedStateRedirects(opts.workspaceRoot));
+    for (const rel of redirectParents()) {
+      try { mkdirSync(join(opts.workspaceRoot, rel), { recursive: true }); } catch { /* best-effort, as the writers are */ }
+    }
+  }
   return env;
 }
 
@@ -81,11 +157,25 @@ export function withTestChildEnv<T>(
 
 /**
  * The same allowlist as a shell prefix, for a command run through the shell producer:
- * `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)"`.
+ * `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" env -S " NAME=\${WORKSPACE_ROOT}/… …"`.
+ * The parent's shape is kept: ONE flat `$(mktemp -d)` substitution (run by the outer shell, so a caller's TMPDIR still
+ * places the root), no inline program, no `;` (the prefix sits inside callers' `( … )`, and the local-tools shell gate
+ * refuses a substitution or command word it cannot read literally). The redirects are expanded by the SECOND `env`
+ * (GNU `env -S` expands `${NAME}` from its own environment, which holds only the scrubbed set), so every redirect lies
+ * under the child's own WORKSPACE_ROOT; the escapes keep the outer shell from expanding the parent's value. Redirects
+ * directly below the root have an existing parent (the mktemp root); a redirect in a subdirectory (keys/, quiesce/, …)
+ * has none until the child creates it, so its write is dropped inside the scratch root, never made live.
  * Put it immediately before the `bun`/`bunx` word (after any `timeout N`).
  */
 export function testChildEnvShellPrefix(): string {
   const passthrough = TEST_CHILD_ENV_PASSTHROUGH.map((n) => `${n}="$${n}"`);
   const fixed = Object.entries(TEST_CHILD_ENV_FIXED).map(([k, v]) => `${k}=${v}`);
-  return ["env -i", ...passthrough, ...fixed, `WORKSPACE_ROOT="$(mktemp -d)"`].join(" ");
+  // One `env -S` word: double-quoted, opening with a space, `\${…}` escaped for the outer shell. The local-tools gate
+  // lexes the command without shell nesting, so where a caller wraps the prefix in "$( … )" (test_suite's mutation run,
+  // feature-compose) its quote parity is flipped: the leading space ends the word before it at ` env -S ` (a literal
+  // word), and every other word it then sees holds no `$` in a command position.
+  const redirects = [...learnedStateDefaults()].map(([n, d]) => `${n}=\\\${WORKSPACE_ROOT}/${d.slice("/workspace/".length)}`);
+  const parts = ["env -i", ...passthrough, ...fixed, `WORKSPACE_ROOT="$(mktemp -d)"`];
+  if (redirects.length > 0) parts.push(`env -S " ${redirects.join(" ")}"`);
+  return parts.join(" ");
 }

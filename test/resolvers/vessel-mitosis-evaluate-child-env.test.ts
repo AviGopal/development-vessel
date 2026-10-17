@@ -26,8 +26,23 @@ const EXEC_DIR = dirname(process.execPath);
 /** A PATH directory holding an executable NAMED bun (a host install may run bun as `bun.exe` behind a symlink). */
 const BUN_DIR = dirname(Bun.which("bun") ?? process.execPath);
 
+/** The learned-state redirects a scrubbed child with a scratch root carries (2026-10-17): every env name src reads with a
+ *  /workspace default, each a FIXED path under the scratch root, never the parent's value. Pinned literally AND checked
+ *  equal to the helper's derived scan, so a new `/workspace` default in src reddens this protected file on purpose. */
+const LEARNED_STATE_NAMES = [
+  "CLOSE_ORACLE_CALIB_PATH", "DETECTOR_CLOSURE_LEDGER_PATH", "DOC_FIX_POLICY_PATH", "EXPECTATION_CALIB_PATH",
+  "GAP_CLASS_POSTERIOR_PATH", "GOAL_HOST_VESSEL_REPO", "IAS_BUS_DROP_LOG_PATH", "LAST_GOOD_DIR", "LIVE_EDIT_PULSE_PATH",
+  "OBSIDIAN_RENDER_BOARD", "PARKED_LANDINGS_DIR", "PROPOSALS_DIR", "PUSH_POLICY_PATH", "QUIESCE_DIR", "QUIESCE_MARKER",
+  "RESTART_BREADCRUMB_DIR", "SUBSTRATE_HEARTBEAT_PATH", "SUBSTRATE_RUN_DIR", "VESSELS_INVENTORY", "VESSEL_IDENTITY_KEY_PATH",
+];
 /** The ONLY keys a scrubbed child env may carry. */
-const ALLOWED_KEYS = ["HOME", "NODE_ENV", "PATH", "TZ", "WORKSPACE_ROOT"];
+const ALLOWED_KEYS = ["HOME", "NODE_ENV", "PATH", "TZ", "WORKSPACE_ROOT", ...LEARNED_STATE_NAMES];
+/** A redirect name that looks like a credential once its path suffix is set aside (the qa ruling's shapes, plus JWT and
+ *  COOKIE). `_PATH` is stripped because `PAT` is a substring of it. */
+const REDIRECT_CREDENTIAL_SHAPED = /KEY|TOKEN|SECRET|PASS|PAT|CRED|AUTH|JWT|COOKIE/i;
+/** The one exemption, by name and reason: the vessel's signing-key PATH. Redirecting it to scratch DENIES the child the
+ *  live key (unredirected, the child resolves /workspace/keys/...); its value is a scratch path, never the key. */
+const REDIRECT_CREDENTIAL_EXEMPT = ["VESSEL_IDENTITY_KEY_PATH"];
 const CREDENTIAL_SHAPED = /PASS|KEY|TOKEN|SECRET|PAT\b|_PAT|JWT|CRED|AUTH|COOKIE|^METABOB_|^SUBSTRATE_|^SURREAL|^ACTIVITY_API/i;
 
 /** A parent env as the units give it: fake credentials beside the two names a child needs. */
@@ -90,9 +105,35 @@ describe("test-child-env: the allowlist", () => {
     expect(JSON.stringify(env)).not.toContain(FAKE);
     // the parent's WORKSPACE_ROOT is never inherited: only an explicit scratch root is set
     expect(env["WORKSPACE_ROOT"]).toBeUndefined();
-    const ws = helper!.testChildEnv(fx, { workspaceRoot: "/tmp/scratch-ws" }) as Record<string, string>;
-    expect(ws["WORKSPACE_ROOT"]).toBe("/tmp/scratch-ws");
+    const root = mkScratch("allow-ws");
+    const ws = helper!.testChildEnv(fx, { workspaceRoot: root }) as Record<string, string>;
+    expect(ws["WORKSPACE_ROOT"]).toBe(root);
+    for (const k of Object.keys(ws)) expect(ALLOWED_KEYS).toContain(k);
     expect(JSON.stringify(ws)).not.toContain(FAKE);
+  });
+
+  test("[MUST-FAIL] the learned-state redirects are exactly the derived scan, each a fixed path under the scratch root, none inherited", async () => {
+    const helper = await import(HELPER).catch(() => null);
+    expect(helper).not.toBeNull();
+    expect(typeof helper!.learnedStateDefaults).toBe("function");
+    const derived = [...(helper!.learnedStateDefaults() as Map<string, string>).keys()].sort();
+    expect(derived.length).toBeGreaterThan(3);
+    expect(derived).toEqual([...LEARNED_STATE_NAMES].sort());
+    // no redirect shadows a passthrough or fixed name
+    for (const n of derived) expect([...(helper!.TEST_CHILD_ENV_PASSTHROUGH as readonly string[]), ...Object.keys(helper!.TEST_CHILD_ENV_FIXED), "WORKSPACE_ROOT"]).not.toContain(n);
+    // credential refusal: no redirect name is credential-shaped, the one reasoned exemption aside
+    const shaped = derived.filter((n) => REDIRECT_CREDENTIAL_SHAPED.test(n.replace(/_(PATH|DIR)$/, "")));
+    expect(shaped).toEqual(REDIRECT_CREDENTIAL_EXEMPT);
+    // a parent value under every redirect name (a decoy) is never inherited: each value is under the scratch root
+    const root = mkScratch("redirect-ws");
+    const fx: Record<string, string> = { ...credentialFixture("/home/fixture") };
+    for (const n of derived) fx[n] = `/${FAKE}-live/${n}`;
+    const env = helper!.testChildEnv(fx, { workspaceRoot: root }) as Record<string, string>;
+    for (const n of derived) expect(env[n]!.startsWith(root + "/"), `${n}=${env[n]}`).toBe(true);
+    expect(JSON.stringify(env)).not.toContain(FAKE);
+    // without a scratch root no redirect is set (and none is inherited)
+    const bare = helper!.testChildEnv(fx) as Record<string, string>;
+    for (const n of derived) expect(bare[n]).toBeUndefined();
   });
 
   test("[MUST-FAIL] the exported allowlist is exactly PATH+HOME passthrough and NODE_ENV=test, TZ=UTC fixed; no name is credential-shaped", async () => {

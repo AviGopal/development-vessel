@@ -3344,7 +3344,16 @@ export function focusedSlice(content: string, cap: number, focusHints: string[],
     let occurrences = 0;
     for (let k = content.indexOf(probe); k !== -1 && occurrences <= PROBE_MAX_OCCURRENCES; k = content.indexOf(probe, k + 1)) occurrences++;
     if (occurrences > PROBE_MAX_OCCURRENCES) continue;
-    return centerOn(at);
+    // THE SAME LINE THE ANCHOR GUARD CALLS THE REGION. The guard (applyOneOp, [fc-anchor-region]) locates the region with
+    // locateRegion over these same locators, which prefers an occurrence on a CODE line to one in a comment; centring
+    // here on the raw first occurrence could put the window in a doc comment hundreds of lines from the line the guard
+    // then measured anchors against. Centre where locateRegion would, so the window and the region are one place.
+    const lines = content.split("\n");
+    const line = locateRegion(lines, [probe]);
+    if (line < 0) return centerOn(at);
+    let off = 0;
+    for (let i = 0; i < line; i++) off += lines[i]!.length + 1;
+    return centerOn(off + Math.max(0, lines[line]!.indexOf(probe)));
   }
   const probes: string[] = [];
   for (const hint of focusHints) {

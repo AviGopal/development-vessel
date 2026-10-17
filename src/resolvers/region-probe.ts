@@ -108,6 +108,20 @@ export function regionCandidatesFromText(text: string): string[] {
     if (!seen.has(tok)) { seen.add(tok); quoted.push(tok); }
   }
 
+  // TIER 0 — A QUOTED CODE SPAN, WHOLE. Tier 1 below admits one token with no space, colon or inner quote, so a goal
+  // quoting `resolver_tier: "deterministic"` contributed only the bare word `deterministic`, and the window centred on
+  // that word's first occurrence: a doc comment at line 10 of a file whose literal sat at lines 824 and 907 (lane
+  // compose 8c20e9b8, 2026-10-17; the anchor guard then logged "unique but ~800 lines from a region located ONLY from
+  // mined identifiers"). The whole span is the goal's own statement of the code it means, so it outranks its parts.
+  // Only spans that tier 1 cannot take whole (they contain a space or punctuation outside its class) are added here.
+  const spans: string[] = [];
+  for (const m of text.matchAll(/`([^`\n]{6,200})`/g)) {
+    const span = m[1]!.trim();
+    if (span.length < 6 || /^[A-Za-z_$/][\w$.\-/]{3,80}$/.test(span)) continue;
+    if (!/[A-Za-z0-9_$]/.test(span) || seen.has(span)) continue;
+    seen.add(span); spans.push(span);
+  }
+
   const CODEISH = /\b([A-Za-z_$][A-Za-z0-9_$]*(?:[._-][A-Za-z0-9_$]+)+|[a-z$_][a-z0-9$_]*[A-Z][A-Za-z0-9_$]*|[A-Z][a-z0-9_$]+[A-Z][A-Za-z0-9_$]*|[A-Z]{2,}(?:_[A-Z0-9]+)+)\b/g;
   for (const m of text.matchAll(CODEISH)) {
     const tok = m[1]!;
@@ -122,5 +136,5 @@ export function regionCandidatesFromText(text: string): string[] {
   // one is rarer, so it centres more precisely. Across tiers, provenance beats
   // length — a term someone deliberately quoted outranks anything merely scraped.
   const byLen = (a: string, b: string) => b.length - a.length;
-  return [...quoted.sort(byLen), ...out.sort(byLen)];
+  return [...spans.sort(byLen), ...quoted.sort(byLen), ...out.sort(byLen)];
 }

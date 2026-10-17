@@ -543,6 +543,19 @@ function coercePlan(
   return { tasks, outputShapes };
 }
 
+/**
+ * The composition's EXTERNAL preconditions: every task's input shapes minus every shape a task of the same composition
+ * produces. activity-api refuses a template whose declared input_shapes include a shape its own tasks produce ("the
+ * composition declares a precondition it produces itself", routes/activities.ts): such a composition could only run
+ * when its own output was already in the pool. The data->format wiring above makes the format task consume the data
+ * task's output, so the plain union of task inputs made EVERY two-task composite unmintable (live, node1 2026-10-17:
+ * the first NOVEL target answered since the chooser's recall tier came back was refused at mint for exactly this).
+ */
+export function composedTemplateInputs(tasks: ReadonlyArray<{ input_shapes?: string[]; output_shapes?: string[] }>): string[] {
+  const produced = new Set(tasks.flatMap((t) => t.output_shapes ?? []));
+  return [...new Set(tasks.flatMap((t) => t.input_shapes ?? []))].filter((s) => !produced.has(s));
+}
+
 export async function resolveAuthorComposedCapability(
   pointer: AuthorComposedCapabilityPointer,
 ): Promise<ResolverResult> {
@@ -645,8 +658,8 @@ export async function resolveAuthorComposedCapability(
       `Auto-authored COMPOSED capability for goal: "${goal.slice(0, 160)}". ` +
       `Chains existing resolvers [${plan.tasks.map((t) => t.resolver).join(" → ")}] to produce a deliverable no single resolver produces. ` +
       `Authored by author_composed_capability (decomposition-based authoring).`,
-    input_shapes: [...new Set(plan.tasks.flatMap((t) => t.input_shapes ?? []))],
-    inputShapes: [...new Set(plan.tasks.flatMap((t) => t.input_shapes ?? []))],
+    input_shapes: composedTemplateInputs(plan.tasks),
+    inputShapes: composedTemplateInputs(plan.tasks),
     output_shapes: plan.outputShapes,
     outputShapes: plan.outputShapes,
     tags: ["composed_capability", "improvise", "horizon:walk"],

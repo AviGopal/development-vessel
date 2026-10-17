@@ -7,6 +7,7 @@
 // gapStoreRootForTest), so in a multi-file `bun test` run this file cannot choose its store. The sweep therefore
 // runs in a FRESH `bun` process whose WORKSPACE_ROOT, VESSELS_CLONE_ROOT and calibration paths are this file's
 // temp dir; it can never read or write a real store. Real git; no network (fetch stubbed in the child).
+import { isolatedChildEnv } from "./isolated-gap-store-run";
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -74,12 +75,12 @@ function sweepInIsolation(): { exit: number; out: string } {
     `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
   ].join("\n");
-  const env: Record<string, string> = {
-    HOME: process.env.HOME ?? ROOT, PATH: process.env.PATH ?? "",
-    WORKSPACE_ROOT: ROOT, VESSELS_CLONE_ROOT: CLONES, EXPECTATION_CALIB_PATH: CALIB,
-    CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"),
-    SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1", NODE_ENV: "test", TZ: "UTC",
-  };
+  // Learned state stays under ROOT (isolated-gap-store-run.ts isolatedChildEnv): this child's env used to be built from
+  // scratch, so it wrote sweep-partial / sweep-verified into the LIVE gap-class posteriors.
+  const env = isolatedChildEnv(ROOT, {
+    HOME: process.env.HOME ?? ROOT, VESSELS_CLONE_ROOT: CLONES, EXPECTATION_CALIB_PATH: CALIB,
+    CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"), NODE_ENV: "test", TZ: "UTC",
+  });
   const p = Bun.spawnSync(["bun", "-e", code], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
   return { exit: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr) };
 }

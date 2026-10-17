@@ -2,12 +2,16 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { federatedLlmEgressUrls, transportHopHeaders } from "./federated-llm-egress.js";
 
 // Optional override: set LLM_COMPLETION_ENDPOINT to bypass discovery (e.g. for local dev with port-forward).
-const LLM_COMPLETION_ENDPOINT_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
+// Read at CALL time, not at import: an import-time read froze the override for the whole process, so whichever module
+// imported this first decided it for every later caller (measured: the landing gate's one-process run ignored a test's
+// own endpoint; the class gap an-import-time-env-read-makes-replication-tests-depend-on-file-order).
+const llmCompletionEndpointOverride = (): string => process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
 // Federation-transport egress (dev-vessel has no libp2p deps; peer resolves route through
 // the local transport sidecar). Mirrors feature-compose / goal-host FED_TRANSPORT_EGRESS —
 // the by-name egress path proven to serve llm_completion from a funded hub arm.
 const FED_TRANSPORT_EGRESS = process.env["FED_TRANSPORT_EGRESS"] ?? "http://127.0.0.1:8401";
 import type { ResolverResult } from "./types.js";
+import { outboundSignal } from "../lib/request-signal.js";
 
 export interface LlmCompletionDispatchPointer {
   type: "llm_completion_dispatch";
@@ -16,6 +20,8 @@ export interface LlmCompletionDispatchPointer {
   model?: string;
   max_tokens?: number;
   tools?: unknown[];
+  /** a deadline for each model request (ms); absent → bounded only by the caller's own request signal. */
+  timeout_ms?: number;
 }
 
 interface DiscoveryVessel {
@@ -51,6 +57,7 @@ async function findLlmCompletionEndpoints(): Promise<string[]> {
           Authorization: `ApiKey ${METABOB_API_KEY}`,
         },
         body: JSON.stringify({ pointer: { type: "vesselCapability", shape: shapeName } }),
+        signal: AbortSignal.timeout(5_000),
       });
       if (!res.ok) continue;
       const data = await res.json() as DiscoveryResolveResponse;
@@ -180,8 +187,12 @@ export async function resolveLlmCompletionDispatch(
     };
   }
 
-  const endpoints = LLM_COMPLETION_ENDPOINT_OVERRIDE
-    ? [LLM_COMPLETION_ENDPOINT_OVERRIDE]
+  // Each model request is aborted when the caller gives up (the resolve's request signal) or at the
+  // pointer's own deadline, so an abandoned dispatch stops sending paid requests.
+  const callSignal = () => outboundSignal(pointer.timeout_ms);
+  const override = llmCompletionEndpointOverride();
+  const endpoints = override
+    ? [override]
     : await findLlmCompletionEndpoints();
   // Hub-egress fallback (law 11 data-locality + failover): when NO llm arm is discoverable
   // locally — the local resolver de-advertises llm_completion on quota/credit exhaustion, and
@@ -333,6 +344,7 @@ export async function resolveLlmCompletionDispatch(
         // discovery): it then carries this vessel's key as a header, never in requestBody.
         headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
         body: JSON.stringify(requestBody),
+        signal: callSignal(),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -434,6 +446,7 @@ export async function resolveLlmCompletionDispatch(
             method: "POST",
             headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
             body: JSON.stringify(requestBody),
+            signal: callSignal(),
           });
         } catch (err) {
           failures.push({ endpoint, detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" });

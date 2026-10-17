@@ -245,14 +245,15 @@ import { resolveTraceStoreHealthObserver } from "../resolvers/trace-store-health
 import { resolveRemedyEffectivenessObserver } from "../resolvers/remedy-effectiveness-observer.js";
 import { resolveUiScreenshot } from "../resolvers/ui-screenshot.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
+import { runWithRequestSignal } from "../lib/request-signal.js";
 import { resolveFileList } from "../resolvers/file-list.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
 
 /** Shared dispatch logic — used by both the HTTP route and the CLI. */
-export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResult> {
-  const result = await dispatchInner(pointer);
+export async function resolveDispatch(pointer: AnyPointer, opts: { signal?: AbortSignal } = {}): Promise<ResolverResult> {
+  const result = await runWithRequestSignal(opts.signal, () => dispatchInner(pointer));
   // Nth-order self-check: validate every detector output against generic value
   // invariants the moment it is produced (fraction out of [0,1], passing flag
   // over an unmeasured dimension, non-finite number), emitting a meta-gap on
@@ -1156,7 +1157,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
-    const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>);
+    const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
     const content = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
     const impulse = {
       id: `dv-resolver-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -1262,7 +1263,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   }
 
   try {
-    const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType });
+    const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType }, { signal: c.req.raw.signal });
     const result = operatorGrant ? await runWithOperatorDirectGrant(operatorGrant, dispatchOnce) : await dispatchOnce();
     // Wire-level boundary lie fix (V1, 2026-06-06): a resolver that returns
     // shape:"structuredError" is signalling a substantive failure (missing

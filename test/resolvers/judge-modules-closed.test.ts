@@ -24,7 +24,9 @@ const CORE = ["src/judge/gap-admission.ts", "src/judge/gap-attempt-credit.ts", "
 /** Closed RECORDERS under src/judge/ (closed by the directory entry): they write what a decision saw and decide nothing,
  *  so they are not judges. They are held to the core's import discipline (ii) and to the exact-set pin, not to (iii)
  *  (an evaluator file and a judge_trust row is the bar for a module whose output a gate reads). */
-const RECORDERS = ["src/judge/routing-capture.ts"];
+// I4a (qa placement ruling 2026-10-16): learning-credit.ts records outcomes the core decided (write-through to the holder);
+// it decides no verdict.
+const RECORDERS = ["src/judge/routing-capture.ts", "src/judge/learning-credit.ts"];
 /** qa 10.2: CLOSE rulings whose excluded_paths entries rode the opening act. The act landed them in the mirror below
  *  (and in EVALUATOR_FILES / judge_trust), so this list is EMPTY and asserted empty: nothing is closed by promise. */
 const PENDING_CLOSED: string[] = [];

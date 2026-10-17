@@ -576,6 +576,12 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       }
       return resolveFeatureCompose({ ...(p as Parameters<typeof resolveFeatureCompose>[0]), spec: fcSpec });
     }
+    case "gapLearningCredit_write": {
+      // I4a: the learning credit write-through (the holder applies; a non-holder forwards). The route's write gate
+      // (refuseUnauthenticatedWrite) has already required an identity-validated credential for this _write shape.
+      const { resolveGapLearningCreditWrite } = await import("../judge/learning-credit.js");
+      return await resolveGapLearningCreditWrite(pointer as Record<string, unknown>) as ResolverResult;
+    }
     case "gapDecomposition": {
       // CHANGE-35: the EXISTING decomposition contract (resolveGapToFeature's decompose_gap_id branch -> decomposeGap),
       // advertised. No new writer: it writes the child gaps and decomposed_at exactly as escalation does.

@@ -102,7 +102,7 @@ export async function resolveSolicitationOutcomeScan(pointer: SolicitationOutcom
     answered += 1;
     // A HUMAN answered this solicitation. If it is a close-oracle re-land escalation, fold the
     // operator's engagement into the oracle's operator-verdict calibration.
-    if (id.startsWith("reland-needs-human-")) recordOperatorEngagement("landed_commit");
+    if (id.startsWith("reland-needs-human-")) recordOperatorEngagement("landed_commit", id);
     return { solicitation_id: id, outcome: "answered" as const };
   });
   const unanswered = outcomes.filter((o) => o.outcome !== "answered");

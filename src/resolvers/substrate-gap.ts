@@ -72,7 +72,10 @@ function creditExpectationCalibration(category: string, landed: boolean): void {
   }
 }
 
-async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
+/** Whether this node holds the gap store (no holder endpoint configured): the one test every gap-store caller uses. */
+export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDPOINT"]; }
+
+export async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];
   if (!ep) return null;
   const key = process.env["METABOB_API_KEY"] ?? process.env["API_KEY"];

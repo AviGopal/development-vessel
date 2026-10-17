@@ -36,7 +36,16 @@ import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evalu
 export type Ask = (pointer: Record<string, unknown>) => Promise<unknown>;
 /** The chronic-failure escalation (gap-to-feature escalateToDecomposition), handed in per call as in gap-attempt-credit. */
 export type Escalate = (gap: Record<string, unknown>, why: string) => Promise<unknown>;
-import { landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
+import { landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, type CreditRef, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
+import { creditLearning } from "./learning-credit.js";
+
+/** I4a: a compose failure's class-credit reference. The pick's decision when there was one; otherwise the failed_attempts
+ *  value its own bump wrote (attempt:<gap>#<n>, unique per failure and durable on the row); null only when the bump wrote
+ *  nothing (the row closed meanwhile), journaled unreferenced. Dropping only failures would bias the posterior upward. */
+export function failureEventId(gap: Record<string, unknown>, decisionId: string | undefined, bumped: { failed_attempts?: number }): string | null {
+  if (decisionId) return `decision:${decisionId}`;
+  return typeof bumped.failed_attempts === "number" ? `attempt:${String(gap.id)}#${bumped.failed_attempts}` : null;
+}
 
 export const solicitedHumanGaps = new Set<string>();
 
@@ -242,7 +251,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     if (landedCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(id, meta);
     if (landedCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
-    if (credited) updateClassPosterior(gapClassOf(gap), true);
+    if (credited) updateClassPosterior(gapClassOf(gap), true, { gap_id: id, event_id: land.commit_sha ? `sha:${land.commit_sha}` : null, ...(land.vessel ? { repo: land.vessel } : {}) });
     // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing), once per (gap, landing).
     // Best-effort — never throw; wrapped in its own try/catch.
     if (credited) try {
@@ -251,23 +260,8 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
         ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).detector
         : undefined;
       if (typeof detectorName === "string" && detectorName.length > 0) {
-        const ledgerPath: string = process.env.DETECTOR_CLOSURE_LEDGER_PATH ?? "/workspace/detector-closure-credit.json";
-        type LedgerEntry = { closures: number; last_closed_at: string };
-        type Ledger = Record<string, LedgerEntry>;
-        let ledger: Ledger = {};
-        if (existsSync(ledgerPath)) {
-          try {
-            ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as Ledger;
-          } catch {
-            ledger = {};
-          }
-        }
-        const existing: LedgerEntry | undefined = ledger[detectorName];
-        ledger[detectorName] = {
-          closures: (existing?.closures ?? 0) + 1,
-          last_closed_at: new Date().toISOString(),
-        };
-        writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf8");
+        // I4a: written through to the holder, referenced by the landing sha (the same once-per-(gap, landing) credit).
+        void creditLearning({ table: "detector_credit", key: detectorName, outcome: "closure", gap_id: id, event_id: land.commit_sha ? `sha:${land.commit_sha}` : null, ...(land.vessel ? { repo: land.vessel } : {}) });
       }
     } catch {
       // best-effort ledger write — never propagate
@@ -481,7 +475,7 @@ function escalateRelandToHuman(gapId: string, category: string, summary: string,
   if (!gapId || solicitedHumanGaps.has(gapId)) return;
   solicitedHumanGaps.add(gapId);
   // A re-land is the retrospective FALSE-CLOSE label for the landed-commit class: grade the oracle.
-  recordCloseVerdict("landed_commit", true);
+  recordCloseVerdict("landed_commit", true, { gap_id: gapId, event_id: `reland:${gapId}` });
   const rel = closeOracleReliability("landed_commit");
   const relNote = ` [close-oracle landed-commit reliability so far: ${(rel.reliability * 100).toFixed(0)}% (${rel.closes} closes, ${rel.false_closes} re-lands)]`;
   void ask({ type: "uiQuestion_write", id: "reland-needs-human-" + gapId, title: "Gap re-lands without closing — needs a human decision", body: "Gap " + gapId + " (" + category + ") has had multiple substrate-authored landings, none of which resolved its condition (the close-oracle abstains — out of coverage). The automated fix keeps landing an inert or wrong change. It likely needs a human: redefine the goal, supply the missing fact, grant access, or drop it. Summary: " + summary.slice(0, 300) + relNote, kind: "gap_reland_needs_human", importance: "high" } as never)
@@ -1260,7 +1254,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   const alreadySettled = (await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length > 0;
   if (!alreadySettled) {
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id } : {});
-    updateClassPosterior(gapClassOf(g), false);
+    updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
   }
   console.warn(`[gap-sweep] FALSIFIED autonomous landing gap=${String(g.id)} sha=${sha.slice(0, 12)} vessel=${vessel} attempt=${attemptId} — its predicate still reports the defect after ${vessel} restarted onto it; recorded regressed_by, held from re-pick until reverted`);
@@ -1286,7 +1280,7 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   const sha = String(rb.sha ?? "");
   if ((await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length === 0) {
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id } : {});
-    updateClassPosterior(gapClassOf(g), false);
+    updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
   }
   const lessons = Array.isArray(meta.failure_lessons) ? [...(meta.failure_lessons as unknown[])] : [];
@@ -2043,7 +2037,7 @@ const pending = candidates.unheld
       // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit
       // never accrues a fake success from a commit count — it earns trust only via human confirmation
       // (solicitation-outcome-scan) and loses it on re-lands. That asymmetry is deliberate.
-      if (credited) recordCloseVerdict("measured", false);
+      if (credited) recordCloseVerdict("measured", false, { gap_id: String(g.id), event_id: `sha:${sha}` });
       const sweepClosedMeta: Record<string, unknown> = {
         ...meta,
         // Under the lane's own semantic dissent the landing is partial (landedCloseReason), never verified.
@@ -2074,7 +2068,7 @@ const pending = candidates.unheld
       if (sweepCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(String(g.id), sweepClosedMeta);
       if (sweepCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(String(g.id), sweepClosedMeta);
       // Calibration land credit is taken by the gap-store holder from the close written above.
-      if (credited) updateClassPosterior(gapClassOf(g), true);
+      if (credited) updateClassPosterior(gapClassOf(g), true, { gap_id: String(g.id), event_id: `sha:${sha}` });
       // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.
       if (sweepCloseWrite?.shape !== "structuredError") await resolveDissentOutcome(String(g.id), { result: "passed" }).catch(dissentOutcomeUnwritten(String(g.id), "passed"));
       out.closed += 1;
@@ -2127,8 +2121,8 @@ const pending = candidates.unheld
  */
 export interface PwtEscalationDeps {
   resolvePwt: (p: Record<string, unknown>) => Promise<ResolverResult>;
-  updateClassPosterior: (cls: string, landed: boolean) => void;
-  bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string }) => Promise<void>;
+  updateClassPosterior: (cls: string, landed: boolean, ref?: CreditRef) => void;
+  bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string; out?: { failed_attempts?: number } }) => Promise<void>;
   closeLandedGap: (gap: Record<string, unknown>, land: LandSignal, ref?: { decision_id?: string; ask?: Ask }) => Promise<{ closed: boolean; error?: string }>;
   persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
   /** Whether the hold a pwt_escalation_held stamp names still reads held (lib/operator-hold.ts readOperatorHold). */
@@ -2206,8 +2200,9 @@ export async function escalateApplyFailureToPwt(
     }
   }
   if (!_pwtLanded && !held) {
-    if (!isInfraRefusalBody(cb)) deps.updateClassPosterior(gapClassOf(gap), false);
-    await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p, decisionId: ref.decision_id });
+    const bumped: { failed_attempts?: number } = {};
+    await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p, decisionId: ref.decision_id, out: bumped });
+    if (!isInfraRefusalBody(cb)) deps.updateClassPosterior(gapClassOf(gap), false, { gap_id: String(gap.id), event_id: failureEventId(gap, ref.decision_id, bumped) });
   }
   return { escalated, landed: _pwtLanded, held, skipped_held: stillHeld };
 }
@@ -2217,30 +2212,19 @@ function readCloseOracleCalib(): CloseOracleCalib {
   try { const p = closeOracleCalibPath(); return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as CloseOracleCalib) : {}; }
   catch { return {}; }
 }
-function recordCloseVerdict(evidenceClass: string, falseClose: boolean): void {
-  try {
-    const c = readCloseOracleCalib();
-    const k = evidenceClass || "unknown";
-    const rec = c[k] ?? { closes: 0, false_closes: 0 };
-    if (falseClose) rec.false_closes += 1; else rec.closes += 1;
-    c[k] = rec;
-    writeFileSync(closeOracleCalibPath(), JSON.stringify(c));
-  } catch { /* best-effort */ }
+function recordCloseVerdict(evidenceClass: string, falseClose: boolean, ref: CreditRef): void {
+  // I4a: written through to the holder (journaled, replayed, referenced): the same verdicts, stored once fleet-wide.
+  void creditLearning({ table: "close_oracle", key: evidenceClass || "unknown", outcome: falseClose ? "false_close" : "close", gap_id: ref.gap_id, event_id: ref.event_id });
 }
 // Operator-verdict-corpus calibration (§12.6 step 1b): when a HUMAN answers a re-land escalation
 // (read back via solicitation_outcome_scan over obsidian interaction episodes), that engagement is
 // an operator verdict corroborating the abstain — the oracle calibrating against the operator
 // corpus, not just against reality's re-detection. Tracked honestly as engagement (met/unmet), not
 // folded into the reliability posterior as a fake polar verdict, since met/unmet carries no polarity.
-export function recordOperatorEngagement(evidenceClass: string): void {
-  try {
-    const c = readCloseOracleCalib();
-    const k = evidenceClass || "unknown";
-    const rec = c[k] ?? { closes: 0, false_closes: 0 };
-    rec.operator_engaged = (rec.operator_engaged ?? 0) + 1;
-    c[k] = rec;
-    writeFileSync(closeOracleCalibPath(), JSON.stringify(c));
-  } catch { /* best-effort */ }
+export function recordOperatorEngagement(evidenceClass: string, solicitationId: string): void {
+  // I4a: written through to the holder, referenced by the answered solicitation (one count per solicitation).
+  const gapId = solicitationId.startsWith("reland-needs-human-") ? solicitationId.slice("reland-needs-human-".length) : "";
+  void creditLearning({ table: "close_oracle", key: evidenceClass || "unknown", outcome: "operator_engaged", gap_id: gapId, event_id: gapId ? `engagement:${solicitationId}` : null });
 }
 /** Beta-mean reliability of the close-oracle at an evidence class: P(a close of this class holds). */
 export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number; operator_engaged: number } {
@@ -2330,9 +2314,10 @@ export async function gradeCapabilityCompose(gap: Record<string, unknown>, cb: R
   } else if (isTerminalRefusalResult(cb)) {
     await markTerminalRefusal(gap, cb);
   } else if (!isNonAttemptComposeResult(cb)) {
-    if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
     // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
-    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate });
+    const bumped: { failed_attempts?: number } = {};
+    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate, out: bumped });
+    if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false, { gap_id: String(gap.id), event_id: failureEventId(gap, decisionId, bumped) });
   }
   return { land, closed };
 }
@@ -2492,8 +2477,9 @@ export async function gradeSliceSequence(gap: Record<string, unknown>, lastBody:
   // A slice sequence cut short by a capacity refusal never got its attempt either.
   if (!allOk && !dryRun && isTerminalRefusalResult(lastBody)) await markTerminalRefusal(gap, lastBody);
   else if (!allOk && !dryRun && !isNonAttemptComposeResult(lastBody)) {
-    if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
-    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate });
+    const bumped: { failed_attempts?: number } = {};
+    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate, out: bumped });
+    if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false, { gap_id: String(gap.id), event_id: failureEventId(gap, decisionId, bumped) });
   }
   return sliceLand;
 }

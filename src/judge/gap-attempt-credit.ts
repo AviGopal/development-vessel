@@ -22,6 +22,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
+import { isGapStoreHolder, writeThroughLearning } from "./learning-credit.js";
 
 // LANDABILITY-RANKED SELECTION (2026-06-28). gap_to_feature historically picked gaps[0]
 // (arbitrary order), so the autonomous loop kept selecting hard META/ARCHITECTURAL gaps
@@ -262,7 +263,14 @@ function backfillClassPosteriors(): ClassPosteriors {
   } catch { /* best-effort; an empty store is fine */ }
   return out;
 }
-export function updateClassPosterior(cls: string, landed: boolean): void {
+/** The event a credit names (I4a): the gap it is about and a record the holder can resolve (sha:, decision:, reland:,
+ *  engagement:), or null when the call site holds none (journaled unreferenced, never invented). */
+export type CreditRef = { gap_id: string; event_id: string | null; repo?: string };
+export function updateClassPosterior(cls: string, landed: boolean, ref?: CreditRef): void {
+  // I4a: written through to the gap-store holder (journaled, replayed, referenced). Same call sites and decisions.
+  // Every node keeps its local write (below, unchanged); a non-holder ALSO writes the credit through to the holder.
+  if (ref && !isGapStoreHolder()) void writeThroughLearning({ table: "class_posteriors", key: cls, outcome: landed ? "landed" : "failed", gap_id: ref.gap_id, event_id: ref.event_id, ...(ref.repo ? { repo: ref.repo } : {}) });
+  if (!ref) console.warn(`[learning-credit] updateClassPosterior(${cls}) without a reference: local write only (an unconverted caller)`);
   try {
     const p = readClassPosteriors();
     const rec = p[cls] ?? { alpha: 1, beta: 1 };
@@ -394,7 +402,7 @@ export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Reco
 // Exported for unit test only (the investigation caller's one-decomposition-per-gap guard). No call-site change.
 // `decisionId` is the pick's approach decision (resolveGapToFeature's attempt.id): the failure joins THAT decision.
 // Without it the join was positional (newest unjoined entry), so two overlapping picks of one gap swapped outcomes.
-export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string; escalate?: (gap: Record<string, unknown>, why: string) => Promise<unknown> } = {}): Promise<void> {
+export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string; escalate?: (gap: Record<string, unknown>, why: string) => Promise<unknown>; out?: { failed_attempts?: number } } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
     if (!id) return;
@@ -450,6 +458,8 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
       console.log(`[gap-to-feature] failed-attempt bump for ${id} not written: the row is no longer open`);
       return;
     }
+    // I4a: the value this bump wrote, the failure's durable reference (attempt:<gap>#<n>) for its class credit.
+    if (opts.out && bumpWrite?.shape !== "structuredError") opts.out.failed_attempts = fa;
     // Emit narrowed child gap when the gap has now reached the chronic-failure
     // threshold (>= 3 failed_attempts). The child carries a tighter description
     // and resets failed_attempts to 0 so it re-enters the dispatch queue at

@@ -59,6 +59,8 @@ const readJson = <T>(p: string, dflt: T): T => { try { return existsSync(p) ? (J
 /** This node holds the gap store (the same test substrate-gap's forwarding uses: one definition). */
 export const isGapStoreHolder = (): boolean => gapStoreIsLocal();
 const isHolder = isGapStoreHolder;
+/** The shapes this module serves from the gap-store holder's learning tables: held data, like the gap store's own. */
+export const LEARNING_CREDIT_HELD_SHAPES = ["gapLearningCredit_write"] as const;
 const creditKey = (c: LearningCredit): string => `${c.key}|${c.event_id}|${c.outcome}`;
 
 // ── the holder's apply ────────────────────────────────────────────────────────────────────────────────────────────

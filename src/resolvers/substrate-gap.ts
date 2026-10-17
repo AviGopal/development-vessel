@@ -123,6 +123,9 @@ export async function baselineEarnedRecordFromStore(): Promise<{ alpha: number; 
 
 /** Whether this node holds the gap store (no holder endpoint configured): the one test every gap-store caller uses. */
 export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDPOINT"]; }
+/** The shapes whose resolvers in THIS module read or write the gap store (gaps.json and its leases): HELD data, so a
+ *  router must take them to the holder's own route, never to an interchangeable peer (discovery held-shape routing). */
+export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write"] as const;
 
 export async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];

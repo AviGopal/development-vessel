@@ -91,6 +91,10 @@ async function saveNotes(notes: MemoryNote[]): Promise<void> {
   await rename(tmp, NOTES_PATH());
 }
 
+/** The shapes whose resolvers in THIS module read or write this node's memory-note store: held data (the store is this
+ *  node's own; nothing forwards it), so a router must take them to this node's producer. */
+export const MEMORY_NOTE_HELD_SHAPES = ["memoryNote", "memoryNote_write"] as const;
+
 export async function resolveMemoryNote(
   pointer: MemoryNoteReadPointer,
 ): Promise<ResolverResult> {

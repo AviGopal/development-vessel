@@ -1,4 +1,19 @@
 import { config } from "./config.js";
+import { GAP_STORE_HELD_SHAPES, gapStoreIsLocal } from "./resolvers/substrate-gap.js";
+import { MEMORY_NOTE_HELD_SHAPES } from "./resolvers/memory-note.js";
+import { LEARNING_CREDIT_HELD_SHAPES } from "./judge/learning-credit.js";
+
+/** Per-shape held-data policies for the advertised shapes, from the store modules' own declarations. The holder names
+ *  which store: this node's gap store when it holds it, else the designated holder it forwards to; its own memory store. */
+export function heldShapePolicies(advertised: readonly string[]): Record<string, { distribution_policy: "stateful_data_owner_pin"; holder: string }> {
+  const gapHolder = gapStoreIsLocal() ? `gap-store@${config.vesselId}` : "gap-store@designated-holder";
+  const out: Record<string, { distribution_policy: "stateful_data_owner_pin"; holder: string }> = {};
+  const add = (shapes: readonly string[], holder: string) => { for (const s of shapes) if (advertised.includes(s)) out[s] = { distribution_policy: "stateful_data_owner_pin", holder }; };
+  add(GAP_STORE_HELD_SHAPES, gapHolder);
+  add(LEARNING_CREDIT_HELD_SHAPES, gapHolder);
+  add(MEMORY_NOTE_HELD_SHAPES, `memory-store@${config.vesselId}`);
+  return out;
+}
 import {
   generateKeyPairSync,
   createPrivateKey,
@@ -64,7 +79,10 @@ function identityFields(vesselId: string): Record<string, unknown> {
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let registered = false;
 
-function buildRegistrationPayload() {
+export function buildRegistrationPayload() {
+  const advertised: readonly string[] = 'conceptDbReachable' in config && config.conceptDbReachable === false
+    ? config.discovery.shapes.filter((s: string) => !['concept_usage_record', 'concept_search_by_source', 'concept_select_for_prompt'].includes(s))
+    : config.discovery.shapes;
   return {
     vesselId: config.vesselId,
     vesselName: "development-vessel",
@@ -88,13 +106,15 @@ function buildRegistrationPayload() {
     // concept_select_for_prompt answers `selected: []`. A caller cannot distinguish an empty
     // answer from an absent store, so the shortcoming is never discovered by attempting it.
     // Withholding makes the gap honest and lets any hub-served equivalent win the route.
-    shapes: 'conceptDbReachable' in config && config.conceptDbReachable === false
-      ? config.discovery.shapes.filter((s: string) => !['concept_usage_record', 'concept_search_by_source', 'concept_select_for_prompt'].includes(s))
-      : config.discovery.shapes,
+    shapes: advertised,
     // Resolver-DESCRIPTION advertisement (2026-06-28): pass per-shape
     // descriptions so a decomposition planner can match this vessel's resolvers
     // from their descriptions alone (no hand-written hint). Optional/backward-compat.
     shape_descriptions: config.discovery.shapeDescriptions,
+    // HELD SHAPES (discovery held-shape-routing): each store module declares the shapes its resolvers serve from data THIS
+    // node holds (or, for the gap store on a non-holder, forwards to its designated holder); routers take those to this
+    // node's own producer, never to an interchangeable peer. Only advertised shapes are listed.
+    shape_policies: heldShapePolicies(advertised),
     resolve_endpoint: config.discovery.resolveEndpoint,
     resolve_request_format: config.discovery.resolveRequestFormat,
     auth_scheme: config.discovery.authScheme,

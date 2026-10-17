@@ -1746,13 +1746,19 @@ function existingRowGates(
  * forward would fail as well). The class-match fallback (a fresh timestamped id landing on an open row of
  * its class) is the holder's alone: here only the exact id is checked.
  */
+/** Mask any `ApiKey <token>` / `Bearer <token>` in text that is about to be logged (a remote body may echo a credential). */
+export function redactAuthTokens(text: string): string {
+  return text.replace(/\b(ApiKey|Bearer)(\s+)[^\s"'\\,}\]]+/gi, "$1$2[redacted]");
+}
 async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>, audit: { from?: string }): Promise<ResolverResult> {
   const id = String(incoming["id"]);
   const status = String(incoming["status"] ?? "open");
   const read = await forwardToGapStore({ type: "substrateGap", id, limit: 5 });
   const rows = (read?.body as { gaps?: unknown } | undefined)?.gaps;
   if (!read || read.shape !== "substrateGap" || !Array.isArray(rows)) {
-    console.warn(`[substrate-gap] NOT forwarded ${id}: the gap-store holder could not be read, so the write gates cannot be applied`);
+    // The holder's own answer (timeout vs refusal vs HTTP status) goes in the log, so a node's journal can say WHY it is unreadable.
+    // It is a REMOTE body, so any credential it echoes (an auth refusal quoting the header) is masked before it is logged.
+    console.warn(`[substrate-gap] NOT forwarded ${id}: the gap-store holder could not be read, so the write gates cannot be applied (holder said: ${redactAuthTokens(JSON.stringify(read?.body ?? null)).slice(0, 200)})`);
     return {
       shape: "structuredError",
       body: {

@@ -219,7 +219,9 @@ describe("the caller's side: journal, outage, replay, unreferenced", () => {
     expect(journal().filter((r) => r.state === "pending").length).toBe(0);
     await lc.replayLearningJournal();
     for (const k of keys) expect(readH("class")[k]).toEqual({ alpha: 2, beta: 1 });
-  });
+    // Six credits reach the stand-in holder one at a time, and each is a fresh bun process importing this module graph
+    // (~0.9 s each, 5.5 s measured at load < 8): the default 5 s is the fixture's cost, not the code's.
+  }, 30_000);
 
   it("[CONTROL] UNREFERENCED: a call site with no reference journals it and credits nothing AT THE HOLDER (its local write is made, as before)", async () => {
     asNonHolder();

@@ -57,9 +57,9 @@ export function rankNormalise(values: number[]): number[] {
 }
 
 /** Sample one θ per term from the shaped weights (Beta(1,1) where the record says nothing). */
-export function sampleTermWeights(weights: PriorityWeights | null | undefined): Record<PriorityTerm, number> {
+export function sampleTermWeights(weights: PriorityWeights | null | undefined, rng?: () => number): Record<PriorityTerm, number> {
   const posteriors = Object.fromEntries(PRIORITY_TERMS.map((t) => [t, weights?.[t] ?? { alpha: 1, beta: 1 }])) as Record<string, TermBeta>;
-  return Object.fromEntries(PRIORITY_TERMS.map((t) => [t, sampleClassTheta(t, posteriors)])) as Record<PriorityTerm, number>;
+  return Object.fromEntries(PRIORITY_TERMS.map((t) => [t, sampleClassTheta(t, posteriors, rng)])) as Record<PriorityTerm, number>;
 }
 
 export type RankedByTerms = { g: Row; s: number; ranks: Record<PriorityTerm, number>; values: Record<PriorityTerm, number> };

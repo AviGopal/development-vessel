@@ -26,9 +26,9 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
-import { resolveSubstrateGap, forwardToGapStore, gapStoreIsLocal } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, forwardToGapStore, gapStoreIsLocal, baselineEarnedRecordFromStore, BASELINE_ARM } from "../resolvers/substrate-gap.js";
 
-export type LearningTable = "class_posteriors" | "close_oracle" | "detector_credit";
+export type LearningTable = "class_posteriors" | "close_oracle" | "detector_credit" | "priority_weights";
 export type LearningOutcome = "landed" | "failed" | "close" | "false_close" | "operator_engaged" | "closure";
 export type LearningCredit = { table: LearningTable; key: string; outcome: LearningOutcome; gap_id: string; event_id: string; repo?: string; created_at: string };
 export type CreditStatus = "applied" | "duplicate" | "unresolved" | "refused";
@@ -38,11 +38,16 @@ const OUTCOMES: Record<LearningTable, readonly LearningOutcome[]> = {
   class_posteriors: ["landed", "failed"],
   close_oracle: ["close", "false_close", "operator_engaged"],
   detector_credit: ["closure"],
+  // I3 (qa ruling (A) + refinement): the pick ranking's variant arms (variant:baseline, variant:terms) and its term
+  // weights (term:impact, …), Beta α/β like the class posterior, credited by the pick's decision.
+  priority_weights: ["landed", "failed"],
 };
 /** The table files, the same paths their former local writers used (read at call time). */
 export const tablePath = (t: LearningTable): string =>
   t === "class_posteriors" ? (process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json")
   : t === "close_oracle" ? (process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json")
+  // the priority weights live beside the class posteriors (a new table needs no location of its own)
+  : t === "priority_weights" ? join(dirname(process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json"), "gap-priority-weights.json")
   : (process.env["DETECTOR_CLOSURE_LEDGER_PATH"] ?? "/workspace/detector-closure-credit.json");
 const appliedPath = (t: LearningTable): string => `${tablePath(t)}.applied.json`;
 /** The write-ahead journal lives beside the learned tables (no location of its own: one bootstrap location for the state). */
@@ -116,11 +121,11 @@ export async function resolveCreditReference(c: LearningCredit): Promise<{ statu
   return val === `reland-needs-human-${c.gap_id}` ? { status: "resolved", reason: "answered re-land solicitation of the gap" } : { status: "refused", reason: "engagement names another solicitation" };
 }
 /** The math, unchanged from the former local writers. */
-function applyMath(table: LearningTable, key: string, outcome: LearningOutcome, at: string): void {
+function applyMath(table: LearningTable, key: string, outcome: LearningOutcome, at: string, initial?: { alpha: number; beta: number }): void {
   const p = tablePath(table);
   const t = readJson<Record<string, Record<string, unknown>>>(p, {});
-  if (table === "class_posteriors") {
-    const r = (t[key] ?? { alpha: 1, beta: 1 }) as { alpha: number; beta: number };
+  if (table === "class_posteriors" || table === "priority_weights") {
+    const r = (t[key] ?? initial ?? { alpha: 1, beta: 1 }) as { alpha: number; beta: number };
     if (outcome === "landed") r.alpha += 1; else r.beta += 1;
     t[key] = r;
   } else if (table === "close_oracle") {
@@ -140,12 +145,23 @@ export async function applyCreditAtHolder(c: LearningCredit): Promise<{ status: 
   if (ref.status !== "resolved") return { status: ref.status, reason: ref.reason };
   // CONCURRENT CREDITS: the applied set and the table are re-read AFTER the await and the check-apply-record runs with no
   // await in between (one JS turn), so two credits in flight never both apply, and neither overwrites the other's record.
+  const initial = await seedFor(c.table, c.key);
   const applied = new Set(readJson<string[]>(appliedPath(c.table), []));
   if (applied.has(creditKey(c))) return { status: "duplicate", reason: "already applied" };
-  applyMath(c.table, c.key, c.outcome, new Date().toISOString());
+  applyMath(c.table, c.key, c.outcome, new Date().toISOString(), initial);
   applied.add(creditKey(c));
   writeFileSync(appliedPath(c.table), JSON.stringify([...applied]));
   return { status: "applied", reason: ref.reason };
+}
+
+/** I3 cold start (qa ruling (a)): the BASELINE ranking arm starts from its EARNED record, the joined outcomes of the picks
+ *  it made before the terms variant existed (substrate-gap.ts baselineEarnedRecord), persisted at its first credit. Every
+ *  other arm (the terms variant, each term) starts uninformed, Beta(1,1). No prior constant is declared. */
+async function seedFor(table: LearningTable, key: string): Promise<{ alpha: number; beta: number } | undefined> {
+  if (table !== "priority_weights" || key !== BASELINE_ARM) return undefined;
+  const t = readJson<Record<string, unknown>>(tablePath(table), {});
+  if (t[key]) return undefined;
+  try { return await baselineEarnedRecordFromStore(); } catch { return undefined; }
 }
 
 // ── the caller's side: journal, send, replay ─────────────────────────────────────────────────────────────────────
@@ -208,8 +224,9 @@ export async function creditLearning(c: Omit<LearningCredit, "created_at" | "eve
   // EVERY node keeps the LOCAL write it always made (the same math, in place, best-effort): on the holder that IS the
   // table; elsewhere it is the fallback copy the held read uses when the holder is unavailable. A NON-holder ALSO writes
   // the credit through to the holder (journaled, referenced, idempotent there). qa ruling 2026-10-17: pinned local writes
-  // unchanged on every node.
-  try { applyMath(c.table, c.key, c.outcome, new Date().toISOString()); } catch (e) { console.warn(`[learning-credit] local write failed for ${c.table} ${c.key}: ${String(e).slice(0, 160)}`); }
+  // unchanged on every node. I3: the baseline ranking arm's first write starts from its earned record (seedFor).
+  const initial = await seedFor(c.table, c.key);
+  try { applyMath(c.table, c.key, c.outcome, new Date().toISOString(), initial); } catch (e) { console.warn(`[learning-credit] local write failed for ${c.table} ${c.key}: ${String(e).slice(0, 160)}`); }
   if (!isHolder()) await writeThroughLearning(c);
 }
 /** The write-through alone (a non-holder's credit to the holder): journal first, then send and replay. The holder never

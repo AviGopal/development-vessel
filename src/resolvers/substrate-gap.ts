@@ -38,7 +38,7 @@ import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join, resolve as resolvePath, sep } from "node:path";
+import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
@@ -80,14 +80,45 @@ const LEARNING_CREDIT_PATHS = {
   class_posteriors: () => process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json",
   close_oracle: () => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json",
   detector_credit: () => process.env["DETECTOR_CLOSURE_LEDGER_PATH"] ?? "/workspace/detector-closure-credit.json",
+  // beside the class posteriors (a new table needs no location of its own)
+  priority_weights: () => join(dirname(process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json"), "gap-priority-weights.json"),
 } as const;
-function readLearningCredit(): Record<keyof typeof LEARNING_CREDIT_PATHS, Record<string, unknown>> {
+function readLearningCredit(rows?: readonly SubstrateGap[]): Record<keyof typeof LEARNING_CREDIT_PATHS, Record<string, unknown>> {
   const out = {} as Record<keyof typeof LEARNING_CREDIT_PATHS, Record<string, unknown>>;
   for (const k of Object.keys(LEARNING_CREDIT_PATHS) as Array<keyof typeof LEARNING_CREDIT_PATHS>) {
     try { const f = LEARNING_CREDIT_PATHS[k](); out[k] = existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>) : {}; }
     catch { out[k] = {}; }
   }
+  // I3 cold start: the baseline arm, absent from the table until its first credit, is SERVED from its earned record (pure:
+  // nothing is written on this read; applyMath persists the same seed at the first credit).
+  if (rows && !out.priority_weights[BASELINE_ARM]) out.priority_weights = { ...out.priority_weights, [BASELINE_ARM]: baselineEarnedRecord(rows) };
   return out;
+}
+
+/** The ranking arm every pick used before the terms variant existed. */
+export const BASELINE_ARM = "variant:baseline";
+/**
+ * The baseline arm's EARNED record (qa ruling (a), I3): every joined pick decision in the store that the baseline made
+ * (no priority decision recorded, i.e. before the variant existed, or variant "baseline"), landed or not. Derived from the
+ * gap ledger's own approach_decisions, never declared. Beta(1 + landed, 1 + not landed).
+ */
+export function baselineEarnedRecord(rows: readonly SubstrateGap[]): { alpha: number; beta: number } {
+  let landed = 0, other = 0;
+  for (const g of rows) {
+    const ds = ((g.classification_metadata ?? {}) as Record<string, unknown>)["approach_decisions"];
+    if (!Array.isArray(ds)) continue;
+    for (const d of ds) {
+      if (!d || typeof d !== "object") continue;
+      const e = d as { outcome?: { landed?: unknown }; priority?: { variant?: unknown } };
+      if (!e.outcome || typeof e.outcome !== "object") continue;
+      if (e.priority && e.priority.variant !== "baseline") continue;
+      if (e.outcome.landed === true) landed++; else other++;
+    }
+  }
+  return { alpha: 1 + landed, beta: 1 + other };
+}
+export async function baselineEarnedRecordFromStore(): Promise<{ alpha: number; beta: number }> {
+  return baselineEarnedRecord((await loadGapsForRead()).rows);
 }
 
 /** Whether this node holds the gap store (no holder endpoint configured): the one test every gap-store caller uses. */
@@ -1462,7 +1493,7 @@ export async function resolveSubstrateGap(
       // "how many open gaps can never close?" is answerable from any read instead
       // of by hand-grepping the store file.
       falsifier_coverage: structuredClone(snap.coverage),
-      ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration(), learning_credit: readLearningCredit() } : {}),
+      ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration(), learning_credit: readLearningCredit(gaps) } : {}),
     },
   };
 }

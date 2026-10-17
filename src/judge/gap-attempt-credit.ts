@@ -22,7 +22,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
-import { isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
+import { creditLearning, isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
 
 // LANDABILITY-RANKED SELECTION (2026-06-28). gap_to_feature historically picked gaps[0]
 // (arbitrary order), so the autonomous loop kept selecting hard META/ARCHITECTURAL gaps
@@ -185,7 +185,7 @@ type CalibRec = Record<string, { attempts: number; lands: number }>;
 let heldCalibration: CalibRec | null = null;
 // I4: the learning credit tables the holder serves beside it (class_posteriors, close_oracle, detector_credit), cached by
 // the same refresh. null = not read this refresh: each reader then uses its local file, logged once per refresh.
-export type LearningCreditTable = "class_posteriors" | "close_oracle" | "detector_credit";
+export type LearningCreditTable = "class_posteriors" | "close_oracle" | "detector_credit" | "priority_weights";
 let heldLearningCredit: Partial<Record<LearningCreditTable, Record<string, unknown>>> | null = null;
 let heldFallbackLogged = new Set<LearningCreditTable>();
 export async function refreshHeldCalibration(): Promise<void> {
@@ -217,7 +217,8 @@ export function learningTableSource(table: LearningCreditTable): LearningSource 
 }
 export function heldLearningTable(table: LearningCreditTable): Record<string, unknown> | null {
   // The holder's own files ARE the tables (and fresher than any cached copy): its readers read them, unchanged, unlogged.
-  if (isGapStoreHolder()) { lastLearningSource[table] = "holder_local"; return null; }
+  // priority_weights (I3) has no older local reader: on the holder its refreshed copy (with the baseline's served seed) is it.
+  if (isGapStoreHolder() && table !== "priority_weights") { lastLearningSource[table] = "holder_local"; return null; }
   const t = heldLearningCredit?.[table];
   // NEVER SUMMED (qa condition 2): a reader takes the held table OR, when it is unavailable, its local file; the two are
   // never added (the local copy holds this node's own credits, which the held table already counts).
@@ -321,15 +322,17 @@ export function updateClassPosterior(cls: string, landed: boolean, ref?: CreditR
   } catch { /* best-effort */ }
 }
 // Exploration floor: every class samples from at least Beta(1,1) + its counts, never hard-zero mass.
-export function sampleClassTheta(cls: string, posteriors?: ClassPosteriors): number {
+/** `rng` is the uniform source (Math.random unless a caller passes its own stream, as the priority draws do, so they never
+ *  move the shared sequence the class rerank and its pinned tests draw from). */
+export function sampleClassTheta(cls: string, posteriors?: ClassPosteriors, rng: () => number = Math.random): number {
   const rec = (posteriors ?? readClassPosteriors())[cls] ?? { alpha: 1, beta: 1 };
   const g = (k: number): number => { // Marsaglia-Tsang Gamma(k,1); valid for k >= 1
     const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
     for (;;) {
       let x = 0, v = 0;
-      do { x = Math.sqrt(-2 * Math.log(Math.random() || 1e-12)) * Math.cos(2 * Math.PI * Math.random()); v = 1 + c * x; } while (v <= 0);
+      do { x = Math.sqrt(-2 * Math.log(rng() || 1e-12)) * Math.cos(2 * Math.PI * rng()); v = 1 + c * x; } while (v <= 0);
       v = v * v * v;
-      const u = Math.random();
+      const u = rng();
       if (u < 1 - 0.0331 * x * x * x * x || Math.log(u || 1e-12) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
     }
   };
@@ -479,7 +482,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
       ? { human_exemption_attempts_remaining: exRem - 1, human_exemption_spent_at: new Date().toISOString() }
       : {};
     const meta = { ...meta0, ...exemptionPatch, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
-    joinDecisionOutcome(meta, { landed: false }, opts.decisionId ? { decision_id: opts.decisionId } : {});
+    joinDecisionOutcome(meta, { landed: false }, opts.decisionId ? { decision_id: opts.decisionId, gap_id: id } : {});
     const bumpWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       // Conditional: a row closed since the fresh read above stays closed (no reopen, no compose pickup).
@@ -566,7 +569,13 @@ export function isHighConfidenceMiss(decs: unknown): boolean {
 }
 
 /** Records the pick's decision and returns its decision_id (null when the write could not be built). */
+/** I3: the pick's priority decision (variant, θ, the full pool term-rank vector), registered by the pick for the gap it
+ *  chose and consumed by that gap's next recordApproachDecision (one per gap; a newer pick replaces it). */
+const pendingPriority = new Map<string, Record<string, unknown>>();
+export function setPendingPriorityDecision(gapId: string, priority: Record<string, unknown>): void { if (gapId) pendingPriority.set(gapId, priority); }
 export async function recordApproachDecision(gap: Record<string, unknown>): Promise<string | null> {
+  const priority = pendingPriority.get(String(gap.id ?? ""));
+  pendingPriority.delete(String(gap.id ?? ""));
   try {
     const pred = predictLand(gap);
     const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
@@ -580,6 +589,9 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
       predicted_land: pred.predicted,
       edit_site: meta.edit_site ? String(meta.edit_site) : "",
       alternatives: ["full-scope-compose"],
+      // I3: the priority decision (variant, θ, the full pool term-rank vector) the pick took, for its credit and for a
+      // later re-attribution (per-term credit is CORRELATED; the vector lets it be re-computed).
+      ...(priority ? { priority } : {}),
     });
     while (arr.length > 5) arr.shift();
     meta.approach_decisions = arr;
@@ -589,6 +601,24 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
     } as never);
     return decisionId;
   } catch { /* best-effort */ return null; }
+}
+
+/**
+ * I3c: THE PICK'S PRIORITY DECISION IS CREDITED WHEN ITS OUTCOME JOINS (qa ruling (A) + refinement). The variant arm that
+ * chose (variant:baseline / variant:terms) is credited landed on a verified FAVORABLE landing and failed otherwise; under
+ * the terms variant, each term whose rank put the chosen gap ABOVE the pool's median is credited the same way. That
+ * per-term credit is CORRELATED (terms co-vary), not causal attribution: the full pool vector stays on the decision.
+ * Written through to the holder (learning-credit.ts, table priority_weights), referenced by the decision itself.
+ */
+function creditPriorityDecision(entry: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; gap_id?: string }): void {
+  const p = entry.priority as { variant?: unknown; pool?: Array<{ id?: unknown; ranks?: Record<string, number> }> } | undefined;
+  if (!p || (p.variant !== "baseline" && p.variant !== "terms") || !ref.decision_id || !ref.gap_id) return;
+  const landed = outcome.landed === true && outcome.verdict === "FAVORABLE";
+  const credit = (key: string) => void creditLearning({ table: "priority_weights", key, outcome: landed ? "landed" : "failed", gap_id: ref.gap_id!, event_id: `decision:${ref.decision_id}` });
+  credit(`variant:${p.variant}`);
+  if (p.variant !== "terms") return;
+  const chosen = (p.pool ?? []).find((x) => String(x.id ?? "") === ref.gap_id)?.ranks;
+  for (const [term, r] of Object.entries(chosen ?? {})) if (typeof r === "number" && r > 0.5) credit(`term:${term}`);
 }
 
 /** How each joinDecisionOutcome call was attributed, since process start. by_id: joined the entry its decision_id
@@ -605,7 +635,7 @@ export function decisionJoinCounters(): Readonly<typeof decisionJoinCounts> { re
  *  with two or more it does not guess (guessing is what swapped the outcomes of two overlapping picks); the outcome
  *  is appended as its own entry marked unattributed. Each path is counted (decisionJoinCounters) and logged. It
  *  never writes onto another node's decision: two nodes picking one gap each keep their own decision/outcome pair. */
-export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string } = {}): boolean {
+export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string; gap_id?: string } = {}): boolean {
   const node = ref.node ?? decisionNode();
   // An absent or fully-joined decision list is not a reason to discard a terminal outcome.
   // recordApproachDecision pushes a fresh unjoined entry on every PICK, so the ordinary
@@ -636,6 +666,7 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
     if (entry) {
       decisionJoinCounts.by_id += 1;
       entry.outcome = { ...outcome, joined_at: new Date().toISOString() };
+      creditPriorityDecision(entry, outcome, ref);
       return true;
     }
     decisionJoinCounts.by_id_appended += 1;

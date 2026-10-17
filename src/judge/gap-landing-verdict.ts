@@ -234,7 +234,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     const landRef = await landingDecisionRef(land.commit_sha ?? "", ref.decision_id);
     // ONE CREDIT PER (gap, landing), as the sweep guards it (68e93860): a re-close on a landing already credited is
     // recorded, but the class posterior and the detector's closure credit are not paid twice.
-    const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null }, landRef.decision_id ? { decision_id: landRef.decision_id } : {});
+    const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null }, landRef.decision_id ? { decision_id: landRef.decision_id, gap_id: id } : {});
     if (!credited) console.log(`[gap-close] gap ${id}: landing ${String(land.commit_sha ?? "").slice(0, 12)} already credited FAVORABLE; closing without a second credit`);
     const landedCloseWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
@@ -1255,7 +1255,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   // again for the same landing. The local ledger is durable: its #2 settlement is the once-only marker.
   const alreadySettled = (await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length > 0;
   if (!alreadySettled) {
-    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id } : {});
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
   }
@@ -1281,7 +1281,7 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   const at = new Date().toISOString();
   const sha = String(rb.sha ?? "");
   if ((await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length === 0) {
-    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id } : {});
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
   }
@@ -2033,7 +2033,7 @@ const pending = candidates.unheld
       // ONE CREDIT PER (gap, landing): a standing row may re-close after a reopen on the landing it already
       // credited; that close is recorded, but the landing's posterior and the close-oracle are not paid twice.
       const sweepLandRef = await landingDecisionRef(sha);
-      const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha }, sweepLandRef.decision_id ? { decision_id: sweepLandRef.decision_id } : {});
+      const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha }, sweepLandRef.decision_id ? { decision_id: sweepLandRef.decision_id, gap_id: String(g.id) } : {});
       if (!credited) console.log(`[gap-sweep] gap ${gidSweep}: landing ${sha.slice(0, 12)} already credited FAVORABLE; closing without a second credit`);
       // SUCCESS label for the close-oracle (§12.6 1a): a MEASURED close builds the trustworthy
       // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit

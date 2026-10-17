@@ -32,9 +32,10 @@ import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows } from "../judge/gap-policy.js";
-import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
+import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps } from "../judge/gap-admission.js";
+import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
 
 // The evaluator's tree is ONE resolver (lib/evaluator-tree.ts), shared with the class-1 classifier in substrate-gap
 // so the label and the measurement read the same file.
@@ -1086,6 +1087,15 @@ const premiseTokens = Array.from(new Set(String(summary).split(" ").filter((w) =
 // pickMostLandable. The admitted list alone cannot resolve a narrowed child's parent: the parent
 // is often excluded (pending, held) while its child is admitted.
 let pickLineageIndex: Map<string, Record<string, unknown>> = new Map();
+
+/** The priority draws' uniform stream: crypto-backed and separate from Math.random (injectable for tests). */
+let priorityRng: () => number = () => crypto.getRandomValues(new Uint32Array(1))[0]! / 4294967296;
+export function __setPriorityRngForTests(rng: (() => number) | null): void { priorityRng = rng ?? (() => crypto.getRandomValues(new Uint32Array(1))[0]! / 4294967296); }
+/** Thompson over the two ranking arms of the priority_weights table (I3): the baseline (seeded from its earned record)
+ *  and the terms variant (Beta(1,1) until it earns evidence). */
+export function choosePriorityVariant(prio: Record<string, { alpha: number; beta: number }>, rng: () => number): "baseline" | "terms" {
+  return sampleClassTheta("variant:terms", prio, rng) > sampleClassTheta("variant:baseline", prio, rng) ? "terms" : "baseline";
+}
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
   // The judging steps (hopeless exclusion, floor, pick-skip) are the closed pickCandidate (gap-admission); this
   // residue supplies the ranker (score, class rerank) and records the pick.
@@ -1171,10 +1181,24 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     String(g.source ?? "") === "human_reported" || hasLiveHumanExemption(g) ? HUMAN_REPORT_PRIORITY : (String(g.category) ?? '').startsWith('route-edit') ? 0.5 : 1;
   let classPosteriorsNow: ReturnType<typeof readClassPosteriors> = {};
   const classTheta = new Map<string, number>();
+  // I3 (qa ruling (A)): WHICH RANKING PICKS is itself learned. The BASELINE (the hand-set score below, unchanged) and the
+  // TERMS variant (gap-priority-ranking.ts: impact, contingency, cost, viability, rank-normalised, weighted by shaped
+  // Betas) are arms of the priority_weights learning-credit table (held, I4b); Thompson samples one per pick. The term
+  // ranks are computed on EVERY pick so the decision records the full pool vector (law 12), whichever variant chose.
+  const prio = (heldLearningTable("priority_weights") ?? {}) as Record<string, { alpha: number; beta: number }>;
+  // The priority draws use their OWN stream (priorityRng), so the class rerank's draws below, and every pinned test that
+  // depends on them, see the same Math.random sequence as before the variant existed (qa ruling (b)).
+  const variant = choosePriorityVariant(prio, priorityRng);
+  const theta = sampleTermWeights(Object.fromEntries(PRIORITY_TERMS.filter((t) => prio[`term:${t}`]).map((t) => [t, prio[`term:${t}`]!])) as PriorityWeights, priorityRng);
+  const termsRanked = rankByTerms(gaps, { byId: pickLineageIndex.size ? pickLineageIndex : new Map(gaps.map((g) => [String(g.id ?? ""), g])), spendOf: (g) => lineageWindowSpendUsd(g, pickLineageIndex, Date.now(), Number.POSITIVE_INFINITY), classTheta: (c) => sampleClassTheta(c) }, theta);
+  const termsScore = new Map(termsRanked.map((r) => [r.g, r.s]));
+  const pv = (n: number) => Number(n.toFixed(3));
+  const priorityPool = termsRanked.map((r) => ({ id: String(r.g.id ?? ""), ranks: Object.fromEntries(PRIORITY_TERMS.map((t) => [t, pv(r.ranks[t])])) }));
   return pickCandidate(gaps, {
     lineageIndex: pickLineageIndex,
-    score: (g) => landabilityScore(g) * impactOf(g) * humanWeight(g),
+    score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g) * impactOf(g) * humanWeight(g),
     rerank: (ranked) => {
+      if (variant === "terms") return; // the terms variant already weighs viability (the class posterior) as a term
       // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
       // the pool, then prefer the winning class; WITHIN a class the landability ranking above still
       // orders gaps, so the pick is the best-scored gap of the sampled class. chooseFirstActionable
@@ -1216,7 +1240,10 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
         tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
         distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
         runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
+        priority_variant: variant,
       })}`);
+      // The chosen gap's approach decision carries this priority decision (recordApproachDecision reads it by gap id).
+      setPendingPriorityDecision(String(chosen.g.id ?? ""), { variant, theta: Object.fromEntries(PRIORITY_TERMS.map((t) => [t, pv(theta[t])])), pool: priorityPool });
 
       // OPTION A: durable pickDecision record, one JSON line per pick (same pattern as
       // compose-lessons.jsonl). Fail-open: emission must never block or fail the pick.

@@ -905,6 +905,18 @@ export const config = {
         "limit — commits to return, integer 1-200 (default 5); format — git pretty format (default \"%s\", e.g. \"%h %ad %s\"); " +
         "since — a date or relative time such as \"24 hours ago\" or \"2026-10-01\", passed as --since. " +
         "No value may begin with '-'. Returns commandResult {exitCode, stdout, stderr, cwd}.",
+      // I-T (d): the two persistence writers a goal most often asks for in prose ("note each issue as a gap", "record
+      // a memory note of it"). Target inference saw shape NAMES only, so a request worded around the deliverable, not
+      // the shape, missed the write. These are what a described-producer choice reads (one per shape, the fields it binds).
+      substrateGap_write:
+        "Records a gap in the substrate's gap store: an issue, defect, missing capability or problem the substrate " +
+        "should fix, one record per issue. Pointer: gap {id, category, source, status, detected_at, summary} — summary " +
+        "states the issue in prose, id is a stable slug; status \"open\" for a new gap. Writing the same id again " +
+        "updates that gap. Returns substrateGapWriteResult {id, action}.",
+      memoryNote_write:
+        "Writes a note to the substrate's memory store: a finding, feedback, reference or project note that should " +
+        "persist across sessions. Pointer: note {title, body, type?, id?} (at least a title or a body; type is one of " +
+        "finding | feedback | reference | project, default reference). Returns memoryNoteWriteResult {id, action}.",
     } as Record<string, string>,
   },
 } as const;

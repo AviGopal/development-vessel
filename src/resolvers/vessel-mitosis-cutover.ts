@@ -30,7 +30,7 @@ import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 import { armingOnlyLanding } from "./check-supply-admission.js";
-import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy } from "./staged-mitosis-gate.js";
+import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy, familyHold, landingAdmissible, type Admissibility } from "./staged-mitosis-gate.js";
 
 /**
  * The landing gap's own-check dependencies: the gap-store read and the test_suite run. Module-level
@@ -59,6 +59,30 @@ const realOwnCheckDeps: OwnCheckDeps = {
  * the same substrateGap_write the pending-land stamp uses. Merge-style: only the changed metadata keys are
  * sent; the store carries the rest forward. Never throws; what happened is returned for operations.
  */
+/**
+ * Record a landing refusal's REASON CODE on the gap row (landing_refusal {class, reason, at, mitosis}), so the system
+ * reads why a landing was refused (law 8), not only a log line. Merge-style like stampOwnCheckOutcome; never throws.
+ */
+async function stampLandingRefusal(row: Record<string, unknown>, adm: Extract<Admissibility, { ok: false }>, mitosis: string): Promise<string> {
+  try {
+    const res = (await ownCheckDeps.writeGap({
+      type: "substrateGap_write",
+      gap: {
+        id: row["id"],
+        category: row["category"] ?? "missing_capability",
+        source: row["source"] ?? "substrate_detected",
+        summary: row["summary"] ?? "",
+        detected_at: row["detected_at"] ?? new Date().toISOString(),
+        status: row["status"] ?? "open",
+        classification_metadata: { landing_refusal: { class: adm.refuse_class, reason: adm.reason.slice(0, 400), at: new Date().toISOString(), mitosis } },
+      },
+    })) as { shape?: string; body?: unknown } | null;
+    return res?.shape === "structuredError" ? `gap write refused: ${JSON.stringify(res.body).slice(0, 200)}` : "recorded on the gap";
+  } catch (err) {
+    return `gap write threw: ${(err as Error).message.slice(0, 200)}`;
+  }
+}
+
 async function stampOwnCheckOutcome(
   row: Record<string, unknown>,
   outcome: { measured: boolean; reason: string },
@@ -274,13 +298,19 @@ export type OwnCheckOutcome =
   | "own_check_failed"
   | "own_check_unmeasurable"
   | "gap_store_unavailable"
-  | "landed_unverified";
+  | "landed_unverified"
+  | "landing_hold"
+  | "landing_family_hold"
+  | "landing_green_on_parent";
 const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   own_check_passed: 0,
   own_check_failed: 0,
   own_check_unmeasurable: 0,
   gap_store_unavailable: 0,
   landed_unverified: 0,
+  landing_hold: 0,
+  landing_family_hold: 0,
+  landing_green_on_parent: 0,
 };
 export function getOwnCheckCounters(): Record<OwnCheckOutcome, number> {
   return { ...ownCheckCounts };
@@ -3087,6 +3117,56 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       }
       operations.push({ op: "own_check", status: "ok", detail: `${citation}: ${verdict.reason}` });
       countOwnCheck("own_check_passed", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${citation}`);
+    }
+    // LANDING ADMISSIBILITY (staged-mitosis-gate.ts landingAdmissible: ONE rule for every route that lands, read HERE,
+    // at cutover time, so a hold set after staging still refuses). Both feature_compose and apply_proposal_as_patch ->
+    // patch_with_tools -> mitosis reach this point. The candidate's own check has just passed above when one exists.
+    const admRow: Record<string, unknown> | null = load.status === "found" ? load.row : load.status === "none" ? (load.row ?? null) : null;
+    if (admRow) {
+      const hold = await familyHold(admRow, ownCheckDeps.readGap);
+      if ("unreadable" in hold) {
+        operations.push({ op: "landing_admissible", status: "fail", detail: `gap family unreadable: ${hold.unreadable}` });
+        await unstage("gap_store_unavailable");
+        return softRefuse(
+          `gap_store_unavailable: could not read gap ${ownGapId}'s family to check its holds (${hold.unreadable}). Deferring this cutover; the staged tree and its pending lock are kept and retried next tick.`,
+          { kind: "gap_store_unavailable", refuse_class: "gap_store_unavailable", deferred: true, preserve_pending: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
+        );
+      }
+      let parent: { pass: boolean; measured: boolean; reason: string } | null = null;
+      if (load.status === "found" && !hold.held) {
+        const check = load.check;
+        let pres: unknown;
+        try {
+          // base_ref HEAD: the staged change is still uncommitted here, so HEAD is the parent tree.
+          pres = await ownCheckDeps.runSuite({ vessel: `repos/${vesselBare}`, test_file: check.test_file, only_tests: check.only_tests, gap_id: ownGapId, proposal_id: pointer.proposal_id, base_ref: "HEAD" });
+        } catch (err) {
+          pres = { shape: "structuredError", body: { detail: (err as Error).message } };
+        }
+        const pr = pres as { shape?: string; body?: Record<string, unknown> } | null;
+        const pb = pr?.shape === "test_suite" ? (pr.body ?? null) : null;
+        parent = judgeOwnCheck(pb, check.only_tests);
+        // A parent run measures the PARENT only if it ran in a tree of HEAD that is not the staged clone (test_suite's
+        // base_ref worktree reports its own VERIFIED_ROOT). A run that reports the staged clone, or no root at all,
+        // measured the candidate or nothing: unmeasurable, never "green on the parent" (the candidate run's wrongTree rule).
+        const parentRoot = typeof pb?.["verified_root"] === "string" ? (pb["verified_root"] as string) : null;
+        if (parent.measured && (!parentRoot || resolve(parentRoot) === resolve(hostRepoRoot))) {
+          parent = { pass: false, measured: false, reason: parentRoot ? `parent run measured the staged clone ${parentRoot}, not a tree of HEAD` : "parent run reported no measured root" };
+        }
+      }
+      const adm = landingAdmissible({ hold, ownCheck: load.status === "found" ? { parent: parent ?? { pass: false, measured: false, reason: "parent not run (a hold refuses first)" } } : null });
+      if (!adm.ok) {
+        const stamped = await stampLandingRefusal(admRow, adm, String(mitosis_version_id));
+        operations.push({ op: "landing_admissible", status: "fail", detail: `${adm.refuse_class}: ${adm.reason} (${stamped})` });
+        countOwnCheck(`landing_${adm.refuse_class}`, `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${adm.reason}`);
+        await unstage(`landing_${adm.refuse_class}`);
+        return softRefuse(
+          `landing_refused_${adm.refuse_class}: ${adm.reason}. One landing rule for every route (landingAdmissible); refusing.`,
+          { kind: `landing_refused_${adm.refuse_class}`, refuse_class: `landing_${adm.refuse_class}`, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, landing_admissibility: adm, family_visited: hold.visited, operations },
+        );
+      }
+      operations.push({ op: "landing_admissible", status: "ok", detail: adm.note });
+    } else {
+      operations.push({ op: "landing_admissible", status: "skipped", detail: "admitted: no gap row to check (no gap id, or the store holds none); landing stamped landed_unverified" });
     }
   }
   // 5d. PRE-CUTOVER TEST GATE (2026-08-23). The post-land suite (below, after promotion) already

@@ -338,7 +338,8 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
   it("(c') the landing cites the own check it re-ran", async () => {
     const s = await setup();
     let ran = 0;
-    setDeps({ readGap, runSuite: async () => { ran++; return suiteBody(s.hostRepoRoot, {}); } });
+    // Counts the re-runs on the STAGED tree; the landing-admissibility parent run (base_ref "HEAD") is not one.
+    setDeps({ readGap, runSuite: async (p) => { if (!p["base_ref"]) ran++; return suiteBody(s.hostRepoRoot, {}); } });
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
     expect(r.shape).toBe("cutoverApplied");
     expect(ran).toBe(1);

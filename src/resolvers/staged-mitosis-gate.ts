@@ -292,3 +292,85 @@ export function ownCheckOutcomeUpdate(
   }
   return { update, count, escalated };
 }
+
+/**
+ * LANDING ADMISSIBILITY: ONE RULE FOR EVERY ROUTE THAT LANDS (user ruling 2026-10-16T23:59:15Z "Before RUN 2"; gap
+ * a-mitosis-cutover-landing-bypasses-its-gaps-red-own-check-and-operator-hold).
+ *
+ * Measured: substrate-authored 9ab61e0 (light-dispatch, 10-02, apply_proposal_as_patch + vessel_mitosis_cutover)
+ * landed an auth-only fix that the gap family's operator ORDERING hold forbade, and whose own check was red. Both
+ * routes (feature_compose and apply -> patch_with_tools -> mitosis) end in resolveVesselMitosisCutover, so the rule is
+ * enforced there, at cutover time (a hold set after staging still refuses): the cutover's own-check gate (cf517dbe,
+ * 2.5 h after 9ab61e0) already refuses a red candidate; this adds what it lacked.
+ *   - HOLD: the shaped operator_hold field on the gap OR ANY FAMILY MEMBER (the parent_gap_id chain and duplicate_of
+ *     targets), walked with a visited set (no depth constant; a duplicate_of chain can loop). Never read from text.
+ *   - RED ON THE PARENT: when the gap carries an own check, a candidate whose check was ALREADY green on the parent
+ *     tree did not do what the gap asked (the change is not the fix); refused. An unmeasurable parent run admits and
+ *     says so. A gap with NO own check is admitted and says so ("admitted: no own check"); it is never blanket-refused.
+ * Every refusal carries a reason code (hold | family_hold | green_on_parent) for the trace and the gap row (law 8).
+ */
+export type HoldFinding =
+  | { held: false; visited: string[] }
+  | { held: true; holder: string; relation: "self" | "parent" | "duplicate_of"; reason: string; visited: string[] };
+
+/** The gap's own hold, then its family's: the parent_gap_id chain and duplicate_of targets, each visited once. */
+export async function familyHold(
+  row: Record<string, unknown>,
+  read: (p: Record<string, unknown>) => Promise<unknown>,
+): Promise<HoldFinding | { unreadable: string }> {
+  const metaOf = (r: Record<string, unknown>) => ((r["classification_metadata"] ?? {}) as Record<string, unknown>);
+  const linksOf = (r: Record<string, unknown>): Array<{ id: string; relation: "parent" | "duplicate_of" }> => {
+    const m = metaOf(r);
+    const out: Array<{ id: string; relation: "parent" | "duplicate_of" }> = [];
+    const parent = m["parent_gap_id"] ?? r["parent_gap_id"];
+    if (typeof parent === "string" && parent.trim()) out.push({ id: parent.trim(), relation: "parent" });
+    const dup = m["duplicate_of"];
+    for (const d of Array.isArray(dup) ? dup : [dup]) if (typeof d === "string" && d.trim()) out.push({ id: d.trim(), relation: "duplicate_of" });
+    return out;
+  };
+  const visited = new Set<string>();
+  const queue: Array<{ row: Record<string, unknown>; relation: "self" | "parent" | "duplicate_of" }> = [{ row, relation: "self" }];
+  while (queue.length > 0) {
+    const { row: r, relation } = queue.shift()!;
+    const id = String(r["id"] ?? "");
+    if (!id || visited.has(id)) continue;
+    visited.add(id);
+    const m = metaOf(r);
+    if (m["operator_hold"] === true) {
+      return { held: true, holder: id, relation, reason: String(m["operator_hold_reason"] ?? "operator_hold set").slice(0, 300), visited: [...visited] };
+    }
+    for (const link of linksOf(r)) {
+      if (visited.has(link.id)) continue;
+      let res: unknown;
+      try { res = await read({ type: "substrateGap", id: link.id, limit: 1 }); } catch (err) { return { unreadable: `family read of ${link.id} threw: ${(err as Error).message}` }; }
+      const rr = res as { shape?: string; body?: { gaps?: unknown } } | null;
+      if (!rr || rr.shape !== "substrateGap" || !Array.isArray(rr.body?.gaps)) return { unreadable: `family read of ${link.id}: ${gapStoreAnsweredWhy(rr as never)}` };
+      const member = (rr.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === link.id);
+      // An ancestor the store no longer holds cannot hold anything; it is noted as visited and the walk goes on.
+      if (!member) { visited.add(link.id); continue; }
+      queue.push({ row: member, relation: relation === "self" ? link.relation : relation });
+    }
+  }
+  return { held: false, visited: [...visited] };
+}
+
+export type LandingRefuseClass = "hold" | "family_hold" | "green_on_parent";
+export type Admissibility = { ok: true; note: string } | { ok: false; refuse_class: LandingRefuseClass; reason: string };
+
+/** The one admissibility rule (see LANDING ADMISSIBILITY above). Pure: the cutover gathers the evidence. */
+export function landingAdmissible(input: {
+  hold: HoldFinding;
+  ownCheck: null | { parent: { pass: boolean; measured: boolean; reason: string } };
+}): Admissibility {
+  const h = input.hold;
+  if (h.held) {
+    return h.relation === "self"
+      ? { ok: false, refuse_class: "hold", reason: `gap ${h.holder} carries operator_hold: ${h.reason}` }
+      : { ok: false, refuse_class: "family_hold", reason: `family member ${h.holder} (${h.relation}) carries operator_hold: ${h.reason}` };
+  }
+  if (input.ownCheck === null) return { ok: true, note: "admitted: no own check" };
+  const p = input.ownCheck.parent;
+  if (p.measured && p.pass) return { ok: false, refuse_class: "green_on_parent", reason: `the gap's own check is already GREEN on the parent tree (${p.reason}); the candidate is not what makes it pass` };
+  if (!p.measured) return { ok: true, note: `admitted: own check green on the candidate; parent run unmeasurable (${p.reason})` };
+  return { ok: true, note: `admitted: own check red on the parent (${p.reason}), green on the candidate` };
+}

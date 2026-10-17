@@ -263,7 +263,8 @@ function noCheck(s: Fixture): { ownRuns: () => number } {
 }
 function ownCheckPasses(s: Fixture): { ownRuns: () => number } {
   let n = 0;
-  __setOwnCheckDepsForTests({ readGap: readRow(checkedRow), writeGap: recordWrite, runSuite: async () => { n++; return ownCheckBody(s.hostRepoRoot, {}); } });
+  // Counts the own-check runs on the STAGED tree; the landing-admissibility parent run (base_ref "HEAD") is not one.
+  __setOwnCheckDepsForTests({ readGap: readRow(checkedRow), writeGap: recordWrite, runSuite: async (p: Record<string, unknown>) => { if (!p["base_ref"]) n++; return ownCheckBody(s.hostRepoRoot, {}); } });
   return { ownRuns: () => n };
 }
 

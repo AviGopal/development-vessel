@@ -15,6 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const gapEventPublishStub = stubGapEventPublish();
 
@@ -22,6 +23,7 @@ const WS = mkdtempSync(join(tmpdir(), "c1-tree-ws-"));
 const RT = mkdtempSync(join(tmpdir(), "c1-tree-rt-"));
 const saved = { ws: process.env["WORKSPACE_ROOT"], skip: process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] };
 process.env["WORKSPACE_ROOT"] = WS;
+isolateLearnedStateInProcess(WS); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // A FRESH module instance, so its load-time WORKSPACE_ROOT capture is this file's WS whatever loaded first.
 const mod = await import(`../../src/resolvers/substrate-gap.js?${"c1-evaluator-tree"}`);

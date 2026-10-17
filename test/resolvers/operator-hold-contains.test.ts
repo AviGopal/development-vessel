@@ -47,11 +47,13 @@ import { installCutoverFetchGuard, restoreCutoverFetch, routeFixtureGapStore, FI
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `operator-hold-contains-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(join(ROOT, "gaps"), { recursive: true });
 const SAVED_WR = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // This file drives feature_compose: give it its own temp runtime root whatever loaded the module first
 // (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.

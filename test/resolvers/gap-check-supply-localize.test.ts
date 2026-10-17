@@ -16,6 +16,7 @@ import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `gcs-loc-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -23,6 +24,7 @@ const RUNTIME = join(ROOT, "runtime");
 const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["VESSELS_CLONE_ROOT"] = CLONES;
 process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";

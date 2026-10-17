@@ -17,11 +17,13 @@ import { afterAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "learning-credit-wt-"));
 const KEYS = ["WORKSPACE_ROOT", "GAP_STORE_ENDPOINT", "GAP_CLASS_POSTERIOR_PATH", "CLOSE_ORACLE_CALIB_PATH", "DETECTOR_CLOSURE_LEDGER_PATH", "LEARNING_CREDIT_JOURNAL_PATH", "VESSELS_CLONE_ROOT", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 process.env["WORKSPACE_ROOT"] = join(ROOT, "ws"); mkdirSync(process.env["WORKSPACE_ROOT"], { recursive: true });
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["VESSELS_CLONE_ROOT"] = join(ROOT, "clones"); mkdirSync(process.env["VESSELS_CLONE_ROOT"], { recursive: true });
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 delete process.env["GAP_STORE_ENDPOINT"];

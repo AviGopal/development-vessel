@@ -20,10 +20,12 @@ import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "gap-read-snapshot-"));
 const saved = { ws: process.env["WORKSPACE_ROOT"], calib: process.env["EXPECTATION_CALIB_PATH"], oracle: process.env["CLOSE_ORACLE_CALIB_PATH"], trig: process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"], ep: process.env["GAP_STORE_ENDPOINT"] };
 process.env["WORKSPACE_ROOT"] = join(ROOT, "ws");
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 mkdirSync(process.env["WORKSPACE_ROOT"], { recursive: true });
 process.env["EXPECTATION_CALIB_PATH"] = join(ROOT, "expectation-calibration.json");
 process.env["CLOSE_ORACLE_CALIB_PATH"] = join(ROOT, "close-oracle-calibration.json");

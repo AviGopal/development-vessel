@@ -15,9 +15,13 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `child-check-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+// Every learned-state path (gap-class posteriors, close-oracle and expectation calibration, detector credit, ...) is
+// pointed under ROOT before src loads: setting WORKSPACE_ROOT alone left them at their live /workspace defaults, and
+// the cc-ctl-* fixture classes this file credits reached node1's gap-class-posteriors.json.
+isolateLearnedStateInProcess(ROOT);
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");

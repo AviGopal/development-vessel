@@ -17,11 +17,13 @@ import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `gap-write-metadata-type-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(join(ROOT, "gaps"), { recursive: true });
 const SAVED_WR = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import(`../../src/resolvers/substrate-gap.js?${"gap-write-metadata-type"}`);
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;

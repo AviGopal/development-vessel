@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // ARM-TIME REGION GATE (2026-10-03, gap arm-time-gap-writes-accept-prose-regions-so-class2-gaps-ground-on-the-file-top).
 //
@@ -17,6 +18,7 @@ const testWorkspace = join(tmpdir(), `dev-vessel-arm-region-test-${Date.now()}-$
 rmSync(testWorkspace, { recursive: true, force: true });
 mkdirSync(join(testWorkspace, "gaps"), { recursive: true });
 process.env["WORKSPACE_ROOT"] = testWorkspace;
+isolateLearnedStateInProcess(testWorkspace); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // The post-write event publish goes to ACTIVITY_API_ENDPOINT (default 127.0.0.1:8080): aim it at a closed port.
 process.env["ACTIVITY_API_ENDPOINT"] = "http://127.0.0.1:9";

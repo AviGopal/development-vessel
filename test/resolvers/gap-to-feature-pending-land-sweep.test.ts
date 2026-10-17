@@ -18,11 +18,13 @@ const __askHuman = (p: Record<string, unknown>): Promise<unknown> => __uiw(p as 
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
 const GAPS_PATH = join(ROOT, "gaps", "gaps.json");
 process.env.WORKSPACE_ROOT = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env.VESSELS_CLONE_ROOT = CLONES;
 process.env.EXPECTATION_CALIB_PATH = join(ROOT, "expectation-calibration.json");
 process.env.CLOSE_ORACLE_CALIB_PATH = join(ROOT, "close-oracle-calibration.json");

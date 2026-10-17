@@ -19,11 +19,13 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bu
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `gap-write-marker-audit-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(join(ROOT, "gaps"), { recursive: true });
 const SAVED_WR = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // A query-string import: test/observers/topology-chain.test.ts replaces routes/impulses.js with mock.module,
 // which bun never undoes, so in a full run the plain specifier would hand this file that mock.

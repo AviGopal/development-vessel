@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 
 // The sweep spawns `journalctl` by name, and Bun resolves a command against the PATH the process started with, so the
 // fake journalctl only takes effect in a child process started with it: the resolver runs in a child bun.
@@ -40,7 +41,7 @@ describe("composer-interruption-sweep reads a real owned set", () => {
   it("MUST-FAIL: an owned vessel's restart is classified owned and a masked vessel's foreign, never 'owned set unavailable'", () => {
     const p = Bun.spawnSync([process.execPath, join(ROOT, "run.ts")], {
       cwd: join(import.meta.dir, "..", ".."),
-      env: { PATH: `${BIN}:/usr/bin:/bin`, HOME: ROOT, WORKSPACE_ROOT: join(ROOT, "ws"), VESSELS_CLONE_ROOT: join(ROOT, "vessels"), SYSTEMD_UNIT_DIRS: join(ROOT, "units"), SUBSTRATE_NAME: "fixture-node" },
+      env: isolatedChildEnv(join(ROOT, "ws"), { PATH: `${BIN}:/usr/bin:/bin`, HOME: ROOT, VESSELS_CLONE_ROOT: join(ROOT, "vessels"), SYSTEMD_UNIT_DIRS: join(ROOT, "units"), SUBSTRATE_NAME: "fixture-node" }),
       stdout: "pipe", stderr: "pipe", timeout: 60_000,
     });
     const out = new TextDecoder().decode(p.stdout);

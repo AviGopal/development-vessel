@@ -32,10 +32,12 @@ import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, test } fr
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 
 const SCRATCH = mkdtempSync(join(process.env["TEST_SCRATCH_PARENT"] ?? tmpdir(), "gap-drain-backoff-"));
 const priorWorkspaceRoot = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = SCRATCH;
+isolateLearnedStateInProcess(SCRATCH); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 
 type Obs = { handleEvent: (e: { type: string; data: unknown }) => Promise<void> };
 let makeObserver: () => Obs;

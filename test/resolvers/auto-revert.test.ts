@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "auto-revert-test-"));
 const LOAD_ENV: Record<string, string> = {
@@ -173,6 +174,7 @@ beforeEach(async () => {
   ws = mkdtempSync(join(ROOT, "case-"));
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
   process.env["WORKSPACE_ROOT"] = ws;
+  isolateLearnedStateInProcess(ws); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   process.env["MITOSIS_DIRECT_PUSH"] = "1";

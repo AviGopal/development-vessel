@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { installCutoverFetchGuard, restoreCutoverFetch, routeShell, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `ts-only-tests-noinj-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const SENT = join(ROOT, "sentinel");
@@ -26,6 +27,7 @@ mkdirSync(SENT, { recursive: true });
 mkdirSync(join(FIXTURE, "node_modules"), { recursive: true }); // present, so the command never runs `bun install`
 // The gap store for the arm-time case lives in this temp dir too (read at module load, so set before import).
 process.env["WORKSPACE_ROOT"] = join(ROOT, "ws");
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 mkdirSync(join(ROOT, "ws"), { recursive: true });
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 delete process.env["GAP_STORE_ENDPOINT"];

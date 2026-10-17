@@ -3,6 +3,7 @@ import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { rmSync, existsSync } from "fs";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
 const gapEventPublishStub = stubGapEventPublish();
@@ -18,6 +19,7 @@ try {
   /* ignore */
 }
 process.env["WORKSPACE_ROOT"] = testWorkspace;
+isolateLearnedStateInProcess(testWorkspace); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 // Without this, every open-gap write below shells out to the REAL `systemctl start
 // gap-compose.service` against whatever systemd this test process can reach — see
 // the comment above the skipComposeTrigger check in substrate-gap.ts. Must be set

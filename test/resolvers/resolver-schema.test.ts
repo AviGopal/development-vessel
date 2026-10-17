@@ -17,6 +17,7 @@ import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
 const gapEventPublishStub = stubGapEventPublish();
@@ -26,6 +27,7 @@ afterAll(() => gapEventPublishStub.restore());
 // probe rows land in the repo's tracked gap store — a test that mutates shared substrate state
 // is a test that changes the thing it is measuring.
 process.env["WORKSPACE_ROOT"] = mkdtempSync(`${tmpdir()}/dv-resolver-schema-`);
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 const { CONTRACT_SHAPES, resolveResolverSchema } = await import("../../src/resolvers/resolver-schema.js");
 const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import("../../src/resolvers/substrate-gap.js");
 

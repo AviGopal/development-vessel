@@ -21,6 +21,13 @@ afterAll(() => { if (globalThis.fetch === publishStub) globalThis.fetch = fetchB
 // temp dir. Set the root before importing a FRESH module instance, then prove it.
 const suiteRoot = mkdtempSync(join(tmpdir(), "gapstore-"));
 process.env["WORKSPACE_ROOT"] = suiteRoot;
+// The learned tables substrate-gap serves and credits resolve under the suite root too, never their /workspace
+// defaults (WORKSPACE_ROOT alone leaves them live). Inline twin of test/resolvers/isolated-gap-store-run.ts
+// isolateLearnedStateInProcess: src/ compiles under rootDir src, so it cannot import from test/.
+for (const [name, file] of [["GAP_CLASS_POSTERIOR_PATH", "gap-class-posteriors.json"], ["CLOSE_ORACLE_CALIB_PATH", "close-oracle-calibration.json"], ["DETECTOR_CLOSURE_LEDGER_PATH", "detector-closure-credit.json"], ["EXPECTATION_CALIB_PATH", "expectation-calibration.json"]] as const) {
+  const cur = process.env[name];
+  if (!cur || !(cur.startsWith(tmpdir()) || cur.startsWith("/tmp/"))) process.env[name] = join(suiteRoot, file);
+}
 // Without this, an open-gap write shells out to the real `systemctl start gap-compose`.
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const mod = await import(`./substrate-gap.js?${"gapstore-isolated"}`);

@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
@@ -87,6 +88,7 @@ beforeEach(async () => {
     delete process.env[k];
   }
   process.env["WORKSPACE_ROOT"] = ws;
+  isolateLearnedStateInProcess(ws); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   guard = installCutoverFetchGuard();

@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { isolatedChildEnv } from "../resolvers/isolated-gap-store-run.js";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import * as supplyMod from "../../src/resolvers/check-supply-admission.js";
 import { composeEligibilitySkipReason } from "../../src/judge/gap-eligibility.js";
@@ -224,13 +225,14 @@ function sweepInIsolation(): { exit: number; out: string } {
     `const r = await glv.sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_DONE " + JSON.stringify(r));`,
   ].join("\n");
-  const env: Record<string, string> = {
-    HOME: ROOT, PATH: BIN, WORKSPACE_ROOT: ROOT, VESSELS_CLONE_ROOT: CLONES, ATTEMPT_LEDGER_DIR: LEDGER,
+  // isolatedChildEnv: every learned-state default src names under ROOT (detector credit, push policy, ... were live).
+  const env: Record<string, string> = isolatedChildEnv(ROOT, {
+    HOME: ROOT, PATH: BIN, VESSELS_CLONE_ROOT: CLONES, ATTEMPT_LEDGER_DIR: LEDGER,
     GAP_CLASS_POSTERIOR_PATH: POSTERIOR,
     EXPECTATION_CALIB_PATH: join(ROOT, "expectation-calibration.json"),
     CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"),
-    SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1", NODE_ENV: "test", TZ: "UTC",
-  };
+    NODE_ENV: "test", TZ: "UTC",
+  });
   const p = Bun.spawnSync([process.execPath, "-e", code], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe", timeout: 180_000 });
   return { exit: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) + "\n" + new TextDecoder().decode(p.stderr) };
 }

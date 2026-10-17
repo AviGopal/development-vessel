@@ -9,12 +9,14 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 // These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
 useUngatedRowsSource();
 
 const ROOT = join(tmpdir(), `self-fact-trust-completion-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 
 // A volume-held identity key for this test process, so thisNode() is the key digest (SUBSTRATE_NAME unset).
 const { privateKey } = generateKeyPairSync("ed25519");

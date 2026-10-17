@@ -11,10 +11,12 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "approach-decision-join-"));
 const saved = { ws: process.env["WORKSPACE_ROOT"], ledger: process.env["ATTEMPT_LEDGER_DIR"], clones: process.env["VESSELS_CLONE_ROOT"], calib: process.env["EXPECTATION_CALIB_PATH"], oracle: process.env["CLOSE_ORACLE_CALIB_PATH"] };
 process.env["WORKSPACE_ROOT"] = join(ROOT, "ws");
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 mkdirSync(process.env["WORKSPACE_ROOT"], { recursive: true });
 process.env["ATTEMPT_LEDGER_DIR"] = join(ROOT, "ledger");
 process.env["VESSELS_CLONE_ROOT"] = join(ROOT, "clones");

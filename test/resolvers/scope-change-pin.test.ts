@@ -10,8 +10,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = mkdtempSync(join(tmpdir(), "scope-change-pin-"));
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 const sfr = await import("../../src/resolvers/self-fact-reconcile.js");
 const { evaluateSelfFactRow, __setPoolPinDepsForTests } = sfr;
 

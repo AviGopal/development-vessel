@@ -3,6 +3,7 @@ import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { rmSync, mkdirSync, writeFileSync } from "fs";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
 const gapEventPublishStub = stubGapEventPublish();
@@ -40,6 +41,7 @@ try {
   /* ignore */
 }
 process.env["WORKSPACE_ROOT"] = testWorkspace;
+isolateLearnedStateInProcess(testWorkspace); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 // Real edit sites for the Class-1 arming guard to read: each class1 case's literal is PRESENT in its file; src/absent.ts exists WITHOUT it.
 for (const [rel, text] of [["src/resolvers/reach-history.ts", 'const U = "http://127.0.0.1:8080/impulses";'], ["development-vessel/src/config.ts", "const PORT = 8080;"], ["src/x.ts", 'fetch("http://127.0.0.1:8080/impulses");'], ["src/absent.ts", "export const nothing = 1;"]] as const) { mkdirSync(join(testWorkspace, rel, ".."), { recursive: true }); writeFileSync(join(testWorkspace, rel), text); }
 // Without this, every open-gap write below shells out to the REAL `systemctl start

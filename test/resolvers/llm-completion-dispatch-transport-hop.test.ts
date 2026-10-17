@@ -7,7 +7,10 @@
 // Authorization header into the wire pointer itself; the body must stay credential-free,
 // because the body is what dev-vessel traces.
 import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 import { transportHopHeaders } from "../../src/resolvers/federated-llm-egress.js";
 
 const FAKE_KEY = "mb-test-dev-vessel-transport-hop-0123456789";
@@ -18,11 +21,12 @@ let result: unknown;
 
 beforeAll(async () => {
   const p = Bun.spawn(["bun", join(import.meta.dir, "fixtures", "llm-dispatch-transport-hop-probe.ts")], {
-    env: {
+    // isolatedChildEnv: the resolver's learned-state paths (the bus drop log among them) resolve under a temp root.
+    env: isolatedChildEnv(mkdtempSync(join(tmpdir(), "llm-hop-")), {
       PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "",
       METABOB_API_KEY: FAKE_KEY, FED_TRANSPORT_EGRESS: EGRESS, FED_SUBSTRATE_ID: "this-substrate",
       DISCOVERY_ENDPOINT: "http://127.0.0.1:18100", DISCOVERY_VESSEL_ENDPOINT: "http://127.0.0.1:18100",
-    },
+    }),
     stdout: "pipe", stderr: "ignore",
   });
   const out = await new Response(p.stdout).text();

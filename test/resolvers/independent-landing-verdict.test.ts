@@ -33,6 +33,7 @@ import * as g2f from "../../src/resolvers/gap-to-feature.js";
 import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 
 type Verdict = "present" | "absent" | "pending" | "unknown";
 type Deps = { parentOf: (sha: string) => string | null; runAt: (gap: Record<string, unknown>, ref: string) => Promise<Verdict> };
@@ -346,14 +347,17 @@ function sweepInIsolation(): { exit: number; out: string } {
     `console.log("CUTOVER_CLOSE " + JSON.stringify(c));`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
   ].join("\n");
-  const env: Record<string, string> = {
+  // isolatedChildEnv: every learned-state default src names is pointed under ROOT, so the child's credit writes
+  // (gap-class posteriors among them) never reach live state. A from-scratch env here dropped them, and the E2E
+  // keys (ilv-control, ilv-errors, ...) were written into node1's LIVE gap-class-posteriors.json on every run.
+  const env: Record<string, string> = isolatedChildEnv(ROOT, {
     // The exec guard does not reach a child process: its PATH resolves git and bun only, so no
     // host-lifecycle tool (systemctl, docker, podman, vessel-ctl) can run from it.
     HOME: ROOT, PATH: BIN,
-    WORKSPACE_ROOT: ROOT, VESSELS_CLONE_ROOT: CLONES, EXPECTATION_CALIB_PATH: CALIB,
+    VESSELS_CLONE_ROOT: CLONES, EXPECTATION_CALIB_PATH: CALIB,
     CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"),
-    SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1", NODE_ENV: "test", TZ: "UTC",
-  };
+    NODE_ENV: "test", TZ: "UTC",
+  });
   const p = Bun.spawnSync([process.execPath, "-e", code], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
   return { exit: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr) };
 }

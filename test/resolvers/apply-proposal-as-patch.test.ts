@@ -5,6 +5,7 @@ import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // The spend envelope fails closed when it cannot be read or holds no record, so discovery here names one poolImpulse
 // producer and the envelope read SUCCEEDS with an explicit {uncapped: true} record. Every other request goes to `inner` unchanged.
@@ -41,6 +42,7 @@ describe("apply_proposal_as_patch resolver", () => {
     mkdirSync(proposalsDir, { recursive: true });
     mkdirSync(vesselsRoot, { recursive: true });
     process.env["WORKSPACE_ROOT"] = base;
+    isolateLearnedStateInProcess(base); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
     __resetPolicyReadsForTests();
   });
 

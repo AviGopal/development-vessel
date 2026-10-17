@@ -50,6 +50,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 // The runtime tree is this file's own temp root, also where feature-compose's load-time RUNTIME_ROOT /
 // REPO_ROOT point whatever loaded the module first (test/helpers/runtime-root.ts; refuses when it cannot).
@@ -58,6 +59,7 @@ const CLONE = join(ROOT, "clone");
 const savedEnv: Record<string, string | undefined> = {};
 for (const k of ["MITOSIS_RUNTIME_DIR", "MITOSIS_REPO_ROOT", "VESSELS_CLONE_ROOT", "GAP_STORE_ENDPOINT"]) savedEnv[k] = process.env[k];
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const FIXTURE_GAP_STORE = "http://gap-store.reloc-fixture/v2/impulses/resolve";
 const setTreeEnv = (): void => {

@@ -20,6 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
 import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
@@ -95,12 +96,13 @@ function sweepTwiceInIsolation(): { exit: number; first: string; second: string;
     `const r2 = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP2_DONE " + JSON.stringify(r2));`,
   ].join("\n");
-  const env: Record<string, string> = {
-    HOME: ROOT, PATH: BIN, WORKSPACE_ROOT: ROOT, VESSELS_CLONE_ROOT: CLONES,
+  // isolatedChildEnv: every learned-state default src names under ROOT (the sweep's credit writes never reach live state).
+  const env: Record<string, string> = isolatedChildEnv(ROOT, {
+    HOME: ROOT, PATH: BIN, VESSELS_CLONE_ROOT: CLONES,
     EXPECTATION_CALIB_PATH: join(ROOT, "expectation-calibration.json"),
     CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"),
-    SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1", NODE_ENV: "test", TZ: "UTC",
-  };
+    NODE_ENV: "test", TZ: "UTC",
+  });
   const p = Bun.spawnSync([process.execPath, "-e", code], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe", timeout: 180_000 });
   const out = new TextDecoder().decode(p.stdout) + "\n" + new TextDecoder().decode(p.stderr);
   // stdout carries both markers in order; console.warn lines go to stderr, so split the log lines by marker on stdout

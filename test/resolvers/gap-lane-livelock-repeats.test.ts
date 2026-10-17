@@ -14,9 +14,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const SCRATCH = mkdtempSync(join(tmpdir(), "gap-lane-livelock-"));
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = join(SCRATCH, "ws");
+isolateLearnedStateInProcess(join(SCRATCH, "ws")); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // Every file this path can write is pointed at scratch, so no run touches /workspace, /vessels or a tracked store.
 const SCRATCH_ENV: Record<string, string> = {

@@ -14,9 +14,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const root = mkdtempSync(join(tmpdir(), "write-nudge-eligibility-"));
 process.env["WORKSPACE_ROOT"] = root;
+isolateLearnedStateInProcess(root); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 const mod = await import(`../../src/resolvers/substrate-gap.js?${"write-nudge-eligibility"}`);
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) {
   throw new Error(`refusing to run: gap store ${mod.gapStoreRootForTest()} is not under ${tmpdir()}`);

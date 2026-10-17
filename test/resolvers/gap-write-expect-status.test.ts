@@ -8,10 +8,12 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `gap-write-expect-status-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 // Never shell the real gap-compose trigger from a test (see substrate-gap.test.ts).
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 delete process.env["GAP_STORE_ENDPOINT"];

@@ -8,11 +8,13 @@ import { afterAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "priority-credit-"));
 const KEYS = ["WORKSPACE_ROOT", "GAP_STORE_ENDPOINT", "GAP_CLASS_POSTERIOR_PATH", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 process.env["WORKSPACE_ROOT"] = join(ROOT, "ws"); mkdirSync(process.env["WORKSPACE_ROOT"], { recursive: true });
+isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 // The priority weights and the journal live beside the class posteriors (no locations of their own).
 process.env["GAP_CLASS_POSTERIOR_PATH"] = join(ROOT, "class.json");
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";

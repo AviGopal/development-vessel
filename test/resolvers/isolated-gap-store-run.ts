@@ -9,9 +9,9 @@
 // This runs `<name>.cases.ts` in a child `bun test` with a fresh temp WORKSPACE_ROOT, output captured to a FILE
 // (never a pipe), and returns one row per case so the caller declares one named test per case. A child that
 // reports no cases, or fails to run, yields a row that fails by name.
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 // LEARNED STATE STAYS IN THE CHILD'S TEMP ROOT (2026-10-17). A child spawned with an env built from scratch drops every
 // state redirect the scrubbed suite env sets, so code under test fell back to its live defaults: fixture classes
@@ -40,6 +40,8 @@ export function learnedStateDefaults(srcDir: string = join(import.meta.dir, ".."
   if (srcDir === join(import.meta.dir, "..", "..", "src")) stateDefaultsCache = out;
   return out;
 }
+/** A redirected write lands where the live one would have (the writers are best-effort and create no directories). */
+const makeParents = (paths: string[]): void => { for (const p of paths) { try { mkdirSync(dirname(p), { recursive: true }); } catch { /* best-effort */ } } };
 const underTmp = (p: string): boolean => { const r = resolve(p), t = resolve(tmpdir()); return r === t || r.startsWith(t + sep) || r.startsWith("/tmp/"); };
 /** The env for an isolated child: as clean as before (HOME, PATH, WORKSPACE_ROOT=root, the compose-trigger skip, extras),
  *  plus every learned-state default pointed under `root`. Refuses (throws) if any learned-state path is outside tmpdir. */
@@ -51,7 +53,35 @@ export function isolatedChildEnv(root: string, extra: Record<string, string> = {
     if (!underTmp(env[name]!)) throw new Error(`isolated child refused: ${name}=${env[name]} is not under tmpdir (the child would write live learned state)`);
   }
   if (!underTmp(env["WORKSPACE_ROOT"]!)) throw new Error(`isolated child refused: WORKSPACE_ROOT=${env["WORKSPACE_ROOT"]} is not under tmpdir`);
+  makeParents([...learnedStateDefaults().keys()].map((n) => env[n]!));
   return env;
+}
+
+/** The in-process twin of isolatedChildEnv, for a test file that drives src in its own process (route 3: such a file set
+ *  WORKSPACE_ROOT only, so a credit write through the real modules resolved GAP_CLASS_POSTERIOR_PATH & co. to their live
+ *  /workspace defaults: cc-ctl-* classes reached node1's gap-class-posteriors.json). Points every learned-state default
+ *  src names under `root/ws` unless its current value is already under tmpdir (the scrubbed suite env's redirects are
+ *  kept), and WORKSPACE_ROOT at `root` unless it is already under tmpdir. Every value is checked BEFORE process.env is
+ *  touched: a non-tmp root throws and leaves the env as it was.
+ *  Covers paths src reads at call time (tablePath, classPosteriorPath, the gap-store table map). A src module that
+ *  captures its path at module load is covered only if this runs before that module is imported, so call it before
+ *  the file's first `await import("../../src/...")` (a static import is evaluated before the file body). */
+export function isolateLearnedStateInProcess(root: string): Record<string, string> {
+  if (!underTmp(root)) throw new Error(`in-process isolation refused: root ${root} is not under tmpdir`);
+  const next: Record<string, string> = {};
+  for (const [name, dflt] of learnedStateDefaults()) {
+    const cur = process.env[name];
+    // kept only while its directory exists: in one `bun test` process a previous file's removed root is not reused
+    next[name] = cur && underTmp(cur) && existsSync(dirname(cur)) ? cur : join(root, "ws", dflt.slice("/workspace".length));
+  }
+  const ws = process.env["WORKSPACE_ROOT"];
+  next["WORKSPACE_ROOT"] = ws && underTmp(ws) ? ws : root;
+  for (const [name, v] of Object.entries(next)) {
+    if (!underTmp(v)) throw new Error(`in-process isolation refused: ${name}=${v} is not under tmpdir (the test would write live learned state)`);
+  }
+  Object.assign(process.env, next);
+  makeParents([...learnedStateDefaults().keys()].map((n) => next[n]!));
+  return next;
 }
 
 export type CaseRow = { name: string; ok: boolean; detail: string };

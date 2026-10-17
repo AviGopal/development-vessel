@@ -29,6 +29,7 @@ import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 
 export type Row = Record<string, any>;
 
@@ -74,6 +75,7 @@ function activate(): void {
   for (const d of ["ledger", "runtime", "clones", "proposals", "parked", "compose-slots", "units"]) realFs.mkdirSync(join(SCRATCH, d), { recursive: true });
   SAVED_WR = process.env["WORKSPACE_ROOT"];
   if (!SAVED_WR) process.env["WORKSPACE_ROOT"] = join(SCRATCH, "ws");
+  isolateLearnedStateInProcess(join(SCRATCH, "ws")); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
   installModuleStandIns();
 }
 

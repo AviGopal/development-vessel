@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 const { __resetPolicyReadsForTests, autonomyScopeExcludes } = await import("../../src/judge/gap-policy.js");
@@ -125,6 +126,7 @@ beforeEach(async () => {
   ws = await mkdtemp(join(tmpdir(), "cutover-autonomy-scope-"));
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
   process.env["WORKSPACE_ROOT"] = ws;
+  isolateLearnedStateInProcess(ws); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   process.env["ATTEMPT_LEDGER_DIR"] = join(ws, "attempt-ledger");

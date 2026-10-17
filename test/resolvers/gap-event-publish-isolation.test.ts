@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess, isolatedChildEnv } from "./isolated-gap-store-run.js";
 
 let publishes: string[] = [];
 const server = Bun.serve({
@@ -30,6 +31,7 @@ const VESSEL_ROOT = join(import.meta.dir, "..", "..");
 const ROOT = mkdtempSync(join(tmpdir(), "gap-publish-isolation-"));
 const saved = { ws: process.env["WORKSPACE_ROOT"], ep: process.env["ACTIVITY_API_ENDPOINT"], skip: process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] };
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const mod = await import(`../../src/resolvers/substrate-gap.js?${"gap-publish-isolation"}`);
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) throw new Error("refusing to run against a non-temp gap store");
@@ -89,7 +91,8 @@ describe("a gap-writing test file publishes nothing to the bus", () => {
     const out = join(ROOT, "child-out.txt");
     const p = Bun.spawn(["bash", "-c", `bun test ./test/resolvers/gap-write-demand-goals.test.ts > ${JSON.stringify(out)} 2>&1`], {
       cwd: VESSEL_ROOT,
-      env: { HOME: process.env["HOME"] ?? "", PATH: process.env["PATH"] ?? "", ACTIVITY_API_ENDPOINT: LISTENER, SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1" },
+      // isolatedChildEnv: the child's gap writes and credits resolve under this file's temp root, never /workspace.
+      env: isolatedChildEnv(join(ROOT, "child"), { ACTIVITY_API_ENDPOINT: LISTENER }),
     });
     await p.exited;
     const text = (() => { try { return readFileSync(out, "utf8"); } catch { return ""; } })();

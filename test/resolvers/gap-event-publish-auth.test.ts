@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 let seen: Array<Record<string, string>> = [];
 const server = Bun.serve({
@@ -25,6 +26,7 @@ const ROOT = mkdtempSync(join(tmpdir(), "gap-publish-auth-"));
 const KEYS = ["WORKSPACE_ROOT", "ACTIVITY_API_ENDPOINT", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "SUBSTRATE_API_KEY", "METABOB_API_KEY", "API_KEY"] as const;
 const saved: Record<string, string | undefined> = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const mod = await import(`../../src/resolvers/substrate-gap.js?${"gap-publish-auth"}`);
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) throw new Error("refusing to run against a non-temp gap store");

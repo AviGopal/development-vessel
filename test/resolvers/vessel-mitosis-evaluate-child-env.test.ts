@@ -16,6 +16,7 @@ import ts from "typescript";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 
 const HELPER = "../../src/test-child-env.ts";
 const SRC = join(import.meta.dir, "..", "..", "src");
@@ -159,7 +160,7 @@ describe("gap-to-feature admission: the default typecheck runner spawns with the
     mkdirSync(home);
     const parentWs = join(root, "parent-ws");
     mkdirSync(parentWs);
-    const env = { ...credentialFixture(home), WORKSPACE_ROOT: parentWs, MITOSIS_RUNTIME_DIR: root };
+    const env = isolatedChildEnv(parentWs, { ...credentialFixture(home), WORKSPACE_ROOT: parentWs, MITOSIS_RUNTIME_DIR: root }); // learned state under the temp root
     const p = Bun.spawnSync([process.execPath, driver], { env, cwd: root, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
     const out = p.stdout.toString();
     expect(out).toContain("RUNNER=");
@@ -337,7 +338,7 @@ describe("vessel_mitosis_evaluate: the static-check and suite children get the s
     mkdirSync(home);
     const parentWs = join(root, "parent-ws");
     mkdirSync(parentWs);
-    const env = { ...credentialFixture(home), WORKSPACE_ROOT: parentWs };
+    const env = isolatedChildEnv(parentWs, { ...credentialFixture(home), WORKSPACE_ROOT: parentWs }); // learned state under the temp root
     const p = Bun.spawnSync([process.execPath, driver], { env, cwd: root, stdout: "pipe", stderr: "pipe", timeout: 180_000 });
     const out = p.stdout.toString();
     expect(out).toContain("EVAL=");

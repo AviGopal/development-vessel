@@ -17,10 +17,12 @@ import { afterAll, beforeEach, describe, expect, it, setSystemTime, spyOn } from
 import { mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `lineage-spend-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace
 
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
 const g2fPolicy = (await import("../../src/judge/gap-policy.js")) as Record<string, any>;

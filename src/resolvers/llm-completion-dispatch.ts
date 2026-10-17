@@ -172,6 +172,11 @@ const DEFAULT_LLM_TOOLS: LlmTool[] = [
   },
 ];
 
+/** This resolver's tier, declared where it is defined: it runs a model call, so it is an `llm` resolver. Registration
+ *  (discovery-registration.ts declaredResolverTiers) sends it as `resolvers[]`, discovery echoes it on the capability
+ *  row, and a dispatcher stamps the trace task with it (the learning loop's M4 tier-restricted skip reads that stamp). */
+export const LLM_COMPLETION_DISPATCH_DECLARED_TIERS = { llm_completion_dispatch: "llm" } as const;
+
 export async function resolveLlmCompletionDispatch(
   pointer: LlmCompletionDispatchPointer,
 ): Promise<ResolverResult> {

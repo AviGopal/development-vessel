@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { GAP_STORE_HELD_SHAPES, gapStoreIsLocal } from "./resolvers/substrate-gap.js";
 import { MEMORY_NOTE_HELD_SHAPES } from "./resolvers/memory-note.js";
 import { LEARNING_CREDIT_HELD_SHAPES } from "./judge/learning-credit.js";
+import { LLM_COMPLETION_DISPATCH_DECLARED_TIERS } from "./resolvers/llm-completion-dispatch.js";
 
 /** Per-shape held-data policies for the advertised shapes, from the store modules' own declarations. The holder names
  *  which store: this node's gap store when it holds it, else the designated holder it forwards to; its own memory store. */
@@ -12,6 +13,15 @@ export function heldShapePolicies(advertised: readonly string[]): Record<string,
   add(GAP_STORE_HELD_SHAPES, gapHolder);
   add(LEARNING_CREDIT_HELD_SHAPES, gapHolder);
   add(MEMORY_NOTE_HELD_SHAPES, `memory-store@${config.vesselId}`);
+  return out;
+}
+/** The resolver tiers this vessel DECLARES, from the resolver modules' own declarations (as the held shapes are), for the
+ *  advertised shapes only: registration `resolvers[]` entries `{ id: shape, tier }`. A shape with no declaration is
+ *  simply absent (undeclared), never defaulted here: a dispatcher keeps its own fallback for those. */
+export function declaredResolverTiers(advertised: readonly string[]): Array<{ id: string; tier: "deterministic" | "pattern" | "llm" }> {
+  const declarations: ReadonlyArray<Readonly<Record<string, "deterministic" | "pattern" | "llm">>> = [LLM_COMPLETION_DISPATCH_DECLARED_TIERS];
+  const out: Array<{ id: string; tier: "deterministic" | "pattern" | "llm" }> = [];
+  for (const d of declarations) for (const [id, tier] of Object.entries(d)) if (advertised.includes(id)) out.push({ id, tier });
   return out;
 }
 import {
@@ -115,6 +125,9 @@ export function buildRegistrationPayload() {
     // node holds (or, for the gap store on a non-holder, forwards to its designated holder); routers take those to this
     // node's own producer, never to an interchangeable peer. Only advertised shapes are listed.
     shape_policies: heldShapePolicies(advertised),
+    // DECLARED RESOLVER TIERS (discovery echoes each on the shape's capability row as resolver_tier): a dispatcher stamps
+    // the tier of the resolver that ran instead of a constant. Only advertised shapes, only where a module declares one.
+    resolvers: declaredResolverTiers(advertised),
     resolve_endpoint: config.discovery.resolveEndpoint,
     resolve_request_format: config.discovery.resolveRequestFormat,
     auth_scheme: config.discovery.authScheme,

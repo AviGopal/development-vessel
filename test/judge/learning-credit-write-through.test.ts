@@ -76,7 +76,13 @@ async function holderCall(_u: unknown, init: RequestInit | undefined, up: () => 
   {
     if (!up()) throw new TypeError("Unable to connect");
     const ptr = JSON.parse(String(init?.body ?? "{}")).impulse.pointer;
-    const env: Record<string, string> = { ...(process.env as Record<string, string>), GAP_CLASS_POSTERIOR_PATH: join(HDIR, "class.json"), CLOSE_ORACLE_CALIB_PATH: join(HDIR, "oracle.json"), DETECTOR_CLOSURE_LEDGER_PATH: join(HDIR, "detector.json") };
+    // The holder reads the gap store THIS process's gap module actually writes (its root is fixed when substrate-gap.js is
+    // first loaded, and in a whole-suite run an earlier file loads it first): the fixture gaps' references (decision:,
+    // attempt:) are then visible to the holder exactly as a real holder sees its own store.
+    const holderRoot = (sg as { gapStoreRootForTest: () => string }).gapStoreRootForTest();
+    // Never point a holder at a real store: the root must be a scratch (tmpdir) store, as substrate-gap.test.ts requires.
+    if (!(sg as { isScratchGapStoreRoot: (r: string) => boolean }).isScratchGapStoreRoot(holderRoot)) throw new Error(`stand-in holder refused: gap store root ${holderRoot} is not a scratch store`);
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), WORKSPACE_ROOT: holderRoot, GAP_CLASS_POSTERIOR_PATH: join(HDIR, "class.json"), CLOSE_ORACLE_CALIB_PATH: join(HDIR, "oracle.json"), DETECTOR_CLOSURE_LEDGER_PATH: join(HDIR, "detector.json") };
     delete env["GAP_STORE_ENDPOINT"];
     const p = Bun.spawn([process.execPath, HOLDER_SCRIPT], { stdin: new Blob([JSON.stringify(ptr)]), stdout: "pipe", stderr: "ignore", env });
     const out = await new Response(p.stdout).text(); await p.exited;

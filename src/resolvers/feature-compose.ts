@@ -394,6 +394,21 @@ export type { ShapeVocabulary } from "../shape-vocabulary.js";
  * 1,200 lines away, not marginal.
  */
 const ANCHOR_REGION_SLACK_LINES = Number(process.env["ANCHOR_REGION_SLACK_LINES"] ?? 160);
+/**
+ * THE ANCHOR-REGION VERDICT (M-6, 2026-10-17): what a UNIQUE planned anchor `dist` lines from the region does.
+ *   near           within the slack: the anchor stands.
+ *   stands_whole   far, but the drafter was shown the WHOLE file and no explicit region was given: the region is not
+ *                  what it saw, so the unique anchor stands.
+ *   rederive       far from a region the drafter saw only a window of (or from an EXPLICIT region): re-derive from that
+ *                  region's window, and REFUSE (anchorFarRefusal) when no unique anchor is found there. Never "trust anyway".
+ */
+export function anchorRegionVerdict(dist: number, slack: number, explicitRegion: boolean, shownWhole: boolean): "near" | "stands_whole" | "rederive" {
+  if (!(dist > slack)) return "near";
+  return shownWhole && !explicitRegion ? "stands_whole" : "rederive";
+}
+/** The named refusal of an edit whose far anchor could not be re-derived in the region (lands in the op's detail). */
+export const anchorFarRefusal = (detail: string): string =>
+  `anchor_far_from_grounded_region: refused fs_edit — the planned anchor is unique but ${detail}, and re-derivation from that region found no unique anchor (the drafter never saw the code it anchored on)`;
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -8092,6 +8107,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // rejected anchor is not discarded — re-derivation still has the free-text
       // path behind the indexed one.
       let anchorFarFromRegion = false;
+      let anchorFarDetail = "";
       if (liveContent && effOld && n0 === 1) {
         const liveLines = liveContent.split("\n");
         const center = locateRegion(liveLines, anchorLocatorsForOp);
@@ -8099,17 +8115,22 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           const idx = liveContent.slice(0, liveContent.indexOf(effOld)).split("\n").length - 1;
           const dist = Math.abs(idx - center);
           if (dist > ANCHOR_REGION_SLACK_LINES) {
-            if (regionHint) {
-              anchorFarFromRegion = true;
-              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the EXPLICIT region (line ${center + 1}) — re-deriving from the offered anchors instead`);
+            // A FAR ANCHOR IS NEVER TRUSTED ANYWAY (M-6, 2026-10-17). The mined-region branch used to keep a unique anchor
+            // "because a unique literal match is a fact", but the drafter was shown only the window around the region:
+            // an anchor hundreds of lines away is code it never saw (lane compose 8c20e9b8: ~800 lines away, trusted, and
+            // drafted against the wrong site). Either the drafter was shown the whole file (then the region is not what
+            // it saw, and the unique anchor stands), or the op re-derives from the region's window, and when that finds
+            // no unique anchor the edit is REFUSED with a named reason (anchor_far_from_grounded_region, below) instead of
+            // landing on the far anchor. Same for an explicit region, whose failed re-derivation also used to fall
+            // through to the far anchor. (This block was duplicated, so every warning printed twice.)
+            const norm = (p: string): string => p.replace(/^\/+/, "").replace(/^repos\//, "");
+            const shownWhole = groundingEntries.some((e) => e.mode === "whole" && norm(e.path) === norm(op.path));
+            if (anchorRegionVerdict(dist, ANCHOR_REGION_SLACK_LINES, !!regionHint, shownWhole) === "stands_whole") {
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique and ${dist} lines from the region located from the goal's locators (line ${center + 1}), but the drafter was shown the WHOLE file — the unique anchor stands`);
             } else {
-              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from a region located ONLY from mined identifiers (line ${center + 1}) — TRUSTING THE UNIQUE ANCHOR: a mined region is a guess, a unique literal match is a fact`);
-            }
-            if (regionHint) {
               anchorFarFromRegion = true;
-              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the EXPLICIT region (line ${center + 1}) — re-deriving from the offered anchors instead`);
-            } else {
-              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from a region located ONLY from mined identifiers (line ${center + 1}) — TRUSTING THE UNIQUE ANCHOR: a mined region is a guess, a unique literal match is a fact`);
+              anchorFarDetail = `${dist} lines from the ${regionHint ? "EXPLICIT region" : "grounded region"} (line ${center + 1})`;
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${anchorFarDetail} — re-deriving from that region's window; refused if no unique anchor is found there`);
             }
           }
         }
@@ -8245,11 +8266,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Re-derivation may have moved the anchor: the no-effect constraint is checked on the anchor actually written.
       const reBase = preEditContent.get(abs) ?? liveContent;
       const rederivedRefusal = reBase && effOld !== (op.old_string ?? "") ? checkOpNoEffect({ path: op.path, kind: "edit", old_string: effOld }, reBase, priorLessons) : null;
-      const anchorRejected = anchorNonUnique && !groundedPre;
+      const anchorRejected = (anchorNonUnique || anchorFarFromRegion) && !groundedPre;
       let r: { ok: boolean; body: Json } = rederivedRefusal
         ? (noteNoEffectRefusal("re-derived anchor", rederivedRefusal), { ok: false, body: { error: rederivedRefusal.detail } as Json })
         : anchorRejected
-        ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }
+        ? { ok: false, body: { error: anchorNonUnique
+          ? "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)"
+          : anchorFarRefusal(anchorFarDetail) } as Json }
         : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
       if (anchorNonUnique && groundedPre && r.ok && n0 > 1) {

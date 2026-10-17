@@ -69,6 +69,37 @@ describe("(a) the window moves to the goal's quoted literal", () => {
   });
 });
 
+describe("(b) a far anchor is re-derived, then refused with a named reason; never trusted anyway", () => {
+  it("[MUST-FAIL] far from a mined region the drafter saw a window of -> re-derive (the parent trusted it)", () => {
+    expect(typeof fc.anchorRegionVerdict).toBe("function");
+    expect(fc.anchorRegionVerdict(800, 160, false, false)).toBe("rederive");
+    expect(fc.anchorRegionVerdict(800, 160, true, false)).toBe("rederive");
+    expect(fc.anchorRegionVerdict(800, 160, true, true)).toBe("rederive");
+  });
+  it("[MUST-FAIL] the refusal is named, says how far, and lands as the op's error", () => {
+    expect(typeof fc.anchorFarRefusal).toBe("function");
+    const r = fc.anchorFarRefusal("800 lines from the grounded region (line 10)") as string;
+    expect(r.startsWith("anchor_far_from_grounded_region:")).toBe(true);
+    expect(r).toContain("800 lines from the grounded region (line 10)");
+    expect(JSON.stringify({ error: r }).slice(0, 200)).toContain("anchor_far_from_grounded_region");
+  });
+  it("[MUST-FAIL] wiring: the guard decides by the verdict, the trust-anyway branch is gone, and a far anchor that re-derivation could not move is REJECTED (not edited, not repaired)", () => {
+    expect(SRC).toContain('anchorRegionVerdict(dist, ANCHOR_REGION_SLACK_LINES, !!regionHint, shownWhole) === "stands_whole"');
+    expect(SRC).not.toContain("TRUSTING THE UNIQUE ANCHOR");
+    expect(SRC).toContain("const anchorRejected = (anchorNonUnique || anchorFarFromRegion) && !groundedPre;");
+    expect(SRC).toContain(": anchorFarRefusal(anchorFarDetail) } as Json }");
+    // the blind-edit repair after a failed fs_edit is skipped for a rejected anchor, so the refusal is final
+    expect(SRC).toContain("if (!r.ok && !anchorRejected && rederivedRefusal === null) {");
+    // the whole-file exception reads the composer's own grounding record
+    expect(SRC).toContain('groundingEntries.some((e) => e.mode === "whole" && norm(e.path) === norm(op.path))');
+  });
+  it("[CONTROL] near anchors stand; a drafter shown the WHOLE file keeps its far unique anchor when no region was given", () => {
+    expect(fc.anchorRegionVerdict(100, 160, false, false)).toBe("near");
+    expect(fc.anchorRegionVerdict(160, 160, true, false)).toBe("near");
+    expect(fc.anchorRegionVerdict(800, 160, false, true)).toBe("stands_whole");
+  });
+});
+
 describe("(c) a goal with no quoted code span is unchanged", () => {
   it("[CONTROL] single-token quotes and scraped identifiers keep their order; no span is added", () => {
     const g = "Fix `classifyComposeFailure` so TC_EXIT is reported, in src/resolvers/feature-compose.ts.";

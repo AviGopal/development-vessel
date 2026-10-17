@@ -22,7 +22,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
-import { isGapStoreHolder, writeThroughLearning } from "./learning-credit.js";
+import { isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
 
 // LANDABILITY-RANKED SELECTION (2026-06-28). gap_to_feature historically picked gaps[0]
 // (arbitrary order), so the autonomous loop kept selecting hard META/ARCHITECTURAL gaps
@@ -183,17 +183,51 @@ type CalibRec = Record<string, { attempts: number; lands: number }>;
 // each auto-pick, and uses its own file only when the holder cannot be read (logged). On the
 // holder the read resolves locally and returns the same file.
 let heldCalibration: CalibRec | null = null;
+// I4: the learning credit tables the holder serves beside it (class_posteriors, close_oracle, detector_credit), cached by
+// the same refresh. null = not read this refresh: each reader then uses its local file, logged once per refresh.
+export type LearningCreditTable = "class_posteriors" | "close_oracle" | "detector_credit";
+let heldLearningCredit: Partial<Record<LearningCreditTable, Record<string, unknown>>> | null = null;
+let heldFallbackLogged = new Set<LearningCreditTable>();
 export async function refreshHeldCalibration(): Promise<void> {
+  heldFallbackLogged = new Set();
+  // I4a's journal: any credit an outage left pending is re-sent before the tables are read (no silent loss).
+  try { await replayLearningJournal(); } catch (err) { console.warn(`[learning-credit] replay failed: ${String(err).slice(0, 160)}`); }
   try {
     const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1, include_calibration: true } as never);
-    const cal = (r.body as { expectation_calibration?: unknown } | undefined)?.expectation_calibration;
+    const b = r.body as { expectation_calibration?: unknown; learning_credit?: unknown } | undefined;
+    const lc = b?.learning_credit;
+    heldLearningCredit = lc && typeof lc === "object" && !Array.isArray(lc) ? (lc as Partial<Record<LearningCreditTable, Record<string, unknown>>>) : null;
+    if (!heldLearningCredit) console.warn(`[learning-credit] gap store returned no learning_credit (shape=${String(r.shape)}) - readers use their local files`);
+    const cal = b?.expectation_calibration;
     if (cal && typeof cal === "object") { heldCalibration = cal as CalibRec; return; }
     console.warn(`[expectation-calibration] gap store returned no calibration (shape=${String(r.shape)}) - using the local file`);
   } catch (err) {
+    heldLearningCredit = null;
     console.warn(`[expectation-calibration] holder read failed: ${String(err).slice(0, 200)} - using the local file`);
   }
   heldCalibration = null;
 }
+/** The holder's copy of a learning credit table, or null (the caller reads its local file; logged once per refresh). */
+/** Where a learning table's last read came from (qa condition 3, law 8): the holder's served copy, the holder's own file,
+ *  or a non-holder's LOCAL FALLBACK (a partial view: only this node's credits). Decisions record it. */
+export type LearningSource = "held" | "holder_local" | "local_fallback";
+const lastLearningSource: Partial<Record<LearningCreditTable, LearningSource>> = {};
+export function learningTableSource(table: LearningCreditTable): LearningSource {
+  return lastLearningSource[table] ?? (isGapStoreHolder() ? "holder_local" : "local_fallback");
+}
+export function heldLearningTable(table: LearningCreditTable): Record<string, unknown> | null {
+  // The holder's own files ARE the tables (and fresher than any cached copy): its readers read them, unchanged, unlogged.
+  if (isGapStoreHolder()) { lastLearningSource[table] = "holder_local"; return null; }
+  const t = heldLearningCredit?.[table];
+  // NEVER SUMMED (qa condition 2): a reader takes the held table OR, when it is unavailable, its local file; the two are
+  // never added (the local copy holds this node's own credits, which the held table already counts).
+  if (t && typeof t === "object" && !Array.isArray(t)) { lastLearningSource[table] = "held"; return t; }
+  lastLearningSource[table] = "local_fallback";
+  if (!heldFallbackLogged.has(table)) { heldFallbackLogged.add(table); console.warn(`[learning-credit] no held ${table} - using the local file`); }
+  return null;
+}
+/** Test seam: reset the held cache (as a fresh process would start). */
+export function __resetHeldLearningCreditForTests(): void { heldLearningCredit = null; heldCalibration = null; heldFallbackLogged = new Set(); }
 export function readCalibration(): CalibRec {
   if (heldCalibration) return heldCalibration;
   try { return existsSync(CALIB_PATH) ? (JSON.parse(readFileSync(CALIB_PATH, "utf8")) as CalibRec) : {}; }
@@ -203,7 +237,10 @@ export function readCalibration(): CalibRec {
 // ---- Gap-class Thompson posterior (Option B) + pickDecision emission (Option A) ----
 // Same local-JSON pattern as CALIB_PATH / close-oracle-calibration: one row per gap CLASS,
 // Beta(alpha, beta) over "a compose attempt on a gap of this class lands".
-const CLASS_POSTERIOR_PATH = process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json";
+// Read at CALL time, not at import: an import-time read froze the path for the whole process, so whichever module imported
+// this first decided it for every later reader (measured: it ignored a later test file's own posterior file in the
+// landing gate's one-process run, the held-read controls' third interference).
+const classPosteriorPath = (): string => process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json";
 
 type ClassPosteriors = Record<string, { alpha: number; beta: number }>;
 export function gapClassOf(g: Record<string, unknown>): string {
@@ -242,7 +279,11 @@ export function gapClassOf(g: Record<string, unknown>): string {
   return (recommit ? "recommit:" : "") + base;
 }
 export function readClassPosteriors(): ClassPosteriors {
-  try { return existsSync(CLASS_POSTERIOR_PATH) ? (JSON.parse(readFileSync(CLASS_POSTERIOR_PATH, "utf8")) as ClassPosteriors) : backfillClassPosteriors(); }
+  // I4: the holder's table first (credited fleet-wide by write-through); a class it lacks is Beta(1,1) at the sampler,
+  // never a local backfill seed. The local file (and its backfill) is the logged fallback only.
+  const held = heldLearningTable("class_posteriors");
+  if (held) return held as ClassPosteriors;
+  try { return existsSync(classPosteriorPath()) ? (JSON.parse(readFileSync(classPosteriorPath(), "utf8")) as ClassPosteriors) : backfillClassPosteriors(); }
   catch { return {}; }
 }
 // BACKFILL: an absent store seeds beta from historical compose failures (compose-lessons.jsonl
@@ -259,7 +300,7 @@ function backfillClassPosteriors(): ClassPosteriors {
       } catch { /* skip bad line */ }
     }
     for (const [c, n] of fails) out[c] = { alpha: 1, beta: 1 + Math.min(30, Math.round(Math.sqrt(n))) };
-    writeFileSync(CLASS_POSTERIOR_PATH, JSON.stringify(out));
+    writeFileSync(classPosteriorPath(), JSON.stringify(out));
   } catch { /* best-effort; an empty store is fine */ }
   return out;
 }
@@ -276,7 +317,7 @@ export function updateClassPosterior(cls: string, landed: boolean, ref?: CreditR
     const rec = p[cls] ?? { alpha: 1, beta: 1 };
     if (landed) rec.alpha += 1; else rec.beta += 1;
     p[cls] = rec;
-    writeFileSync(CLASS_POSTERIOR_PATH, JSON.stringify(p));
+    writeFileSync(classPosteriorPath(), JSON.stringify(p));
   } catch { /* best-effort */ }
 }
 // Exploration floor: every class samples from at least Beta(1,1) + its counts, never hard-zero mass.

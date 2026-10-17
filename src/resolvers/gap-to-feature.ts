@@ -32,7 +32,7 @@ import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows } from "../judge/gap-policy.js";
-import { landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
+import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps } from "../judge/gap-admission.js";
 
@@ -1230,6 +1230,8 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
           theta_sampled: Number((classTheta.get(pickClass) ?? 0.5).toFixed(4)),
           alpha: pickPost.alpha,
           beta: pickPost.beta,
+          // qa condition 3: a pick made on a non-holder's LOCAL FALLBACK (a partial view) is countable from this record
+          posterior_source: learningTableSource("class_posteriors"),
           score: Number(chosen.s.toFixed(4)),
           cooldown_state: { skipped_pending: skippedPending },
           pool: selectionPool.length,

@@ -72,6 +72,24 @@ function creditExpectationCalibration(category: string, landed: boolean): void {
   }
 }
 
+// I4: THE LEARNING CREDIT TABLES, SERVED WITH THE GAP STORE. The gap-class posterior, the close-oracle calibration and the
+// detector closure credit are credited where the gap store lives (write-through, I4 step 1′) and read by every node
+// through `substrateGap{include_calibration:true}`, as expectation calibration already is. Same files and paths as their
+// writers (read at call time; loaders duplicated, not imported, for the same cycle reason as above).
+const LEARNING_CREDIT_PATHS = {
+  class_posteriors: () => process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json",
+  close_oracle: () => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json",
+  detector_credit: () => process.env["DETECTOR_CLOSURE_LEDGER_PATH"] ?? "/workspace/detector-closure-credit.json",
+} as const;
+function readLearningCredit(): Record<keyof typeof LEARNING_CREDIT_PATHS, Record<string, unknown>> {
+  const out = {} as Record<keyof typeof LEARNING_CREDIT_PATHS, Record<string, unknown>>;
+  for (const k of Object.keys(LEARNING_CREDIT_PATHS) as Array<keyof typeof LEARNING_CREDIT_PATHS>) {
+    try { const f = LEARNING_CREDIT_PATHS[k](); out[k] = existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>) : {}; }
+    catch { out[k] = {}; }
+  }
+  return out;
+}
+
 /** Whether this node holds the gap store (no holder endpoint configured): the one test every gap-store caller uses. */
 export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDPOINT"]; }
 
@@ -1444,7 +1462,7 @@ export async function resolveSubstrateGap(
       // "how many open gaps can never close?" is answerable from any read instead
       // of by hand-grepping the store file.
       falsifier_coverage: structuredClone(snap.coverage),
-      ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration() } : {}),
+      ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration(), learning_credit: readLearningCredit() } : {}),
     },
   };
 }

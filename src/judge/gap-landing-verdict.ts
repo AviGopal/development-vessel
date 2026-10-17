@@ -36,7 +36,7 @@ import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evalu
 export type Ask = (pointer: Record<string, unknown>) => Promise<unknown>;
 /** The chronic-failure escalation (gap-to-feature escalateToDecomposition), handed in per call as in gap-attempt-credit. */
 export type Escalate = (gap: Record<string, unknown>, why: string) => Promise<unknown>;
-import { landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, type CreditRef, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
+import { learningTableSource, landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, heldLearningTable, type CreditRef, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
 import { creditLearning } from "./learning-credit.js";
 
 /** I4a: a compose failure's class-credit reference. The pick's decision when there was one; otherwise the failed_attempts
@@ -458,6 +458,8 @@ const CLOSE_ORACLE_TRUST_FLOOR = 0.7;   // a class must hold >=70% of its closes
 const CLOSE_ORACLE_MIN_SAMPLES = 10;    // and have >=10 graded closes; below this it has no earned trust
 export function closeOracleEarnedTrust(evidenceClass: string): boolean {
   const r = closeOracleReliability(evidenceClass);
+  // qa condition 3: a trust decision made on a non-holder's LOCAL FALLBACK (a partial view) is logged as such.
+  if (learningTableSource("close_oracle") === "local_fallback") console.warn(`[close-oracle] trust for ${evidenceClass} read from the LOCAL FALLBACK (no held table this refresh): a partial view`);
   const samples = r.closes + r.false_closes;
   return samples >= CLOSE_ORACLE_MIN_SAMPLES && r.reliability >= CLOSE_ORACLE_TRUST_FLOOR;
 }
@@ -2209,6 +2211,9 @@ export async function escalateApplyFailureToPwt(
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
 type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;
 function readCloseOracleCalib(): CloseOracleCalib {
+  // I4: the holder's table first; the local file is the logged fallback.
+  const held = heldLearningTable("close_oracle");
+  if (held) return held as CloseOracleCalib;
   try { const p = closeOracleCalibPath(); return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as CloseOracleCalib) : {}; }
   catch { return {}; }
 }
@@ -2225,6 +2230,14 @@ export function recordOperatorEngagement(evidenceClass: string, solicitationId: 
   // I4a: written through to the holder, referenced by the answered solicitation (one count per solicitation).
   const gapId = solicitationId.startsWith("reland-needs-human-") ? solicitationId.slice("reland-needs-human-".length) : "";
   void creditLearning({ table: "close_oracle", key: evidenceClass || "unknown", outcome: "operator_engaged", gap_id: gapId, event_id: gapId ? `engagement:${solicitationId}` : null });
+}
+/** I4: detector closure credit, the first reader of the ledger closeLandedGap writes: the holder's table first, else
+ *  the local ledger (logged). {detector: {closures, last_closed_at}}. */
+export function readDetectorClosureCredit(): Record<string, { closures: number; last_closed_at: string }> {
+  const held = heldLearningTable("detector_credit");
+  if (held) return held as Record<string, { closures: number; last_closed_at: string }>;
+  try { const p = process.env.DETECTOR_CLOSURE_LEDGER_PATH ?? "/workspace/detector-closure-credit.json"; return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {}; }
+  catch { return {}; }
 }
 /** Beta-mean reliability of the close-oracle at an evidence class: P(a close of this class holds). */
 export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number; operator_engaged: number } {

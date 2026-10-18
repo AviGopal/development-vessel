@@ -1587,6 +1587,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
           reachability: [],
           llm: (p: string) => llmCall(llmEndpoints[0]!, p, model),
           runSemanticJudge: true,
+          // This lane writes one file and no test, so a change narrowing that file's documented contract is refused here.
+          contractFiles: [{ path: pointer.target_file, pre: baseContent, post: afterSrc }],
         });
         if (semanticGateInfraRefusal(semVerdict)) {
           console.warn(`[pwt-semantic-gate] REFUSED as infrastructure (judge unavailable, a non-attempt) ${pointer.target_file}: ${semVerdict.reason}`);

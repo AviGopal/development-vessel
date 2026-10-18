@@ -1,0 +1,76 @@
+/**
+ * GET /v2/activities/execution-traces
+ *
+ * List execution traces with filtering and pagination
+ *
+ * Query params:
+ * - variant_id: Filter by variant ID
+ * - activity_id: Filter by activity ID
+ * - success: Filter by success status (true/false)
+ * - limit: Max records to return (default: 50, max: 500)
+ * - offset: Pagination offset (default: 0)
+ * - start_date: Filter executions after this ISO timestamp
+ * - end_date: Filter executions before this ISO timestamp
+ */
+app.get('/', async (c) => {
+  try {
+    // Check for JWT auth first (MiniBob instances)
+    const jwtAuth = getJwtAuthFromContext(c);
+    const useJwtAuth = hasJwtAuth(c);
+
+    // Session may be undefined for internal/unauthenticated calls
+    const session = ((c.get as any)('session') as SessionData | undefined) || {
+      session_id: 'internal', org_id: null, project_id: null, api_key: null, latest_job_id: null
+    };
+
+    // Parse query params
+    const variantId = c.req.query('variant_id');
+    const activityId = c.req.query('activity_id');
+    const successParam = c.req.query('success');
+    const limitParam = parseInt(c.req.query('limit') || '50', 10);
+    const offsetParam = parseInt(c.req.query('offset') || '0', 10);
+    // `start_date` is the canonical param; `since` is an alias honored for
+    // callers (boredom-vessel's idle/analysis queries) that pass a recency
+    // bound. Both accept an ISO-8601 datetime OR an epoch value (ms or s),
+    // since boredom sends `Date.now() - window` (epoch millis). Coercing here
+    // keeps the hot-path query bounded to a NARROW recent window instead of
+    // silently dropping the filter and scanning the full 30-day default
+    // window (~all rows) — the loop's rate limiter. SurrealDB does not
+    // index-optimize `executed_at >= X ORDER BY executed_at DESC` (it
+    // range-scans then sorts), so a narrow window is what keeps this fast.
+    const coerceToIso = (raw: string | undefined): string | undefined => {
+      if (!raw) return undefined;
+      const trimmed = raw.trim();
+      if (/^\d+$/.test(trimmed)) {
+        const n = Number(trimmed);
+        // < 1e12 → looks like epoch seconds; otherwise epoch millis.
+        const ms = n < 1e12 ? n * 1000 : n;
+        return new Date(ms).toISOString();
+      }
+      return trimmed; // already ISO (or a value SurrealDB will reject loudly)
+    };
+    const startDate = coerceToIso(c.req.query('start_date') ?? c.req.query('since'));
+    const endDate = coerceToIso(c.req.query('end_date'));
+    const includeSelection = c.req.query('include_selection') === 'true';
+    // Opt-in narrow projection for the list view (2026-06-21). The DEFAULT
+    // projection is left WIDE and unchanged — many autonomous consumers
+    // (development-vessel resolvers, boredom-vessel) read `metadata`,
+    // `composition_chain`, `failure_mode`, and `input/output_impulse_shapes`
+    // off this list response, so narrowing the default would silently break
+    // them. Callers that only need a list summary (id/status/timing) can pass
+    // `?fields=summary` (alias `?detail=false`) to skip per-row hydration of
+    // the fat JSONB columns. Measured ~13% faster on a 30-day/20-row page
+    // (8.4s → 7.3s); the residual cost is the 30-day window iteration, which
+    // is intentional (OOMKill bound) and out of scope here.
+    const fieldsParam = c.req.query('fields');
+    const detailParam = c.req.query('detail');
+    const summaryProjection =
+      fieldsParam === 'summary' || detailParam === 'false';
+
+    // Validate and cap limit
+    const limit = Math.min(Math.max(limitParam, 1), 100);
+    const offset = Math.max(offsetParam, 0);
+
+    // Build SurrealDB query dynamically
+    let whereConditions: string[] = [];
+    const params: Record<string, any> = {

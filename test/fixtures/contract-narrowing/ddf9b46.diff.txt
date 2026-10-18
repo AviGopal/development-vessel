@@ -1,0 +1,13 @@
+diff --git a/src/routes/execution-traces.ts b/src/routes/execution-traces.ts
+index 4a97ead..e0b4b6b 100644
+--- a/src/routes/execution-traces.ts
++++ b/src/routes/execution-traces.ts
+@@ -592,7 +592,7 @@ app.get('/', async (c) => {
+       fieldsParam === 'summary' || detailParam === 'false';
+ 
+     // Validate and cap limit
+-    const limit = Math.min(Math.max(limitParam, 1), 500);
++    const limit = Math.min(Math.max(limitParam, 1), 100);
+     const offset = Math.max(offsetParam, 0);
+ 
+     // Build SurrealDB query dynamically

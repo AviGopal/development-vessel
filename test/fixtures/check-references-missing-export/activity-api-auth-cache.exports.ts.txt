@@ -1,0 +1,6 @@
+// The export surface of activity-api src/middleware/auth-cache.ts at the parent of 7b54fc7 (the tree the AuthCache check
+// was written against): every name moduleExports reads from that file, with its kind, bodies stubbed. 4 names.
+export function isTransientlyUnavailable(..._args: unknown[]): unknown { return undefined; }
+export function getOrFetchValidatedApiKey(..._args: unknown[]): unknown { return undefined; }
+export function _resetAuthKeyCache(..._args: unknown[]): unknown { return undefined; }
+export function _authKeyCacheSize(..._args: unknown[]): unknown { return undefined; }

@@ -1,0 +1,72 @@
+// The export surface of goal-host-vessel src/index.ts at the parent of 2f36f62 (the tree route-edit-bd252f8c's check
+// was written against): every name moduleExports reads from that file, with its kind, bodies stubbed (the one re-export
+// kept in its real import-then-export form). 68 names.
+export function drainReachSpool(..._args: unknown[]): unknown { return undefined; }
+export function reachVerdictBody(..._args: unknown[]): unknown { return undefined; }
+export function deliverReachVerdict(..._args: unknown[]): unknown { return undefined; }
+export function chargeChainCarrier(..._args: unknown[]): unknown { return undefined; }
+export function oracleAbstainCounts(..._args: unknown[]): unknown { return undefined; }
+export function citedLocations(..._args: unknown[]): unknown { return undefined; }
+export function verifyCodeInvestigationCitation(..._args: unknown[]): unknown { return undefined; }
+export function failedTraceReason(..._args: unknown[]): unknown { return undefined; }
+export function thrownDispatchReason(..._args: unknown[]): unknown { return undefined; }
+export function dispatchFailureReasons(..._args: unknown[]): unknown { return undefined; }
+export function rememberDispatchFailures(..._args: unknown[]): unknown { return undefined; }
+export function composeReportReason(..._args: unknown[]): unknown { return undefined; }
+export function executedToolCallsOf(..._args: unknown[]): unknown { return undefined; }
+export function executedToolCallError(..._args: unknown[]): unknown { return undefined; }
+export function floorGroundingDigest(..._args: unknown[]): unknown { return undefined; }
+export function makeSatisfierFlusher(..._args: unknown[]): unknown { return undefined; }
+export function persistWithinDeadline(..._args: unknown[]): unknown { return undefined; }
+export function withBetaWithheld(..._args: unknown[]): unknown { return undefined; }
+export function verifyDeterministicCompute(..._args: unknown[]): unknown { return undefined; }
+export function dcNumericCandidates(..._args: unknown[]): unknown { return undefined; }
+export function parseAggregateGoal(..._args: unknown[]): unknown { return undefined; }
+export function buildAggregateCommand(..._args: unknown[]): unknown { return undefined; }
+export function verifyAggregateReach(..._args: unknown[]): unknown { return undefined; }
+export function parseRankAggregate(..._args: unknown[]): unknown { return undefined; }
+export function buildRankAggregateCommand(..._args: unknown[]): unknown { return undefined; }
+export function verifyRankAggregateReach(..._args: unknown[]): unknown { return undefined; }
+export function parseAvgThreshold(..._args: unknown[]): unknown { return undefined; }
+export function buildAvgThresholdCommand(..._args: unknown[]): unknown { return undefined; }
+export function verifyAvgThresholdReach(..._args: unknown[]): unknown { return undefined; }
+import { parseTwoSourceCompare } from "./two-source-parse";
+export { parseTwoSourceCompare };
+export function buildTwoSourceCompareCommand(..._args: unknown[]): unknown { return undefined; }
+export function verifyTwoSourceCompareReach(..._args: unknown[]): unknown { return undefined; }
+export function isCompositionalGoal(..._args: unknown[]): unknown { return undefined; }
+export function parseBelowMean(..._args: unknown[]): unknown { return undefined; }
+export const SELECTORS: unknown = undefined;
+export function enumerate(..._args: unknown[]): unknown { return undefined; }
+export function emitVerdict(..._args: unknown[]): unknown { return undefined; }
+export function parsePathsAndExt(..._args: unknown[]): unknown { return undefined; }
+export const ROW_AVG_THRESHOLD: unknown = undefined;
+export const ROW_BELOW_MEAN: unknown = undefined;
+export const CLASS_ROWS: unknown = undefined;
+export function resolveClassRow(..._args: unknown[]): unknown { return undefined; }
+export function buildFromClassRow(..._args: unknown[]): unknown { return undefined; }
+export function verifyFromClassRow(..._args: unknown[]): unknown { return undefined; }
+export function selectorOf(..._args: unknown[]): unknown { return undefined; }
+export function thresholdSelector(..._args: unknown[]): unknown { return undefined; }
+export function parseThreshold(..._args: unknown[]): unknown { return undefined; }
+export function verifyEditPostState(..._args: unknown[]): unknown { return undefined; }
+export function parseAddSymbol(..._args: unknown[]): unknown { return undefined; }
+export function symbolInAddedLines(..._args: unknown[]): unknown { return undefined; }
+export function verifyGoalReached(..._args: unknown[]): unknown { return undefined; }
+export function buildFailedCompositeTrace(..._args: unknown[]): unknown { return undefined; }
+export function walkFailureMode(..._args: unknown[]): unknown { return undefined; }
+export function buildCompositeTraceFromChain(..._args: unknown[]): unknown { return undefined; }
+export function resolveFleetActivityFeed(..._args: unknown[]): unknown { return undefined; }
+export function runGoalWithRecovery(..._args: unknown[]): unknown { return undefined; }
+export function rememberGoalFailure(..._args: unknown[]): unknown { return undefined; }
+export function recallGoalFailures(..._args: unknown[]): unknown { return undefined; }
+export function runGroundedToolLoop(..._args: unknown[]): unknown { return undefined; }
+export function isDeterministicVerdict(..._args: unknown[]): unknown { return undefined; }
+export interface ClassRow { _?: unknown }
+export type SelectorId = unknown;
+export interface Enumerated { _?: unknown }
+export interface SelParams { _?: unknown }
+export interface LabelCtx { _?: unknown }
+export interface OwnMatch { _?: unknown }
+export interface ShellCtx { _?: unknown }
+export interface SelectorDef { _?: unknown }

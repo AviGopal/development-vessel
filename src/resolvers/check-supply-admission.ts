@@ -20,6 +20,8 @@
  */
 import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "../judge/gap-eligibility.js";
 import { readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import type TS from "typescript";
 import { planPathProblem, underVesselRoot, vesselRelativePath } from "./vessel-paths.js";
 
 /** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */
@@ -383,6 +385,191 @@ function posixRelative(fromFile: string, toRel: string): string {
   while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
   const up = from.length - i;
   return `${up === 0 ? "./" : "../".repeat(up)}${to.slice(i).join("/")}`;
+}
+
+/**
+ * WHAT A MODULE EXPORTS, read from its source with the TypeScript parser (no type checker, no execution): every
+ * `export` declaration (function, class, const/let/var including destructured names, enum, interface, type, namespace),
+ * `export default`, `export { a, b as c }` (kind from the local declaration), `export { a } from`, `export * as ns from`,
+ * and `export * from "./x"` followed through `reader` (cycle-safe). Type-only exports count as present: bun erases them,
+ * so naming one is not what makes a red hollow. `open` says why the list may be incomplete (an `export *` from a module
+ * this reader cannot read); null when the module itself cannot be read. A caller treats both as "unknown", never as absent.
+ */
+export type ModuleExports = { names: Map<string, string>; open: string | null };
+const MODULE_CANDIDATES = (base: string): string[] => [base.replace(/\.[cm]?js$/, ".ts"), base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mts`, `${base}/index.ts`];
+function resolveModule(fromRel: string, spec: string, reader: SrcReader): { rel: string; source: string } | null {
+  const base = posixJoin(fromRel, spec);
+  if (!base || base.split("/").includes("..")) return null;
+  for (const c of MODULE_CANDIDATES(base)) {
+    if (!IMPORTABLE_RE.test(c) || /\.d\.[cm]?ts$/.test(c)) continue;
+    const source = reader.read(c);
+    if (source !== null) return { rel: c, source };
+  }
+  return null;
+}
+type TsModule = typeof import("typescript");
+let tsMod: TsModule | null | undefined;
+/** The TypeScript parser, loaded once on first use as scope-earn-in.ts loads it (typescript is a devDependency); null
+ *  when it is not installed, and then nothing below can read a module or a check, so the guard decides nothing. */
+function loadTs(): TsModule | null {
+  if (tsMod === undefined) {
+    try { tsMod = createRequire(import.meta.url)("typescript") as TsModule; } catch { tsMod = null; }
+  }
+  return tsMod;
+}
+const hasExport = (ts: TsModule, n: TS.Node): boolean => (ts.canHaveModifiers(n) ? ts.getModifiers(n) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+const hasDefault = (ts: TsModule, n: TS.Node): boolean => (ts.canHaveModifiers(n) ? ts.getModifiers(n) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
+function bindingNames(ts: TsModule, name: TS.BindingName, out: string[]): void {
+  if (ts.isIdentifier(name)) { out.push(name.text); return; }
+  for (const el of name.elements) if (!ts.isOmittedExpression(el)) bindingNames(ts, el.name, out);
+}
+const moduleName = (n: TS.ModuleExportName): string => n.text;
+export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<string> = new Set()): ModuleExports | null {
+  const ts = loadTs();
+  const source = reader.read(siteRel);
+  if (source === null || !ts) return null;
+  seen.add(siteRel);
+  const sf = ts.createSourceFile(siteRel, source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(siteRel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const names = new Map<string, string>();
+  const local = new Map<string, string>();
+  let open: string | null = null;
+  const declKind = (s: TS.Statement): Array<[string, string]> => {
+    if (ts.isFunctionDeclaration(s) && s.name) return [[s.name.text, "function"]];
+    if (ts.isClassDeclaration(s) && s.name) return [[s.name.text, "class"]];
+    if (ts.isEnumDeclaration(s)) return [[s.name.text, "enum"]];
+    if (ts.isInterfaceDeclaration(s)) return [[s.name.text, "interface"]];
+    if (ts.isTypeAliasDeclaration(s)) return [[s.name.text, "type"]];
+    if (ts.isModuleDeclaration(s) && ts.isIdentifier(s.name)) return [[s.name.text, "namespace"]];
+    if (ts.isVariableStatement(s)) {
+      const kind = s.declarationList.flags & ts.NodeFlags.Const ? "const" : s.declarationList.flags & ts.NodeFlags.Let ? "let" : "var";
+      const out: string[] = [];
+      for (const d of s.declarationList.declarations) bindingNames(ts, d.name, out);
+      return out.map((n) => [n, kind]);
+    }
+    return [];
+  };
+  for (const s of sf.statements) {
+    for (const [n, k] of declKind(s)) local.set(n, k);
+    // An imported name exported again (`import { a } from "./x"; export { a }`) is a re-export.
+    const nb = ts.isImportDeclaration(s) ? s.importClause?.namedBindings : undefined;
+    if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) local.set(el.name.text, "re-export");
+  }
+  for (const s of sf.statements) {
+    if (hasExport(ts, s)) {
+      if (hasDefault(ts, s)) names.set("default", ts.isClassDeclaration(s) ? "class" : "function");
+      else for (const [n, k] of declKind(s)) names.set(n, k);
+      continue;
+    }
+    if (ts.isExportAssignment(s)) { names.set("default", "default"); continue; }
+    if (!ts.isExportDeclaration(s)) continue;
+    const spec = s.moduleSpecifier && ts.isStringLiteral(s.moduleSpecifier) ? s.moduleSpecifier.text : null;
+    if (s.exportClause && ts.isNamedExports(s.exportClause)) {
+      for (const el of s.exportClause.elements) names.set(moduleName(el.name), spec ? "re-export" : local.get(moduleName(el.propertyName ?? el.name)) ?? "re-export");
+    } else if (s.exportClause && ts.isNamespaceExport(s.exportClause)) {
+      names.set(moduleName(s.exportClause.name), "namespace");
+    } else if (spec) {
+      // export * from "./x": the names of x (but never its default).
+      const target = spec.startsWith(".") ? resolveModule(siteRel, spec, reader) : null;
+      if (!target) { open ??= `export * from ${JSON.stringify(spec)} is not readable here`; continue; }
+      if (seen.has(target.rel)) continue;
+      const sub = moduleExports(target.rel, reader, seen);
+      if (!sub) { open ??= `export * from ${JSON.stringify(spec)} is not readable here`; continue; }
+      for (const [n, k] of sub.names) if (n !== "default" && !names.has(n)) names.set(n, k);
+      open ??= sub.open;
+    }
+  }
+  return { names, open };
+}
+
+/**
+ * THE NAMES A CHECK READS OFF EACH MODULE IT IMPORTS (relative specifiers only), statically: `import { a, b as c }`
+ * (a, b; type-only specifiers are erased and skipped), a default import ("default"), and every member read off a
+ * namespace binding, `import * as ns` or `const ns = await import("…")`: `ns.x`, `ns["x"]`, `const { x } = ns`, through
+ * any cast, parenthesis or non-null wrapper (`(ns as unknown as Record<string, unknown>)["x"]`), plus
+ * `(await import("…")).x` and `const { x } = await import("…")`. A computed key that is not a string literal is not a
+ * name and is skipped. Shadowing a binding's name inside the check is not modelled (it can only add names).
+ */
+export function checkModuleReferences(source: string, checkRel: string): Array<{ spec: string; symbol: string }> {
+  const ts = loadTs();
+  if (!ts) return [];
+  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const out: Array<{ spec: string; symbol: string }> = [];
+  const add = (spec: string, symbol: string): void => { if (!out.some((r) => r.spec === spec && r.symbol === symbol)) out.push({ spec, symbol }); };
+  const namespaces = new Map<string, string>();
+  const isWrapper = (n: TS.Node): boolean => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n) || ts.isSatisfiesExpression(n) || ts.isAwaitExpression(n);
+  const outermost = (n: TS.Node): TS.Node => { let e = n; while (e.parent && isWrapper(e.parent)) e = e.parent; return e; };
+  /** What the expression `e` (a namespace value) has read off it at its use site. */
+  const readsOff = (e: TS.Node, spec: string, bindAs: boolean): void => {
+    const o = outermost(e);
+    const p = o.parent;
+    if (!p) return;
+    if (ts.isPropertyAccessExpression(p) && p.expression === o) add(spec, p.name.text);
+    else if (ts.isElementAccessExpression(p) && p.expression === o && (ts.isStringLiteral(p.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(p.argumentExpression))) add(spec, p.argumentExpression.text);
+    else if (ts.isVariableDeclaration(p) && p.initializer === o) {
+      if (ts.isObjectBindingPattern(p.name)) {
+        for (const el of p.name.elements) {
+          if (el.dotDotDotToken) continue;
+          const key = el.propertyName ?? el.name;
+          if (ts.isIdentifier(key) || ts.isStringLiteral(key)) add(spec, key.text);
+        }
+      } else if (bindAs && ts.isIdentifier(p.name)) namespaces.set(p.name.text, spec);
+    }
+  };
+  const relSpec = (n: TS.Expression | undefined): string | null => (n && ts.isStringLiteral(n) && n.text.startsWith(".") ? n.text : null);
+  const collect = (n: TS.Node): void => {
+    if (ts.isImportDeclaration(n)) {
+      const spec = relSpec(n.moduleSpecifier);
+      const c = n.importClause;
+      if (spec && c && !c.isTypeOnly) {
+        if (c.name) add(spec, "default");
+        const nb = c.namedBindings;
+        if (nb && ts.isNamespaceImport(nb)) namespaces.set(nb.name.text, spec);
+        if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (!el.isTypeOnly) add(spec, moduleName(el.propertyName ?? el.name));
+      }
+      return;
+    }
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const spec = relSpec(n.arguments[0]);
+      if (spec) readsOff(n, spec, true);
+    }
+    ts.forEachChild(n, collect);
+  };
+  collect(sf);
+  const uses = (n: TS.Node): void => {
+    if (ts.isIdentifier(n) && namespaces.has(n.text)) {
+      const p = n.parent;
+      const declaring = (ts.isVariableDeclaration(p) && p.name === n) || ts.isNamespaceImport(p) || (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isPropertyAssignment(p) && p.name === n) || ts.isImportSpecifier(p);
+      if (!declaring) readsOff(n, namespaces.get(n.text)!, false);
+    }
+    ts.forEachChild(n, uses);
+  };
+  uses(sf);
+  return out;
+}
+
+/**
+ * A CHECK THAT NAMES AN EXPORT ITS MODULE DOES NOT HAVE IS NOT A FALSIFIER (F-ARM). The supply's check writer drafts
+ * without the target module's export list, so it can invent a symbol (2f36f62, route-edit-bd252f8c: `mod["shellResult"]`
+ * on goal-host src/index.ts, where shellResult is a shape name, not an export). Such a check is red for the invented
+ * name on every tree, never for the defect, and the arm step attached it as the gap's falsifier. Each name the check
+ * reads off a src module of its vessel (checkModuleReferences) is compared with that module's real exports
+ * (moduleExports); the first one missing refuses, `check_references_missing_export:<symbol>`. A module the reader cannot
+ * read, or whose export list is open, decides nothing; a check that reads no module member (behaviour through a spawned
+ * process, say) is unaffected. null = no refusal.
+ */
+export const MISSING_EXPORT_STAGE = "check_references_missing_export";
+export function missingExportRefusal(source: string, checkRel: string, reader: SrcReader): { symbol: string; module: string; reason: string } | null {
+  const cache = new Map<string, ModuleExports | null>();
+  for (const ref of checkModuleReferences(source, checkRel)) {
+    const target = resolveModule(checkRel, ref.spec, reader);
+    if (!target || !target.rel.startsWith("src/")) continue;
+    if (!cache.has(target.rel)) cache.set(target.rel, moduleExports(target.rel, reader));
+    const ex = cache.get(target.rel);
+    if (!ex || ex.open !== null || ex.names.has(ref.symbol)) continue;
+    const listed = [...ex.names.keys()].slice(0, 12).join(", ");
+    return { symbol: ref.symbol, module: target.rel, reason: `${MISSING_EXPORT_STAGE}:${ref.symbol}: the check reads ${ref.symbol} from ${target.rel}, which does not export it (it exports ${ex.names.size} name${ex.names.size === 1 ? "" : "s"}${listed ? `: ${listed}${ex.names.size > 12 ? ", …" : ""}` : ""}), so the check is red for the missing name on every tree, not for the defect` };
+  }
+  return null;
 }
 
 /** W1: how many times the verify runs the check (every run must be the same assertion red). */

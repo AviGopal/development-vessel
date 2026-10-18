@@ -1,0 +1,148 @@
+// An excerpt of goal-host-vessel src/index.ts at 3fe0fd2d, the parent of 2f36f62 (the tree route-edit-bd252f8c's check
+// was written against): every top-level export statement verbatim with its body or initializer elided, plus the
+// local declarations and the import that its `export { … }` lists name. moduleExports reads the same 68 names, with the
+// same kinds in the same order, from this excerpt as from the whole file (1,397,532 bytes).
+async function resolveFleetActivityFeed(): Promise<FleetActivityFeed> { /* elided */ }
+import { parseTwoSourceCompare, LANG_EXT, type TwoSrcParse } from "./two-source-parse";
+export async function drainReachSpool(spoolPath: string = REACH_SPOOL_PATH): Promise<void> { /* elided */ }
+export function reachVerdictBody(
+  executionId: string,
+  reached: boolean,
+  completionShapes: string[] | null | undefined,
+  reason?: string | null,
+  goalHash?: string | null,
+  betaWithheldReason?: string | null,
+): string { /* elided */ }
+export function deliverReachVerdict(
+  executionId: string | undefined,
+  reached: unknown,
+  completionShapes: string[] | null | undefined,
+  origin: string,
+  reason?: string | null,
+  goalHash?: string | null,
+  // The dispatch's record of executions whose arm a walk decided to withhold β for
+  // (execution id -> reason). Only an execution named in it is sent beta_withheld.
+  betaWithheld?: ReadonlyMap<string, string> | null,
+): void { /* elided */ }
+function dcNumericCandidates(dig: string, minDigits: number): string[] { /* elided */ }
+function verifyDeterministicCompute(goal: string, dig: string): GoalReachVerdict | null { /* elided */ }
+function buildAggregateCommand(goal: string): string | null { /* elided */ }
+type SelectorId =
+  unknown /* elided */;
+interface OwnMatch { /* elided */ }
+interface LabelCtx extends OwnMatch { /* elided */ }
+interface ClassRow { /* elided */ }
+interface ShellCtx { /* elided */ }
+interface Enumerated { /* elided */ }
+interface SelParams { /* elided */ }
+interface SelectorDef { /* elided */ }
+const SELECTORS: Record<SelectorId, SelectorDef> = undefined as never /* elided */;
+function thresholdSelector(cmp: ThresholdCmp): SelectorDef { /* elided */ }
+function parseThreshold(comparatorPhrase: string): (goal: string) => OwnMatch | null { /* elided */ }
+function parsePathsAndExt(goal: string): { rel: string; ext: string | null } | null { /* elided */ }
+async function enumerate(root: string, ext: string | null, withTexts = false): Promise<Enumerated | null> { /* elided */ }
+function emitVerdict(row: ClassRow, ctx: LabelCtx, dig: string): GoalReachVerdict | null { /* elided */ }
+const ROW_AVG_THRESHOLD: ClassRow = undefined as never /* elided */;
+const ROW_BELOW_MEAN: ClassRow = undefined as never /* elided */;
+const CLASS_ROWS: readonly ClassRow[] = undefined as never /* elided */;
+function resolveClassRow(goal: string): { row: ClassRow; params: OwnMatch } | null { /* elided */ }
+function selectorOf(row: ClassRow): SelectorDef { /* elided */ }
+function buildFromClassRow(goal: string): string | null { /* elided */ }
+async function verifyFromClassRow(goal: string, dig: string): Promise<GoalReachVerdict | null> { /* elided */ }
+function isCompositionalGoal(goal: string): boolean { /* elided */ }
+function parseAggregateGoal(goal: string): AggParse | null { /* elided */ }
+async function verifyAggregateReach(goal: string, dig: string): Promise<GoalReachVerdict | null> { /* elided */ }
+function parseRankAggregate(goal: string): RankParse | null { /* elided */ }
+function buildRankAggregateCommand(goal: string): string | null { /* elided */ }
+async function verifyRankAggregateReach(goal: string, dig: string): Promise<GoalReachVerdict | null> { /* elided */ }
+function parseAvgThreshold(goal: string): AvgThresholdParse | null { /* elided */ }
+function parseBelowMean(goal: string): AvgThresholdParse | null { /* elided */ }
+function buildAvgThresholdCommand(goal: string): string | null { /* elided */ }
+async function verifyAvgThresholdReach(goal: string, dig: string): Promise<GoalReachVerdict | null> { /* elided */ }
+function buildTwoSourceCompareCommand(goal: string): string | null { /* elided */ }
+async function verifyTwoSourceCompareReach(goal: string, dig: string): Promise<GoalReachVerdict | null> { /* elided */ }
+export function chargeChainCarrier(dispatchId: unknown, chainExecIds: readonly string[], durableChain: readonly string[], durableGraded: boolean, compositeRecorded: boolean): { durable: string[]; composite: string[] } { /* elided */ }
+export function oracleAbstainCounts(): Record<string, OracleFamilyCounts> { /* elided */ }
+export function citedLocations(digest: string): Array<{ path: string; line: number | null }> { /* elided */ }
+export async function verifyCodeInvestigationCitation(goal: string, digest: string): Promise<GoalReachVerdict | null> { /* elided */ }
+async function verifyGoalReached(goal: string, producedShapes: string[], taskSummary: string, contentDigest?: string, commandEvidence?: string, walkEvidence?: { gapsFiled: number; walkLog: string[] }, judgeView?: { deliverableCut: boolean; cuts: JudgeCut[] }, deliverables?: string[], poolEvidence?: PoolEvidence[], writeEvidence?: WriteArtifactEvidence, captureSurface?: judgeCapture.JudgeSurface): Promise<GoalReachVerdict | null> { /* elided */ }
+function isDeterministicVerdict(v: { deterministic?: boolean; reason?: string | null } | null | undefined): boolean { /* elided */ }
+function rememberGoalFailure(goalText: string, reason: string | undefined | null, pick: string | undefined | null, shapes: string[] | null | undefined, attempts: number | undefined): void { /* elided */ }
+export function failedTraceReason(trace: unknown): string | undefined { /* elided */ }
+export function thrownDispatchReason(err: unknown): string { /* elided */ }
+export function dispatchFailureReasons(walkLog: readonly unknown[], finalReason: string | null | undefined): string[] { /* elided */ }
+export function rememberDispatchFailures(goalText: string, walkLog: readonly unknown[], finalReason: string | null | undefined, pick: string | undefined | null, shapes: string[] | null | undefined, attempts: number | undefined): string[] { /* elided */ }
+export function composeReportReason(body: Record<string, unknown> | null | undefined): string { /* elided */ }
+function recallGoalFailures(goalText: string): { exact: GoalFailureRecord[]; near: GoalFailureRecord[] } { /* elided */ }
+export function executedToolCallsOf(j: unknown): Array<Record<string, unknown>> { /* elided */ }
+export function executedToolCallError(c: Record<string, unknown>): string | null { /* elided */ }
+export function floorGroundingDigest(toolsExecuted: number, groundedOk: number, digestBase: string): string { /* elided */ }
+async function runGroundedToolLoop(
+  basePrompt: string,
+  tools: any[],
+  writeShapeList: string[],
+  ownOnly?: ReadonlySet<string>,
+): Promise<{ finalText: string; groundedOk: number; executedOk: number; executed: Array<{ tool: string; ok: boolean }>; observations: string[]; calledWriteShapes: Set<string>; commandEvidence: string } | null> { /* elided */ }
+export function makeSatisfierFlusher<T extends { id: string }>(
+  traces: T[],
+  persist: (t: T) => Promise<void>,
+  // BOUNDED (qa): each flush waits at most this long in total (resolved per flush; the walk passes the shaped
+  // selection-tuning satisfierFlushDeadlineMs). Past it the flush logs and returns, the walk continues, and the trace
+  // stays queued: its post keeps running and the next flush re-awaits it, so it is never posted twice.
+  deadlineMs: () => number | Promise<number> = () => 20_000,
+): (except?: T) => Promise<void> { /* elided */ }
+export async function persistWithinDeadline(persist: Promise<void>, deadlineMs: number, traceId: string): Promise<boolean> { /* elided */ }
+export function withBetaWithheld(tags: readonly string[] | undefined, reason: string | null | undefined): string[] { /* elided */ }
+function buildCompositeTraceFromChain(
+  chain: string[],
+  chainExecIds: string[],
+  producedShapes: string[],
+  durationMs: number,
+  costUsd: number,
+  tags?: string[],
+  poolImpulses?: Array<{ id: string; metadata?: { shape?: string; producerExecutionId?: string } }>,
+  goalSignature?: string,
+  /** Per-step edges recorded as the walk ran (agentic-floor B2). When given, a step declares exactly
+   *  what it bound and produced; a step with no record declares no input. Absent ⇒ the positional
+   *  fallback below, for callers that recorded none. */
+  stepEdges?: Array<StepEdge | undefined>,
+): ExecutionTrace { /* elided */ }
+function walkFailureMode(o: {
+  verdictReason: string;
+  missing: string[];
+  produced: string[];
+  satisfierFailures: Map<string, string>;
+  pickFailures: Map<string, string>;
+  /** Each executed pick's declared output shapes; a pick failure counts only for an output never produced. */
+  pickOutputs?: Map<string, string[]>;
+}): { type: string; reason: string } { /* elided */ }
+function buildFailedCompositeTrace(
+  ...args: [...Parameters<typeof buildCompositeTraceFromChain>, { type: string; reason: string }]
+): ExecutionTrace { /* elided */ }
+function parseAddSymbol(goal: string): string | null { /* elided */ }
+function symbolInAddedLines(diffText: string, symbol: string): boolean { /* elided */ }
+async function verifyEditPostState(goal: string, editFile: string, landedSha?: string | null): Promise<boolean | null> { /* elided */ }
+async function runGoalWithRecovery(goal: string | undefined, opts: Parameters<typeof runGoalWithRecoveryInner>[1]): Promise<GoalSeekResult> { /* elided */ }
+export {
+  verifyDeterministicCompute,
+  dcNumericCandidates,
+  parseAggregateGoal, buildAggregateCommand, verifyAggregateReach,
+  parseRankAggregate, buildRankAggregateCommand, verifyRankAggregateReach,
+  parseAvgThreshold, buildAvgThresholdCommand, verifyAvgThresholdReach,
+  parseTwoSourceCompare, buildTwoSourceCompareCommand, verifyTwoSourceCompareReach,
+  isCompositionalGoal, parseBelowMean,
+  SELECTORS, enumerate, emitVerdict, parsePathsAndExt, ROW_AVG_THRESHOLD, ROW_BELOW_MEAN, CLASS_ROWS,
+  resolveClassRow, buildFromClassRow, verifyFromClassRow, selectorOf,
+  thresholdSelector, parseThreshold, verifyEditPostState, parseAddSymbol, symbolInAddedLines,
+  verifyGoalReached,
+  buildFailedCompositeTrace,
+  walkFailureMode,
+  buildCompositeTraceFromChain,
+  resolveFleetActivityFeed,
+  runGoalWithRecovery,
+  rememberGoalFailure,
+  recallGoalFailures,
+  runGroundedToolLoop,
+  isDeterministicVerdict,
+};
+export type { ClassRow, SelectorId, Enumerated, SelParams, LabelCtx, OwnMatch, ShellCtx, SelectorDef };

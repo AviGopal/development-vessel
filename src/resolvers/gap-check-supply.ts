@@ -29,8 +29,9 @@
  *      read too: only 'present' with every named test among the run's failures AND each an ASSERTION by the shared
  *      classifier the report carries (red_reason, retry-evidence.ts classifyCheckRun: not a load error, a network
  *      call or a timeout) is written, through substrateGap_write with the verdict as the in-process trusted birth stamp,
- *      clearing the disposition in the same write. Green at HEAD, red for the wrong reason, or a test that does
- *      not import the edit site writes no check: the gap stays unarmed (fail closed). No region is written, so
+ *      clearing the disposition in the same write. Green at HEAD, red for the wrong reason, a test that does
+ *      not import the edit site, or one that reads a name its module does not export (check-supply-admission.ts
+ *      missingExportRefusal: check_references_missing_export) writes no check: the gap stays unarmed (fail closed). No region is written, so
  *      the arm-time region gate has nothing to refuse; the write still passes through it.
  *
  * OUTCOME (the dispatch is read back; a dispatch alone earns no credit): every dispatch records the node that sent
@@ -67,7 +68,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, missingExportRefusal, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -739,7 +740,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
     // form testImportsFile reads; with none, an existing src module the test imports becomes it.
     const vesselDir = ledger.vessel;
-    const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)), srcReaderAt(join(clonesRoot(), vesselDir)));
+    const vesselReader = srcReaderAt(join(clonesRoot(), vesselDir));
+    const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)), vesselReader);
     const editSite = site.ok ? `repos/${vesselDir}/${site.edit_site}` : null;
     const why = onlyTestsProblem(titles)?.detail ?? (site.ok ? null : `${site.stage}: ${site.reason}`);
     if (why) {
@@ -748,14 +750,25 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: why } });
       continue;
     }
+    // F-ARM: a check that reads a name its module does not export is red for the invented name on every tree, never
+    // for the defect (2f36f62, route-edit-bd252f8c: mod["shellResult"] on goal-host src/index.ts). Static, before anything
+    // runs; the module's real exports come from the same clone the check imports (check-supply-admission.ts).
+    const missing = missingExportRefusal(src, ledger.test_file, vesselReader);
     // A check that only asserts a name exists (or is defined, or has a type) is closed by adding the name: never armed.
     const ex = existenceOnlyCheck(src, titles);
     if (ex.existence_only) {
-      const reason = `existence_only: all ${ex.assertions} assertion(s) of the named test(s) only check that a name exists or has a type; a check must assert behaviour`;
+      const reason = `existence_only: all ${ex.assertions} assertion(s) of the named test(s) only check that a name exists or has a type; a check must assert behaviour${missing ? `; ${missing.reason}` : ""}`;
       refused += 1;
       notArmed.push({ id, reason });
       console.warn(`[gap-check-supply] ${id}: ${reason} — not armed`);
       if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason, judged_titles: titles } });
+      continue;
+    }
+    if (missing) {
+      refused += 1;
+      notArmed.push({ id, reason: missing.reason });
+      console.warn(`[gap-check-supply] ${id}: ${missing.reason.slice(0, 240)} — not armed`);
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: missing.reason, judged_titles: titles } });
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };

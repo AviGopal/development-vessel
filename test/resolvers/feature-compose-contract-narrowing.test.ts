@@ -10,6 +10,16 @@
 // refuter that both pass, so on the parent they are red because the gate passed them, not because a symbol is missing.
 // CONTROLS: a non-narrowing change (a raised limit, a new optional parameter, a guarded refusal, a comparison an
 // omitted input cannot satisfy) and a narrowing that carries its omission / limit test both pass unchanged.
+//
+// QA FOLLOW-UP (on 0f3daf0b). (b) The evidence was the WHOLE text of every touched test file plus the whole own
+// check, and a bare literal counted: d4b09d0 read as "tested" against activity-api's PRE-EXISTING
+// trace-aggregate-report tests because `{ group_by: 'activity_id', limit: 1 }` — an explicit value, the opposite of an
+// omission — names the default. Evidence is now only the test lines the change ADDED, and for an omission only a
+// test title naming it or a call to the narrowed function without the key. (P3) a nested `Math.max(parseInt(x, 10), 1)`
+// read its radix and lower bound as upper bounds. (P2) a NEW handler with its own cap was compared with the tightest
+// maximum documented anywhere in the file (7 of 10 lane refusals were that). (P1) a destructured read
+// (`const { limit: rawLimit } = input`) read as the parameter no longer handled. (d) patch_with_tools ran the floor
+// only inside its LLM-judge condition.
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +36,8 @@ const ET_POST = fx("execution-traces.at-ddf9b46.excerpt.txt");
 const ET_DIFF = fx("ddf9b46.diff.txt");
 const AGG_PATH = "/vessels/repos/activity-api/src/routes/trace-aggregate-report.ts";
 const ET_PATH = "/vessels/repos/activity-api/src/routes/execution-traces.ts";
+// activity-api's own trace-aggregate-report tests as they stood before d4b09d0 (they did not change in it).
+const AGG_TESTS = fx("trace-aggregate-report.failure-class.test.before-d4b09d0.txt") + "\n" + fx("trace-aggregate-report.real-schema.test.before-d4b09d0.txt");
 
 // Both LLM calls pass: whatever the verdict is, the deterministic floor decided it.
 const passing = async (p: string) => p.includes("ADVERSARIAL reviewer")
@@ -77,13 +89,53 @@ describe("the semantic gate refuses a change that narrows its file's documented 
     expect(v.addresses).toBe(false);
     expect(String(v.reason)).toContain("narrows_documented_contract:limit max 1000 -> 200");
   });
-  it("MUST-FAIL: both call sites feed the floor (feature_compose's gate call and patch_with_tools' self-landing gate)", () => {
+  it("MUST-FAIL: both call sites feed the floor; feature_compose's evidence is the ADDED test lines, patch_with_tools' floor is outside its LLM condition", () => {
     const src = readFileSync(join(import.meta.dir, "../../src/resolvers/feature-compose.ts"), "utf8");
     const call = src.slice(src.indexOf("inertLiteralRefusal ?? await verifyPatchAddressesGap({"));
     expect(call.slice(0, call.indexOf("});"))).toMatch(/\bcontractFiles,\s*\n\s*checkText,/);
+    expect(src).toMatch(/const checkText = contractAddedTestText\(\[\.\.\.postPatchContents\]\.map\(\(\[abs, post\]\) => \(\{ path: abs, pre: preEditContent\.get\(abs\) \?\? "", post \}\)\)\);/);
     const pwt = readFileSync(join(import.meta.dir, "../../src/resolvers/patch-with-tools.ts"), "utf8");
-    const pcall = pwt.slice(pwt.indexOf("await verifyPatchAddressesGap({"));
-    expect(pcall.slice(0, pcall.indexOf("});"))).toMatch(/contractFiles: \[\{ path: pointer\.target_file, pre: baseContent, post: afterSrc \}\]/);
+    const floor = pwt.indexOf('contractNarrowingRefusal([{ path: pointer.target_file, pre: baseContent, post: afterSrc }], "")');
+    const llmCond = pwt.indexOf("if (proposalText && llmEndpoints.length > 0) {");
+    expect(floor).toBeGreaterThan(0);
+    expect(floor).toBeLessThan(llmCond);
+  });
+  it("MUST-FAIL (b): d4b09d0 against activity-api's PRE-EXISTING trace-aggregate-report tests is still refused", async () => {
+    const v = await gate(AGG_PATH, AGG_PRE, AGG_POST, AGG_DIFF, AGG_TESTS);
+    expect(v.addresses).toBe(false);
+    expect(String(v.reason)).toContain("narrows_documented_contract:omitted group_by");
+  });
+  it("MUST-FAIL (b): an added test passing group_by EXPLICITLY (the default literal) is not omission evidence", async () => {
+    const added = "    const r = await runTraceAggregateReport(db, { group_by: 'activity_id', limit: 1 }, AUTH);";
+    const v = await gate(AGG_PATH, AGG_PRE, AGG_POST, AGG_DIFF, added);
+    expect(v.addresses).toBe(false);
+  });
+  it("MUST-FAIL (b): a comment naming the omission is not a test", async () => {
+    const v = await gate(AGG_PATH, AGG_PRE, AGG_POST, AGG_DIFF, "  // an omitted group_by keeps its default\n  expect(r.group_by).toBe('status');");
+    expect(v.addresses).toBe(false);
+  });
+  it("MUST-FAIL (b): an unrelated `{ limit: 100 }` does not exercise the 500 -> 100 clamp", async () => {
+    const v = await gate(ET_PATH, ET_PRE, ET_POST, ET_DIFF, "    const page = await list({ limit: 100 });");
+    expect(v.addresses).toBe(false);
+  });
+  it("MUST-FAIL (P3): a nested Math.max lower bound (`Math.max(parseInt(x, 10), 1)`) is not read as a maximum", async () => {
+    const from = "    const limit = Math.min(Math.max(parseInt(String(limitParam), 10), 1), 500);";
+    const to = "    const limit = Math.min(Math.max(parseInt(String(limitParam), 10), 0), 500);";
+    const pre = edit(ET_PRE, "    const limit = Math.min(Math.max(limitParam, 1), 500);", from);
+    const v = await gate(ET_PATH, pre, edit(pre, from, to), unified(from, to));
+    expect(v.addresses).toBe(true);
+  });
+  it("MUST-FAIL (P2): an ADDED handler with its own cap is not compared with a maximum documented elsewhere", async () => {
+    const anchor = "    const offset = Math.max(offsetParam, 0);";
+    const handler = `${anchor}\n  });\n\napp.get('/recent', async (c) => {\n    const recentParam = parseInt(c.req.query('limit') || '20', 10);\n    const limit = Math.min(Math.max(recentParam, 1), 100);`;
+    const v = await gate(ET_PATH, ET_PRE, edit(ET_PRE, anchor, handler), unified(anchor, "    const limit = Math.min(Math.max(recentParam, 1), 100);"));
+    expect(v.addresses).toBe(true);
+  });
+  it("MUST-FAIL (P1): a destructured read (`const { limit: rawLimit } = input`) still handles the parameter", async () => {
+    const from = "  const limit = clampInt(input.limit, 10, 1, 1000);";
+    const to = "  const { limit: rawLimit } = input;\n  const limit = clampInt(rawLimit, 10, 1, 1000);";
+    const v = await gate(AGG_PATH, AGG_PRE, edit(AGG_PRE, from, to), unified(from, to));
+    expect(v.addresses).toBe(true);
   });
 });
 
@@ -117,6 +169,11 @@ describe("controls: a change that keeps the documented contract, or proves its n
     const v = await gate(AGG_PATH, AGG_PRE, AGG_POST, AGG_DIFF, test);
     expect(v.addresses).toBe(true);
   });
+  it("CONTROL: the d4b09d0 narrowing whose added test calls the function WITHOUT group_by passes", async () => {
+    const added = "    const r = await runTraceAggregateReport(db, { metric: 'count' }, AUTH);\n    expect(r.reason).toBe('unserved_group_by');";
+    const v = await gate(AGG_PATH, AGG_PRE, AGG_POST, AGG_DIFF, added);
+    expect(v.addresses).toBe(true);
+  });
   it("CONTROL: the ddf9b46 narrowing carrying a limit test passes", async () => {
     const test = `it("caps the list limit at 100", async () => {\n  const res = await app.request("/?limit=101");\n  expect((await res.json()).limit).toBe(100);\n});`;
     const v = await gate(ET_PATH, ET_PRE, ET_POST, ET_DIFF, test);
@@ -132,6 +189,14 @@ describe("the documented-contract extract (deterministic, pre-image only)", () =
     const et = fc.documentedContract(ET_PRE) as Array<Record<string, unknown>>;
     expect(et.find((d) => d.name === "limit")).toMatchObject({ max: 500, default: "50" });
     expect(et.some((d) => d.name === "variant_id")).toBe(true);
+  });
+  it("the evidence is only the test lines a change added: an untouched test file contributes nothing", () => {
+    const path = "/vessels/repos/activity-api/src/routes/trace-aggregate-report.failure-class.test.ts";
+    const t = fx("trace-aggregate-report.failure-class.test.before-d4b09d0.txt");
+    expect(fc.contractAddedTestText([{ path, pre: t, post: t }])).toBe("");
+    const added = "  it('an omitted group_by is refused', async () => {";
+    expect(fc.contractAddedTestText([{ path, pre: t, post: `${t}\n${added}\n  // a comment` }])).toBe(added);
+    expect(fc.contractAddedTestText([{ path: AGG_PATH, pre: AGG_PRE, post: AGG_POST }])).toBe("");
   });
   it("names exactly one narrowing per real landing", () => {
     expect((fc.contractNarrowings(AGG_PRE, AGG_POST) as Array<{ kind: string; param: string }>).map((n) => `${n.kind}:${n.param}`)).toEqual(["omitted_refused:group_by"]);

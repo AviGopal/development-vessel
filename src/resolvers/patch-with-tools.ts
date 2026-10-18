@@ -1549,6 +1549,39 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     }
   }
 
+  // THE DOCUMENTED-CONTRACT FLOOR, UNCONDITIONAL. Deterministic (no LLM, no proposal text needed), so it runs whether
+  // or not the judge below can: a change narrowing the contract its file documents (activity-api d4b09d0, ddf9b46) is
+  // refused here. This lane writes one file and no test, so it carries no omission/limit test and any narrowing is
+  // refused. A throw fails closed as infrastructure, like the judge block.
+  {
+    let narrowed: { reason: string } | null = null;
+    try {
+      const { contractNarrowingRefusal } = await import("./feature-compose.js");
+      narrowed = contractNarrowingRefusal([{ path: pointer.target_file, pre: baseContent, post: afterSrc }], "");
+    } catch (e) {
+      console.warn(`[pwt-semantic-gate] REFUSED as infrastructure: the documented-contract floor threw (${(e as Error).message})`);
+      await resetTarget();
+      return structuredError("semantic_judge_unavailable", {
+        target_file: pointer.target_file,
+        why: `documented-contract floor error: ${(e as Error).message}`.slice(0, 300),
+        failure_kind: "environment",
+        non_attempt: true,
+        before_sha: beforeSha,
+        after_sha: afterSha,
+      });
+    }
+    if (narrowed) {
+      console.warn(`[pwt-semantic-gate] REFUSED ${pointer.target_file}: ${narrowed.reason}`);
+      await resetTarget();
+      return structuredError("semantic_reject", {
+        target_file: pointer.target_file,
+        detail: narrowed.reason,
+        before_sha: beforeSha,
+        after_sha: afterSha,
+      });
+    }
+  }
+
   // SEMANTIC GATE ON THE SELF-LANDING PATH (operator-authorized 2026-09-10).
   //
   // This route stages a mitosis and self-lands without feature_compose's judge. Measured
@@ -1587,8 +1620,6 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
           reachability: [],
           llm: (p: string) => llmCall(llmEndpoints[0]!, p, model),
           runSemanticJudge: true,
-          // This lane writes one file and no test, so a change narrowing that file's documented contract is refused here.
-          contractFiles: [{ path: pointer.target_file, pre: baseContent, post: afterSrc }],
         });
         if (semanticGateInfraRefusal(semVerdict)) {
           console.warn(`[pwt-semantic-gate] REFUSED as infrastructure (judge unavailable, a non-attempt) ${pointer.target_file}: ${semVerdict.reason}`);

@@ -2359,6 +2359,8 @@ export type ContractNarrowing = {
   bound?: number;
   documented_max?: number;
   documented_default?: string;
+  /** The function the narrowing sits in, when one is named: a test calling it without the key exercises the omission. */
+  fn?: string;
 };
 
 const CONTRACT_COMMENT_LINE = /^\s*(?:\/\*\*?|\*|\/\/)/;
@@ -2374,7 +2376,8 @@ const CONTRACT_MAX_RES: RegExp[] = [
   /\b(?:up to|limited to|capped at)\s+(\d+)/i,
 ];
 const CONTRACT_DEFAULT_RE = /\bdefaults?\b(?:\s+to)?\s*[:=]?\s*[`'"]?([A-Za-z0-9_.-]+)/i;
-const CONTRACT_OMIT_WORDS = /\b(?:omit\w*|absent|missing|undefined|without|unset|default\w*)\b/i;
+// Omission words, read only in a test's TITLE beside the parameter: a word anywhere else (a value, a comment) is not a test.
+const CONTRACT_OMIT_WORDS = /\b(?:omit\w*|absent|missing|undefined|without|unset)\b/i;
 
 function contractEsc(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 /** The code part of a line: a comment line has none, and a trailing `//` comment is dropped. */
@@ -2385,6 +2388,11 @@ function contractCode(l: string): string {
 function contractAccessRe(p: string): RegExp {
   const e = contractEsc(p);
   return new RegExp(`(?:\\.${e}\\b|\\[\\s*['"\`]${e}['"\`]\\s*\\]|\\(\\s*['"\`]${e}['"\`]\\s*[,)])`);
+}
+/** A read including destructuring (`const { p } = input`, `{ p: raw } = …`, `({ p = 10 }) =>`): handling_removed asks this. */
+function contractReadRe(p: string): RegExp {
+  const e = contractEsc(p);
+  return new RegExp(`(?:${contractAccessRe(p).source}|\\{[^{}]*(?:^|[{,\\s])${e}\\s*(?:[:=,}])[^{}]*\\}\\s*(?:=(?!=)|[:)]))`);
 }
 /** Any mention: a read, the bare name, or a local derived from it (limitParam, groupBy). */
 function contractMentionRe(p: string): RegExp {
@@ -2422,7 +2430,12 @@ export function documentedContract(pre: string): DocumentedParam[] {
 /** Upper bounds a code line imposes: Math.min's literal arguments (Math.max's are lower bounds), clamp's last, SQL LIMIT. */
 function contractUpperBounds(code: string): number[] {
   const out: number[] = [];
-  const noMax = code.replace(/Math\.max\([^()]*\)/g, "");
+  // Math.max's arguments are lower bounds, nested calls and all (`Math.max(parseInt(x, 10), 1)`): cut each whole call.
+  let noMax = code;
+  for (let at = noMax.indexOf("Math.max("); at >= 0; at = noMax.indexOf("Math.max(")) {
+    const inner = contractBalanced(noMax, at + "Math.max".length);
+    noMax = noMax.slice(0, at) + noMax.slice(at + "Math.max".length + inner.length + 2);
+  }
   for (const m of noMax.matchAll(/Math\.min\(([^;]*)\)/g)) for (const n of (m[1] ?? "").matchAll(/(?<![\w.$])(\d+)(?![\w.])/g)) out.push(Number(n[1]));
   for (const m of code.matchAll(/\bclamp\w*\(([^;]*)\)/gi)) {
     const last = (m[1] ?? "").split(",").pop()?.replace(/\).*$/, "").trim() ?? "";
@@ -2493,6 +2506,15 @@ function contractNearest(doc: DocumentedParam[], p: string, at: number | null, f
   return field === "max" ? own.reduce((a, b) => ((b.max ?? Infinity) < (a.max ?? Infinity) ? b : a)) : own[0];
 }
 
+/** The nearest named function at or above line `at` (function NAME / const NAME = (…) => / async NAME(…) {). */
+function contractEnclosingFn(lines: string[], at: number): string | undefined {
+  for (let i = at; i >= 0; i--) {
+    const m = (lines[i] ?? "").match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\*?\s+([A-Za-z_$][\w$]*)|^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]*)?=>/);
+    if (m) return m[1] ?? m[2];
+  }
+  return undefined;
+}
+
 /**
  * Where a change narrows the contract its file documents (the pre-image's comments, documentedContract):
  * a clamp that LOWERS a documented maximum; a new branch that returns or throws when a documented-optional input is
@@ -2510,20 +2532,24 @@ export function contractNarrowings(pre: string, post: string): ContractNarrowing
   for (const p of names) {
     const mention = contractMentionRe(p);
     const access = contractAccessRe(p);
-    // (1) A clamp that lowers the documented maximum. A replaced clamp answers to the maximum documented above it
-    // (one file can document the same parameter on several routes); a new one to the tightest documented.
+    // (1) A clamp that lowers the documented maximum. Only a REPLACED clamp is compared — the same line with its
+    // literals changed — and against the maximum documented above the line it replaced (one file can document the
+    // same parameter on several routes). A new handler with its own cap narrows nothing it documented.
     if (doc.some((d) => d.name === p && d.max !== undefined)) {
+      const shape = (l: string) => contractCode(l).replace(/\d+/g, "#").trim();
       const removedClamps = removed.filter((r) => mention.test(contractCode(preL[r]!)) && contractUpperBounds(contractCode(preL[r]!)).length > 0);
-      let pair = 0;
+      const used = new Set<number>();
       for (const a of added) {
         const code = contractCode(postL[a]!);
         if (!mention.test(code)) continue;
         const bounds = contractUpperBounds(code);
         if (bounds.length === 0) continue;
         const bound = Math.min(...bounds);
-        const r = removedClamps[pair++];
-        const documented = contractNearest(doc, p, r ?? null, "max")?.max;
-        const before = r !== undefined ? Math.min(...contractUpperBounds(contractCode(preL[r]!))) : Infinity;
+        const r = removedClamps.find((x) => !used.has(x) && shape(preL[x]!) === shape(postL[a]!));
+        if (r === undefined) continue;
+        used.add(r);
+        const documented = contractNearest(doc, p, r, "max")?.max;
+        const before = Math.min(...contractUpperBounds(contractCode(preL[r]!)));
         if (documented !== undefined && bound < documented && bound < before) {
           out.push({ kind: "lowered_max", param: p, what: `${p} max ${documented} -> ${bound}`, bound, documented_max: documented });
         }
@@ -2546,7 +2572,8 @@ export function contractNarrowings(pre: string, post: string): ContractNarrowing
           const next = postL.slice(a + 1, a + 4).map(contractCode).find((l) => l.trim() !== "");
           exits = !!next && /^\s*(?:return|throw)\b/.test(next);
         }
-        if (exits) out.push({ kind: "omitted_refused", param: p, what: `omitted ${p}${def !== undefined ? ` (documented default ${def})` : ""} now returns early`, ...(def !== undefined ? { documented_default: def } : {}) });
+        const fn = contractEnclosingFn(postL, a);
+        if (exits) out.push({ kind: "omitted_refused", param: p, what: `omitted ${p}${def !== undefined ? ` (documented default ${def})` : ""} now returns early`, ...(def !== undefined ? { documented_default: def } : {}), ...(fn ? { fn } : {}) });
       }
     }
     // (3) A documented default replaced: a removed read of p that applied it, and no line left applying it.
@@ -2563,8 +2590,9 @@ export function contractNarrowings(pre: string, post: string): ContractNarrowing
         break;
       }
     }
-    // (4) A documented parameter the pre-image read (input.p, query('p')) and the post-image never reads.
-    if (preL.some((l) => access.test(contractCode(l))) && !postL.some((l) => access.test(contractCode(l)))) {
+    // (4) A documented parameter the pre-image read (input.p, query('p'), a destructuring) and the post-image never reads.
+    const read = contractReadRe(p);
+    if (preL.some((l) => read.test(contractCode(l))) && !postL.some((l) => read.test(contractCode(l)))) {
       out.push({ kind: "handling_removed", param: p, what: `documented ${p} no longer handled` });
     }
   }
@@ -2572,21 +2600,65 @@ export function contractNarrowings(pre: string, post: string): ContractNarrowing
 }
 
 /**
- * Does the test text the change carries exercise this narrowing? A line naming the parameter with, within two lines,
- * the boundary (the new bound or the documented maximum, or one past either) for a lowered maximum, or the omission
- * (omit / absent / undefined / without / default, or the documented default) for an omitted or defaulted input.
+ * The test lines this change ADDED (each test file's post-image lines its pre-image does not hold; a created file is
+ * all added), comment lines dropped. Only these are evidence: a test the change did not write — the file's existing
+ * tests, an untouched own check — was there when the narrowing was not, so it cannot speak for it.
+ */
+export function contractAddedTestText(files: Array<{ path: string; pre: string; post: string }>): string {
+  const out: string[] = [];
+  for (const f of files) {
+    if (!/\.(test|spec)\.[cm]?[jt]sx?$/.test(f.path)) continue;
+    const postL = String(f.post ?? "").split("\n");
+    for (const i of contractUnmatched(postL, String(f.pre ?? "").split("\n"))) if (contractCode(postL[i]!).trim()) out.push(postL[i]!);
+  }
+  return out.join("\n");
+}
+
+/**
+ * Does the test text the change ADDED (contractAddedTestText) exercise this narrowing?
+ *   - a lowered maximum: a line naming the parameter with a value past the new bound, and the bound itself within
+ *     two lines (the probe and the expectation);
+ *   - an omitted or defaulted input: a test whose TITLE names the parameter and the omission (omit / absent /
+ *     missing / undefined / without / unset), or a call to the narrowed function with an object argument that
+ *     lacks the key. A bare value — an explicit `group_by: 'activity_id'`, the default literal — is the opposite of
+ *     an omission and is not evidence;
+ *   - a dropped parameter: an added line naming it.
  */
 export function contractNarrowingTested(n: ContractNarrowing, checkText: string): boolean {
-  const lines = String(checkText ?? "").split("\n");
+  const text = String(checkText ?? "");
+  const lines = text.split("\n").map(contractCode);
   const mention = contractMentionRe(n.param);
-  for (let i = 0; i < lines.length; i++) {
-    if (!mention.test(lines[i]!)) continue;
-    if (n.kind === "handling_removed") return true;
-    const win = lines.slice(Math.max(0, i - 2), i + 3).join("\n");
-    if (n.kind === "lowered_max") {
-      const nums = [n.bound, n.documented_max].filter((x): x is number => x !== undefined).flatMap((x) => [x, x + 1]);
-      if (nums.some((x) => new RegExp(`(?<![\\w.])${x}(?![\\w.])`).test(win))) return true;
-    } else if (CONTRACT_OMIT_WORDS.test(win) || (n.documented_default !== undefined && win.includes(n.documented_default))) return true;
+  if (n.kind === "handling_removed") return lines.some((l) => mention.test(l));
+  if (n.kind === "lowered_max") {
+    const bound = n.bound ?? Infinity;
+    for (let i = 0; i < lines.length; i++) {
+      if (!mention.test(lines[i]!)) continue;
+      const nums = (l: string) => [...l.matchAll(/(?<![\w.])(\d+)(?![\w.])/g)].map((m) => Number(m[1]));
+      if (!nums(lines[i]!).some((x) => x > bound)) continue;
+      const win = lines.slice(Math.max(0, i - 2), i + 3).join("\n");
+      if (new RegExp(`(?<![\\w.])${bound}(?![\\w.])`).test(win)) return true;
+    }
+    return false;
+  }
+  for (const l of lines) {
+    const title = l.match(/\b(?:it|test|describe)(?:\.\w+)?\(\s*(['"`])((?:(?!\1).)*)\1/)?.[2];
+    if (title && mention.test(title) && CONTRACT_OMIT_WORDS.test(title)) return true;
+  }
+  if (n.fn) {
+    const code = lines.join("\n");
+    const keyRe = new RegExp(`(?:^|[{,\\s])['"\`]?${contractEsc(n.param)}['"\`]?\\s*:`);
+    for (let at = code.indexOf(`${n.fn}(`); at >= 0; at = code.indexOf(`${n.fn}(`, at + 1)) {
+      if (/[\w$]/.test(code[at - 1] ?? "")) continue;
+      // The call's TOP-LEVEL object arguments, string values blanked first (a `${…}` or a brace inside a string is
+      // not an object); a quoted key is kept.
+      const args = contractBalanced(code, at + n.fn.length).replace(/'(?:[^'\\]|\\.)*'(?!\s*:)|"(?:[^"\\]|\\.)*"(?!\s*:)|`(?:[^`\\]|\\.)*`(?!\s*:)/g, '""');
+      const objects: string[] = [];
+      for (let k = 0, depth = 0, open = -1; k < args.length; k++) {
+        if (args[k] === "{" && depth++ === 0) open = k;
+        else if (args[k] === "}" && depth > 0 && --depth === 0) objects.push(args.slice(open, k + 1));
+      }
+      if (objects.length > 0 && objects.every((o) => !keyRe.test(o))) return true;
+    }
   }
   return false;
 }
@@ -2650,7 +2722,7 @@ export async function verifyPatchAddressesGap(args: {
    * the contract is read from the pre-image's own comments. Absent -> the floor does not run.
    */
   contractFiles?: Array<{ path: string; pre: string; post: string }>;
-  /** The test text the change carries (the tests it wrote, the gap's own check): the evidence a narrowing was meant. */
+  /** The test lines the change ADDED (contractAddedTestText): the only evidence a narrowing was meant. */
   checkText?: string;
 }): Promise<SemanticGateVerdict> {
   const { hardFail, reason } = reachabilityHardFail(args.reachability);
@@ -9811,17 +9883,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         console.warn(`[fc-inert-literal] REFUSING: the diff's only change is a behaviourally identical regex literal`);
       }
 
-      // The documented-contract floor's inputs: each edited file's pre-image beside its post-image, and the test text
-      // the change carries — the test files it wrote and the gap's own check — as the evidence a narrowing was meant.
+      // The documented-contract floor's inputs: each edited file's pre-image beside its post-image, and as evidence a
+      // narrowing was meant, ONLY the test lines this change added (a created test file is all added; the gap's own
+      // check counts when, and as far as, this change modified it). A test that was already there is not evidence.
       const contractFiles = [...preEditContent].filter(([abs]) => postPatchContents.has(abs)).map(([abs, pre]) => ({ path: abs, pre, post: postPatchContents.get(abs) ?? "" }));
-      const checkText = [
-        ...[...postPatchContents].filter(([p]) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p)).map(([, t]) => t),
-        ...[...touched].map((v) => {
-          const own = ownEvidence.get(v)?.test_file;
-          if (!own) return "";
-          try { return readFileSync(`${vesselRoot(v)}/${own}`, "utf8"); } catch { return ""; }
-        }),
-      ].join("\n");
+      const checkText = contractAddedTestText([...postPatchContents].map(([abs, post]) => ({ path: abs, pre: preEditContent.get(abs) ?? "", post })));
       semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? endpointRefusal ?? inertLiteralRefusal ?? await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,

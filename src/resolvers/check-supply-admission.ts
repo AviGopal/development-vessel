@@ -484,9 +484,10 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
 /**
  * THE NAMES A CHECK READS OFF EACH MODULE IT IMPORTS (relative specifiers only), statically: `import { a, b as c }`
  * (a, b; type-only specifiers are erased and skipped), a default import ("default"), and every member read off a
- * namespace binding, `import * as ns` or `const ns = await import("…")`: `ns.x`, `ns["x"]`, `const { x } = ns`, through
- * any cast, parenthesis or non-null wrapper (`(ns as unknown as Record<string, unknown>)["x"]`), plus
- * `(await import("…")).x` and `const { x } = await import("…")`. A computed key that is not a string literal is not a
+ * namespace binding, `import * as ns` or `const ns = await import("…")` (also through `.catch(…)` / `.finally(…)` on the
+ * import, and the parameter of `import("…").then((ns) => …)`): `ns.x`, `ns["x"]`, `const { x } = ns`, through any
+ * cast, parenthesis or non-null wrapper (`(ns as unknown as Record<string, unknown>)["x"]`), plus
+ * `(await import("…")).x` and `const { x } = await import("…")`. A method of the import's promise is not a name. A computed key that is not a string literal is not a
  * name and is skipped. Shadowing a binding's name inside the check is not modelled (it can only add names).
  *
  * `absence` marks a member read whose only use is an assertion that the name is NOT there (qa ruling on control (a)):
@@ -559,6 +560,41 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
       } else if (bindAs && ts.isIdentifier(p.name)) namespaces.set(p.name.text, spec);
     }
   };
+  /**
+   * import() is a PROMISE of the module until it is awaited: a property read on it before any `await` is a Promise
+   * method (then / catch / finally), never a module member. `.catch(…)` and `.finally(…)` on it are wrappers (the
+   * vessels' own idiom `const mod = await import("…").catch(() => null)` still binds the module, so `mod.x` stays
+   * checked). Returns the outermost node that is still the module (or its promise) and whether it was awaited.
+   */
+  const promiseClimb = (call: TS.Node): { node: TS.Node; awaited: boolean } => {
+    let e = call;
+    let awaited = false;
+    for (;;) {
+      const p = e.parent;
+      if (!p) break;
+      if (isWrapper(p)) { if (ts.isAwaitExpression(p)) awaited = true; e = p; continue; }
+      if (!awaited && ts.isPropertyAccessExpression(p) && p.expression === e && (p.name.text === "catch" || p.name.text === "finally") && p.parent && ts.isCallExpression(p.parent) && p.parent.expression === p) { e = p.parent; continue; }
+      break;
+    }
+    return { node: e, awaited };
+  };
+  /** `import("…").then((m) => …)`: the callback's first parameter is the module (an identifier binds it as a namespace,
+   *  a destructuring pattern names what it reads). Any other use of an un-awaited import() reads nothing. */
+  const thenCallback = (promise: TS.Node, spec: string): void => {
+    const p = promise.parent;
+    if (!p || !ts.isPropertyAccessExpression(p) || p.expression !== promise || p.name.text !== "then" || !p.parent || !ts.isCallExpression(p.parent) || p.parent.expression !== p) return;
+    const cb = p.parent.arguments[0];
+    const param = cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) ? cb.parameters[0] : undefined;
+    if (!param) return;
+    if (ts.isIdentifier(param.name)) namespaces.set(param.name.text, spec);
+    else if (ts.isObjectBindingPattern(param.name)) {
+      for (const el of param.name.elements) {
+        if (el.dotDotDotToken) continue;
+        const key = el.propertyName ?? el.name;
+        if (ts.isIdentifier(key) || ts.isStringLiteral(key)) add(spec, key.text);
+      }
+    }
+  };
   const relSpec = (n: TS.Expression | undefined): string | null => (n && ts.isStringLiteral(n) && n.text.startsWith(".") ? n.text : null);
   const collect = (n: TS.Node): void => {
     if (ts.isImportDeclaration(n)) {
@@ -574,7 +610,11 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
     }
     if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const spec = relSpec(n.arguments[0]);
-      if (spec) readsOff(n, spec, true);
+      if (spec) {
+        const { node, awaited } = promiseClimb(n);
+        if (awaited) readsOff(node, spec, true);
+        else thenCallback(node, spec);
+      }
     }
     ts.forEachChild(n, collect);
   };

@@ -238,6 +238,26 @@ describe("F-ARM: controls", () => {
   });
 });
 
+describe("F-ARM: import() is a promise until awaited", () => {
+  const SITE = { "src/x.ts": "export const widget = 1;\n" };
+  const H = `import { expect, test } from "bun:test";\n`;
+  it("[MUST-FAIL] the vessels' MUST-FAIL idiom `await import(…).catch(() => null)` reading a REAL export is not refused (catch is the promise's, not the module's)", () => {
+    expect(refusalOf(`${H}test("t", async () => { const mod = await import("../../src/x").catch(() => null); expect(mod?.widget).toBe(2); });\n`, CHECK, reader(SITE))).toBeNull();
+    expect(refusalOf(`${H}test("t", async () => { const mod = (await import("../../src/x").finally(() => {})) as any; expect(mod.widget).toBe(2); });\n`, CHECK, reader(SITE))).toBeNull();
+  });
+  it("[MUST-FAIL] the same wrapper followed by a MISSING export is refused, naming it", () => {
+    expect(refusalOf(`${H}test("t", async () => { const mod = await import("../../src/x").catch(() => null); expect((mod as any)?.nope).toBe(2); });\n`, CHECK, reader(SITE))?.symbol).toBe("nope");
+  });
+  it("[MUST-FAIL] import(…).then((m) => …) binds the module to m: a real export passes, a missing one is refused", () => {
+    expect(refusalOf(`${H}test("t", async () => { const w = await import("../../src/x").then((m) => m.widget); expect(w).toBe(2); });\n`, CHECK, reader(SITE))).toBeNull();
+    expect(refusalOf(`${H}test("t", async () => { const w = await import("../../src/x").then(({ nope }) => nope); expect(w).toBe(2); });\n`, CHECK, reader(SITE))?.symbol).toBe("nope");
+    expect(refusalOf(`${H}test("t", async () => { const w = await import("../../src/x").then((m) => m.nope); expect(w).toBe(2); });\n`, CHECK, reader(SITE))?.symbol).toBe("nope");
+  });
+  it("[CONTROL] a member read AFTER the await is the module's: (await import(…)).catch is a missing export", () => {
+    expect(refusalOf(`${H}test("t", async () => { expect((await import("../../src/x")).catch).toBe(2); });\n`, CHECK, reader(SITE))?.symbol).toBe("catch");
+  });
+});
+
 describe("F-ARM: the arm step refuses at attach and records it on the gap", () => {
   it("[MUST-FAIL] the route-edit-bd252f8c check, landed for a gap whose edit site is goal-host src/index.ts, is NOT armed: arm_refused, check_references_missing_export:shellResult, counted, no birth verdict", async () => {
     const { id, body } = await landAndTick("me-route-edit", "goal-host-vessel", "src/index.ts", ROUTE_EDIT_CHECK);

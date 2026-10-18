@@ -55,6 +55,9 @@ async function readGapRowForNudge(gapId: string): Promise<Record<string, unknown
   return row;
 }
 
+const DRAIN_BACKOFF_INITIAL_MS = 60000;
+const DRAIN_BACKOFF_MAX_MS = 3600000;
+
 /** Drain dispatches held per gap by an open remedy_livelock gap (counted in the held_livelock line). */
 const livelockHeldCounts = new Map<string, number>();
 
@@ -367,7 +370,28 @@ export class GapDrainObserver {
     // store read runs only when the backoff would not already block.
     const gd = globalThis as any;
     gd.__drainBackoff ??= new Map();
-    const boEntry = gd.__drainBackoff.get(gapId);
+    let boEntry = gd.__drainBackoff.get(gapId);
+    // A goal-host remedy is judged by its dispatch OUTCOME, not by goal-host's 202 ACK: the ACK keeps the backoff with
+    // the dispatch id, and once that window has passed the outcome is read (GET /executions/:id, gap-check-supply's
+    // probeDispatch). Reached clears the backoff and the drain proceeds; still running waits another window; anything
+    // else (not reached, unreadable) grows the backoff and drops the id, so the next window re-dispatches.
+    if (boEntry?.dispatch_id && Date.now() >= boEntry.until) {
+      const { probeDispatch, RUNNING_STATUSES } = await import("../resolvers/gap-check-supply.js");
+      const probe = await probeDispatch(String(boEntry.dispatch_id));
+      const status = probe.http === 200 ? String(probe.status ?? "").toLowerCase() : "";
+      const reached = probe.http === 200 && probe.reached === true;
+      const running = probe.http === 200 && !reached && RUNNING_STATUSES.has(status);
+      this.recordDrain({ action: "dispatch_outcome", gap_id: gapId, category, dispatch_id: boEntry.dispatch_id, http_status: probe.http, status: status || null, reached });
+      if (reached) {
+        gd.__drainBackoff.delete(gapId);
+        boEntry = undefined;
+      } else {
+        const attempts = running ? boEntry.attempts : boEntry.attempts + 1;
+        const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
+        gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts, ...(running ? { dispatch_id: boEntry.dispatch_id } : {}) });
+        return;
+      }
+    }
     if (boEntry && Date.now() < boEntry.until) { return; }
     {
       const holder = await openLivelockHolderOf(gapId);
@@ -402,8 +426,6 @@ export class GapDrainObserver {
     } catch (err) {
       console.log("[gap-drain-observer] lease check failed (proceeding):", err);
     }
-    const DRAIN_BACKOFF_INITIAL_MS = 60000;
-    const DRAIN_BACKOFF_MAX_MS = 3600000;
     g.__drainInflight.add(category);
     const startedAt = Date.now();
     try {
@@ -422,7 +444,18 @@ export class GapDrainObserver {
             body: JSON.stringify({ impulse: { type: impulseType, triggered_by: "gap-drain", gap_id: gapId } }),
             signal: AbortSignal.timeout(120000),
           });
-      if (resp.ok) {
+      if (resp.ok && extRemedy) {
+        // goal-host answers 202 with a dispatchId before the goal runs: an ACK, not a success. Keep the backoff with
+        // the id; the outcome read above settles it. A body that already says reached clears it.
+        const ack = (await resp.clone().json().catch(() => ({}))) as { dispatchId?: unknown; status?: unknown; reached?: unknown };
+        if (ack.reached === true) gd.__drainBackoff.delete(gapId);
+        else {
+          const attempts = (gd.__drainBackoff.get(gapId)?.attempts ?? 0) + 1;
+          const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
+          const did = typeof ack.dispatchId === "string" && ack.dispatchId ? ack.dispatchId : null;
+          gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts, ...(did ? { dispatch_id: did } : {}) });
+        }
+      } else if (resp.ok) {
         gd.__drainBackoff.delete(gapId);
       } else {
         const prev = gd.__drainBackoff.get(gapId);

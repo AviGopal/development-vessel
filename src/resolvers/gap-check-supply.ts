@@ -463,7 +463,7 @@ export function checkSupplySettlementLeg(c: { dispatched: number; armed: number;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 /** This node's identity in a ledger (bootstrap identity, the same one the lane's pick line names as owner). */
 export const checkSupplyNode = (): string => process.env["SUBSTRATE_NAME"] ?? "substrate";
-const RUNNING_STATUSES: ReadonlySet<string> = new Set(["running", "pending", "accepted", "queued", "dispatched", "in_progress", "started"]);
+export const RUNNING_STATUSES: ReadonlySet<string> = new Set(["running", "pending", "accepted", "queued", "dispatched", "in_progress", "started"]);
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out", "aborted", "refused"]);
 
 /** What a node's goal-host said about one dispatch: an HTTP answer, or unreachable. null = not probed (another node's). */
@@ -600,8 +600,8 @@ async function readScopeSelf(): Promise<AutonomyScope> {
   }
 }
 
-/** Read one dispatch from this node's goal-host. */
-async function probeDispatch(dispatchId: string): Promise<DispatchProbe> {
+/** Read one dispatch from this node's goal-host. Also the drain observer's outcome reader for a goal-host remedy. */
+export async function probeDispatch(dispatchId: string): Promise<DispatchProbe> {
   try {
     const r = await fetch(`${GOAL_HOST_ENDPOINT}/executions/${encodeURIComponent(dispatchId)}`, { headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}, signal: AbortSignal.timeout(5_000) });
     if (r.status !== 200) return { http: r.status };

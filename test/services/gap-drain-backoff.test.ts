@@ -88,6 +88,8 @@ let calls: Call[] = [];
 let dispatchResponse: () => Response = () => new Response("{}", { status: 200 });
 /** goal-host /run-goal, for a goal-host remedy ({goal}, no impulse_type). */
 let runGoalResponse: () => Response = () => Response.json({ ok: true, dispatchId: "probe" });
+/** goal-host GET /executions/:id, the dispatch outcome a goal-host remedy is judged by. */
+let executionResponse: () => Response = () => Response.json({ status: "running", reached: null });
 const realFetch = globalThis.fetch;
 
 const g = globalThis as unknown as {
@@ -114,6 +116,7 @@ beforeEach(() => {
     }
     if (impulse["type"] === "gap_to_feature") return dispatchResponse();
     if (url.endsWith("/run-goal")) return runGoalResponse();
+    if (url.includes("/executions/")) return executionResponse();
     // A gap read over HTTP (the observer already self-resolves maintenanceLease this way) is
     // answered from the scratch store, exactly as resolveSubstrateGap would: filter by id, {gaps, total}.
     const ptr = ((impulse["pointer"] ?? impulse) as Record<string, unknown>);
@@ -586,12 +589,59 @@ describe("gap-drain observer: a goal-host remedy honours the drain brakes", () =
     expect(drainLines().some((l) => l["action"] === "held_livelock" && l["gap_id"] === id)).toBe(true);
   });
 
-  test("[CONTROL] a first goal-host dispatch still goes out, and an accepted one leaves no backoff", async () => {
+  test("[CONTROL] a first goal-host dispatch still goes out; its ACK keeps a backoff carrying the dispatch id", async () => {
     const id = `remedy-livelock-first-${Math.random().toString(36).slice(2, 8)}`;
     writeGapStore([livelockRow(id, `${id}-failing`)]);
-    runGoalResponse = () => Response.json({ ok: true, dispatchId: "probe" });
+    runGoalResponse = () => Response.json({ dispatchId: "d-first", status: "running" }, { status: 202 });
     await makeObserver().handleEvent(goalRemedyEvent(id));
     expect(runGoals().length).toBe(1);
-    expect(g.__drainBackoff!.has(id)).toBe(false);
+    expect((g.__drainBackoff!.get(id) as Record<string, unknown> | undefined)?.["dispatch_id"]).toBe("d-first");
+  });
+
+  // goal-host /run-goal answers 202 + dispatchId at once; the goal runs after. A 2xx is an ACK, not a success.
+  test("[MUST-FAIL] a 202 ACK followed by a not-reached outcome keeps the backoff and does not re-POST", async () => {
+    const id = `remedy-livelock-ack-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ dispatchId: "d-ack", status: "running" }, { status: 202 });
+    executionResponse = () => Response.json({ status: "completed", reached: false, goalReachReason: "probe: not reached" });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    await makeObserver().handleEvent(goalRemedyEvent(id)); // inside the ACK's window
+    expect(runGoals().length).toBe(1);
+    g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1 }); // the window has passed
+    await makeObserver().handleEvent(goalRemedyEvent(id)); // reads the outcome: not reached
+    expect(runGoals().length).toBe(1);
+    const entry = g.__drainBackoff!.get(id) as { until: number; attempts: number; dispatch_id?: string } | undefined;
+    expect(entry?.attempts).toBe(2);
+    expect(entry!.until).toBeGreaterThan(Date.now());
+    expect(entry?.dispatch_id).toBeUndefined();
+    expect(drainLines().some((l) => l["action"] === "dispatch_outcome" && l["gap_id"] === id && l["reached"] === false)).toBe(true);
+  });
+
+  test("[CONTROL] a reached outcome clears the backoff and the drain proceeds", async () => {
+    const id = `remedy-livelock-reached-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ dispatchId: "d-reached", status: "running" }, { status: 202 });
+    executionResponse = () => Response.json({ status: "completed", reached: true });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1 });
+    runGoalResponse = () => Response.json({ dispatchId: "d-next", status: "running" }, { status: 202 });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    expect(drainLines().some((l) => l["action"] === "dispatch_outcome" && l["gap_id"] === id && l["reached"] === true)).toBe(true);
+    expect(runGoals().length).toBe(2);
+    expect((g.__drainBackoff!.get(id) as Record<string, unknown> | undefined)?.["dispatch_id"]).toBe("d-next");
+  });
+
+  test("[CONTROL] a still-running outcome waits another window without re-POSTing", async () => {
+    const id = `remedy-livelock-running-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ dispatchId: "d-run", status: "running" }, { status: 202 });
+    executionResponse = () => Response.json({ status: "running", reached: null });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1 });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    expect(runGoals().length).toBe(1);
+    const entry = g.__drainBackoff!.get(id) as { attempts: number; dispatch_id?: string } | undefined;
+    expect(entry?.attempts).toBe(1);
+    expect(entry?.dispatch_id).toBe("d-run");
   });
 });

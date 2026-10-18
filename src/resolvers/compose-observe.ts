@@ -9,6 +9,9 @@
 //   - rolls its applied edits back even when FAVORABLE (nothing is left in a tree);
 //   - writes neither the gap store nor the landing ledger: every gap-store write in feature-compose.ts passes
 //     composeObserveSkip first (compose lessons, parked landings, dissent records, gate dispositions, baseline gaps);
+//   - escalates nothing (the decompose/investigate path writes the gap, child gaps and dispatches a learn goal), mints
+//     no activity (author_composed_capability), and writes none of the files a grader or learner reads: the compose
+//     report, compose-file-lessons, the locality shadow log, busy-refusals; its refusal journal line is marked;
 //   - returns the would-be ops with reason "observe: dry run, not landed".
 // The mode is the pointer's structured field, never the spec's wording. The compose's own observation (its trace, the
 // admission record, the [compose] attribution line) is kept: that is the measurement.
@@ -48,6 +51,13 @@ export function composeObserveSkip(what: string, record: (line: string) => void 
   if (s?.observe !== true) return false;
   if (!s.announced.has(what)) { s.announced.add(what); record(`[observe] skipped ${what} (compose observe)`); }
   return true;
+}
+
+/** A journal line a detector counts (the no-effect refusal line), as this compose writes it: an observe compose's is
+ *  marked "[observe] ", so self-fact-reconcile's refusals-not-recorded check does not count it against lessons the
+ *  observe compose never stored (REFUSAL_JOURNAL_GREP is anchored at the line start). */
+export function observeJournalLine(line: string): string {
+  return composeObserveActive() ? `[observe] ${line}` : line;
 }
 
 /** The report fields an observe compose adds: not landed, why, and the ops it would have landed. */

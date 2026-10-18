@@ -33,12 +33,19 @@ import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
-import { admissionLandOf, composeObserveActive, composeObserveSkip, enterComposeObserve, observeComposePointer, observeReportFields } from "./compose-observe.js";
+import { admissionLandOf, composeObserveActive, composeObserveSkip, enterComposeObserve, observeComposePointer, observeReportFields, observeJournalLine, OBSERVE_DRY_RUN_REASON } from "./compose-observe.js";
 /** Every gap-store write in this file: an observe compose writes none (compose-observe.ts). */
 const resolveSubstrateGapWrite: typeof resolveSubstrateGapWriteStore = async (p) => {
   if (composeObserveSkip("gap_store_write")) return { shape: "substrateGap_write", body: { ok: false, skipped: "observe" } } as Awaited<ReturnType<typeof resolveSubstrateGapWriteStore>>;
   return await resolveSubstrateGapWriteStore(p);
 };
+/** The escalation a repeated refusal hands to (`escalate`: gap-to-feature's decompose/investigate path). An observe
+ *  compose escalates nothing: that path stamps chronic_escalation on the gap, writes child gaps and dispatches a learn
+ *  goal, so it returns before `escalate` is called. */
+export async function escalateComposeRefusal(escalate: () => Promise<string>): Promise<string> {
+  if (composeObserveSkip("escalation")) return `not dispatched: ${OBSERVE_DRY_RUN_REASON}`;
+  return escalate();
+}
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
@@ -5965,7 +5972,8 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   const busy = unisolated.find((v) => composeInFlight.has(v));
   if (busy) {
     await ws.release();
-    try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/busy-refusals.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: busy }) + "\n"); } catch { }
+    // OBSERVE (compose-observe.ts): not recorded; self_interference_scan files a gap from this log.
+    if (!composeObserveSkip("busy_refusal")) try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/busy-refusals.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: busy }) + "\n"); } catch { }
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
   for (const v of unisolated) composeInFlight.add(v);
@@ -7277,6 +7285,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         _gapSummary ||
         (_specText.split("\n").find((l) => l.trim().length > 0) ??
         "author a composed capability activity");
+      // OBSERVE (compose-observe.ts): author_composed_capability mints an activity; an observe compose mints none and
+      // reports the delegation it would have made.
+      if (composeObserveSkip("author_composed_capability")) {
+        return { shape: "featureComposeReport", body: { ok: false, stage: "delegated_author_composed_capability", ...observeReportFields([]), would_delegate: { type: "author_composed_capability", goal: _delegateGoal } } };
+      }
       try {
         const _delegateRes = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
           method: "POST",
@@ -7920,7 +7933,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const noteNoEffectRefusal = (site: string, r: RefusalRecord & { detail: string }): void => {
     const { detail, ...rec } = r;
     noEffectRefusals.push(rec);
-    console.warn(refusalJournalLine(site, String(pointer.gap?.id ?? ""), detail));
+    console.warn(observeJournalLine(refusalJournalLine(site, String(pointer.gap?.id ?? ""), detail))); // OBSERVE: not counted against the store
   };
   let applyFailed = false;
   // 2026-07-26 apply-reliability (keystone): when a non-unique anchor is
@@ -10016,7 +10029,7 @@ const earlyAttempt = await Promise.race([
     const gid = String(pointer.gap.id);
     const row = ((await readComposeGapRows(gid).catch(() => null)) ?? []).find((r) => String(r.id) === gid) ?? null;
     const ownLessons = ((row?.classification_metadata ?? pointer.gap.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons;
-    const escalation = await escalateRepeatedRefusal(row, ownLessons, noEffectRefusals, async (g, why) => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why));
+    const escalation = await escalateRepeatedRefusal(row, ownLessons, noEffectRefusals, (g, why) => escalateComposeRefusal(async () => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why)));
     refusalEvidence = { refusals: noEffectRefusals, ...(escalation ? { escalation } : {}) };
   }
   let refusalsRecorded = false;
@@ -10086,7 +10099,7 @@ const earlyAttempt = await Promise.race([
       const canEscalate = !!gid && !attemptRecord.escalation;
       const row = canEscalate ? ((await readComposeGapRows(gid).catch(() => null)) ?? []).find((r) => String(r.id) === gid) ?? null : null;
       const ownLessons = canEscalate ? ((row?.classification_metadata ?? pointer.gap?.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons : [];
-      const ce = await constraintRefusalEvidence(verify, row, ownLessons, async (g, why) => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why));
+      const ce = await constraintRefusalEvidence(verify, row, ownLessons, (g, why) => escalateComposeRefusal(async () => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why)));
       attemptRecord.refusals = [...(attemptRecord.refusals ?? []), ...ce.refusals];
       if (canEscalate && ce.escalation) attemptRecord.escalation = ce.escalation;
     }
@@ -10114,7 +10127,8 @@ const earlyAttempt = await Promise.race([
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
       const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);
       const lessonFiles = (failedOpFiles.length > 0 ? failedOpFiles : applied.map((a) => a.path)).slice(0, 8);
-      if (tscText && lessonFiles.length > 0) {
+      // OBSERVE (compose-observe.ts): the next drafter's prompt reads this file (compose-file-lessons), so none is taught.
+      if (tscText && lessonFiles.length > 0 && !composeObserveSkip("compose_file_lesson")) {
         const { appendFileSync: appendFileLesson } = await import("node:fs");
         appendFileLesson(COMPOSE_FILE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), files: lessonFiles, class: lessonClass, tsc: tscText.slice(0, 2000) }) + "\n");
       }
@@ -10125,7 +10139,9 @@ const earlyAttempt = await Promise.race([
     await appendComposeLesson("no_effect_region", noEffectRefusals.map((r) => `NO-EFFECT REGION REFUSED ${r.path}:${r.start}-${r.end} (locked ${r.region_start}-${r.region_end})`).join("\n"), [...touched].join(","), pointer.gap, { stage: "apply", edited_spans: [], ...refusalEvidence });
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
-  try {
+  // OBSERVE (compose-observe.ts): none is written. goal-host's reconciler grades a landing from this file, and the
+  // locality miner, capacitySlices and self_interference_scan read it; an observe report could overwrite a landed one.
+  if (!composeObserveSkip("compose_report")) try {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const { join } = await import("node:path");
     const reportDir = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
@@ -10269,7 +10285,8 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
   // SHADOW-MODE counterfactual record (code_locality): log what the locality
   // index WOULD have retrieved for this family alongside what this exploratory
   // compose actually edited. Decision-time counterfactual only — never gates.
-  try {
+  // OBSERVE (compose-observe.ts): not recorded; the locality miner measures shadow agreement from this log.
+  if (!composeObserveSkip("locality_shadow_log")) try {
     const { resolveCodeLocality } = await import("./code-locality.js");
     const famKey = pointer.gap?.id ?? "adhoc";
     const m = /^route-edit-([0-9a-f]+)$/.exec(famKey);

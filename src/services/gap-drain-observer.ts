@@ -313,38 +313,17 @@ export class GapDrainObserver {
     const extTemplateId = remedyExt && typeof remedyExt.target_template_id === "string" && remedyExt.target_template_id.length > 0 ? remedyExt.target_template_id : "";
     const extGoal = remedyExt && typeof remedyExt.goal === "string" && remedyExt.goal.length > 0 ? remedyExt.goal : "";
     const extHasImpulse = remedyExt && typeof remedyExt.impulse_type === "string" && remedyExt.impulse_type.length > 0;
-    if (!extHasImpulse && (extTemplateId !== "" || extGoal !== "")) {
-      const g2 = globalThis as unknown as { __drainInflight?: Set<string> };
-      g2.__drainInflight ??= new Set<string>();
-      if (g2.__drainInflight.has(category) || g2.__drainInflight.size >= 2) {
-        this.recordDrain({ action: "skipped_inflight", gap_id: gapId, category });
-        return;
-      }
-      g2.__drainInflight.add(category);
-      const t0 = Date.now();
-      try {
-        const goalHostUrl = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
-        const runGoalBody = extTemplateId !== ""
-          ? { targetTemplateId: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } }
-          : { goal: extGoal };
-        const ghResp = await fetch(goalHostUrl + "/run-goal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(runGoalBody),
-          signal: AbortSignal.timeout(120000),
-        });
-        this.recordDrain({ action: "dispatched", gap_id: gapId, category, remedy: extTemplateId !== "" ? extTemplateId : extGoal, ok: ghResp.ok, http_status: ghResp.status, latency_ms: Date.now() - t0 });
-      } catch (err) {
-        this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, error: String(err), latency_ms: Date.now() - t0 });
-      } finally {
-        g2.__drainInflight.delete(category);
-      }
-      return;
-    }
-    if (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0) return;
-    if (!DRAIN_REMEDY_ALLOWLIST.has(remedy.impulse_type)) {
-      console.warn(`[gap-drain-observer] REFUSED remedy for gap ${gapId}: impulse_type ${JSON.stringify(remedy.impulse_type.slice(0, 80))} is not on the drain remedy allowlist (${[...DRAIN_REMEDY_ALLOWLIST].join(", ")})`);
-      this.recordDrain({ action: "refused_remedy_type", gap_id: gapId, category, impulse_type: remedy.impulse_type.slice(0, 80) });
+    // A goal-host remedy ({goal} or {target_template_id}, no impulse_type) is POSTed to goal-host /run-goal. It used
+    // to be dispatched right here, before every brake below, so a remedy_livelock gap (whose remedy is such a goal)
+    // was re-POSTed on every scan with no backoff and no hold. It now takes the same path as an impulse remedy: the
+    // livelock hold, the drain backoff, the in-flight guard and the non-attempt recognition. Only the impulse-type
+    // checks (the allowlist) and the maintenance-lease deferral stay impulse-only, as before.
+    const extRemedy = !extHasImpulse && (extTemplateId !== "" || extGoal !== "");
+    if (!extRemedy && (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0)) return;
+    const impulseType = extRemedy ? "" : String(remedy!.impulse_type);
+    if (!extRemedy && !DRAIN_REMEDY_ALLOWLIST.has(impulseType)) {
+      console.warn(`[gap-drain-observer] REFUSED remedy for gap ${gapId}: impulse_type ${JSON.stringify(impulseType.slice(0, 80))} is not on the drain remedy allowlist (${[...DRAIN_REMEDY_ALLOWLIST].join(", ")})`);
+      this.recordDrain({ action: "refused_remedy_type", gap_id: gapId, category, impulse_type: impulseType.slice(0, 80) });
       return;
     }
     // LIVELOCK HOLD. remedy_effectiveness_observer files an open remedy_livelock gap naming the gap whose remedy keeps
@@ -371,7 +350,7 @@ export class GapDrainObserver {
       this.recordDrain({ action: "skipped_inflight", gap_id: gapId, category });
       return;
     }
-    try {
+    if (!extRemedy) try {
       for (const leaseName of ["trace_store", "change_window"]) {
         const leaseResp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
           method: "POST",
@@ -395,12 +374,19 @@ export class GapDrainObserver {
     try {
       // The remedy's impulse type comes from the gap record, so it can be a write: carry the node key,
       // or this vessel's own write gate refuses the dispatch (lib/self-auth.ts).
-      const resp = await fetch(SELF_RESOLVE_URL, { // env-overridable
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
-        body: JSON.stringify({ impulse: { type: remedy.impulse_type, triggered_by: "gap-drain", gap_id: gapId } }),
-        signal: AbortSignal.timeout(120000),
-      });
+      const resp = extRemedy
+        ? await fetch((process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210") + "/run-goal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(extTemplateId !== "" ? { targetTemplateId: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } } : { goal: extGoal }),
+            signal: AbortSignal.timeout(120000),
+          })
+        : await fetch(SELF_RESOLVE_URL, { // env-overridable
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
+            body: JSON.stringify({ impulse: { type: impulseType, triggered_by: "gap-drain", gap_id: gapId } }),
+            signal: AbortSignal.timeout(120000),
+          });
       if (resp.ok) {
         gd.__drainBackoff.delete(gapId);
       } else {
@@ -445,13 +431,13 @@ export class GapDrainObserver {
       } catch {
         /* ignore: recordDrain still happens */
       }
-      this.recordDrain({ action: "dispatched", gap_id: gapId, category, impulse_type: remedy.impulse_type, ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - startedAt });
+      this.recordDrain({ action: "dispatched", gap_id: gapId, category, ...(extRemedy ? { remedy: extTemplateId !== "" ? extTemplateId : extGoal } : { impulse_type: impulseType }), ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - startedAt });
     } catch (err) {
       const prev = gd.__drainBackoff.get(gapId);
       const attempts = (prev?.attempts ?? 0) + 1;
       const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
       gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts });
-      this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, impulse_type: remedy.impulse_type, error: String(err), latency_ms: Date.now() - startedAt });
+      this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, ...(extRemedy ? {} : { impulse_type: impulseType }), error: String(err), latency_ms: Date.now() - startedAt });
     } finally {
       g.__drainInflight.delete(category);
     }

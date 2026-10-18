@@ -86,6 +86,8 @@ afterAll(() => {
 type Call = { url: string; impulse: Record<string, unknown> };
 let calls: Call[] = [];
 let dispatchResponse: () => Response = () => new Response("{}", { status: 200 });
+/** goal-host /run-goal, for a goal-host remedy ({goal}, no impulse_type). */
+let runGoalResponse: () => Response = () => Response.json({ ok: true, dispatchId: "probe" });
 const realFetch = globalThis.fetch;
 
 const g = globalThis as unknown as {
@@ -111,6 +113,7 @@ beforeEach(() => {
       return new Response(JSON.stringify({ success: true, shape: "maintenanceLease", body: { held: false } }), { status: 200 });
     }
     if (impulse["type"] === "gap_to_feature") return dispatchResponse();
+    if (url.endsWith("/run-goal")) return runGoalResponse();
     // A gap read over HTTP (the observer already self-resolves maintenanceLease this way) is
     // answered from the scratch store, exactly as resolveSubstrateGap would: filter by id, {gaps, total}.
     const ptr = ((impulse["pointer"] ?? impulse) as Record<string, unknown>);
@@ -497,5 +500,44 @@ describe("gap-drain observer: an open remedy_livelock gap holds the gap it names
     dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
     await makeObserver().handleEvent(writtenEvent(id));
     expect(dispatches().length).toBe(1);
+  });
+});
+
+// A GOAL-HOST REMEDY TAKES THE SAME BRAKES. A remedy {vessel:"goal-host-vessel", goal} (no impulse_type), which is what a
+// remedy_livelock gap carries, was POSTed to goal-host /run-goal before every brake: no drain backoff, no livelock hold,
+// no non-attempt recognition. It now takes the impulse path's checks.
+function goalRemedyEvent(id: string): { type: string; data: unknown } {
+  return { type: "devvessel.gap.written", data: { gap_id: id, category: "remedy_livelock", route: "dispatchable", remedy: { vessel: "goal-host-vessel", goal: `probe goal for ${id}` }, status: "open" } };
+}
+const runGoals = () => calls.filter((c) => c.url.endsWith("/run-goal"));
+
+describe("gap-drain observer: a goal-host remedy honours the drain brakes", () => {
+  test("[MUST-FAIL] a livelock gap whose remedy is a goal is not re-POSTed on consecutive events inside its backoff", async () => {
+    const id = `remedy-livelock-probe-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    expect(runGoals().length).toBe(1);
+    expect(g.__drainBackoff!.get(id)?.attempts).toBe(1);
+  });
+
+  test("[MUST-FAIL] a goal-host remedy for a gap named by an open remedy_livelock gap is held", async () => {
+    const id = `drain-probe-goal-held-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-x`), livelockRow(`remedy-livelock-${id}`, id)]);
+    runGoalResponse = () => Response.json({ ok: true, dispatchId: "probe" });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    expect(runGoals().length).toBe(0);
+    expect(drainLines().some((l) => l["action"] === "held_livelock" && l["gap_id"] === id)).toBe(true);
+  });
+
+  test("[CONTROL] a first goal-host dispatch still goes out, and an accepted one leaves no backoff", async () => {
+    const id = `remedy-livelock-first-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ ok: true, dispatchId: "probe" });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    expect(runGoals().length).toBe(1);
+    expect(g.__drainBackoff!.has(id)).toBe(false);
   });
 });

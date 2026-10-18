@@ -423,6 +423,70 @@ export function gapClassKey(id: string): string {
 }
 
 /**
+ * SAME DISPATCH, SAME GAP (2026-10-18). goal-host's floor offers substrateGap_write as a tool and the model
+ * invents the id, so each attempt of one goal filed its own row: one run left
+ * `repair-light-dispatch-vessel-pull-sync-test-failure` and `repair-needed-light-dispatch-vessel-6-consecutive-runs`
+ * open side by side. Neither the exact id nor gapClassKey can see that (the ids share no volatile token), and the
+ * consumption cap covers detector sources only, while the floor model writes whatever source it likes.
+ *
+ * What the write does carry is its dispatch: goal-host stamps the pointer with `dispatch_id` on every floor tool
+ * call (ufExecuteTool). No goal hash travels with a gap write today, so the dispatch is the origin. `execution_id`
+ * is not read: it is not shown to mark the floor alone, and templated detector summaries from one execution score
+ * near-identical while naming different gaps. A NEW open row records it as classification_metadata.origin_dispatch_id;
+ * a later NEW write from the same dispatch whose summary is near-identical to an open row it filed within the
+ * window lands on that row instead of creating another.
+ */
+/**
+ * Jaccard over normalised summary tokens: a byte-for-byte copy of comprehensibility-check.ts's Jaccard and its stop
+ * words. Copied, not imported: this file is in the evaluator's closure and comprehensibility-check.ts is lane-editable, so
+ * importing it would let a lane edit move the evaluator's dedupe (test/resolvers/evaluator-grant-scan.test.ts pins that
+ * closure to the recorded debt; an import here widened it).
+ */
+const SUMMARY_STOP_WORDS = new Set([
+  "the","a","an","and","or","but","is","are","was","were","be","been","being",
+  "of","in","to","for","on","with","at","by","from","as","that","this","these",
+  "those","it","its","they","them","their","there","then","than","so","such",
+  "if","not","no","do","does","did","done","has","have","had","will","would",
+  "shall","should","can","could","may","might","must","into","onto","over","under",
+  "out","up","down","off","about","against","between","through","during","before",
+  "after","above","below","because","when","while","where","what","which","who",
+  "whom","whose","why","how","all","any","both","each","few","more","most","other",
+  "some","such","only","own","same","s","t","also","etc",
+]);
+function summaryTokens(s: string): Set<string> {
+  return new Set(s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2 && !SUMMARY_STOP_WORDS.has(w)));
+}
+function summaryJaccard(a: string, b: string): number {
+  const sa = summaryTokens(a);
+  const sb = summaryTokens(b);
+  if (sa.size === 0 && sb.size === 0) return 1;
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let intersection = 0;
+  for (const t of sa) if (sb.has(t)) intersection += 1;
+  return intersection / (sa.size + sb.size - intersection);
+}
+
+export const ORIGIN_DEDUPE_WINDOW_MS = 6 * 3600_000;
+export const ORIGIN_DEDUPE_MIN_JACCARD = 0.6;
+
+/** The dispatch a write came from, or null when the pointer names none. */
+export function writeOriginOf(pointer: Record<string, unknown>): string | null {
+  const v = pointer["dispatch_id"];
+  return typeof v === "string" && v.trim().length > 0 && !/\{\{[^}]*\}\}/.test(v) ? v.trim() : null;
+}
+
+/** Index of an open row filed by the same dispatch within the window whose summary is near-identical, else -1. */
+export function sameOriginDuplicateIdx(gaps: SubstrateGap[], origin: string, summary: string, nowMs: number): number {
+  return gaps.findIndex((g) => {
+    if (!hasClassifiableId(g) || g.status !== "open") return false;
+    if ((g.classification_metadata as Record<string, unknown> | undefined)?.["origin_dispatch_id"] !== origin) return false;
+    const born = Date.parse(String(g.created_at ?? ""));
+    if (!Number.isFinite(born) || nowMs - born > ORIGIN_DEDUPE_WINDOW_MS) return false;
+    return typeof g.summary === "string" && summaryJaccard(g.summary, summary) >= ORIGIN_DEDUPE_MIN_JACCARD;
+  });
+}
+
+/**
  * Whether a STORED row can take part in class matching at all.
  *
  * A malformed row must degrade to "not a match", never take the store down with
@@ -2006,7 +2070,7 @@ async function resolveSubstrateGapWriteInner(
   })();
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
-    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; unresolvableReason?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
+    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; unresolvableReason?: string; dedupeReason?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
   > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
@@ -2094,6 +2158,18 @@ async function resolveSubstrateGapWriteInner(
             };
           }
         }
+  }
+  // SAME DISPATCH, SAME GAP (see sameOriginDuplicateIdx): a new open row from a dispatch that already filed a
+  // near-identical open gap lands on that row, and the result names it.
+  const origin = writeOriginOf(pointer as Record<string, unknown>);
+  let dedupeReason: string | undefined;
+  if (existingIdx < 0 && gap.status === "open" && origin && typeof gap.summary === "string") {
+    const dup = sameOriginDuplicateIdx(gaps, origin, gap.summary, Date.parse(now));
+    if (dup >= 0) {
+      dedupeReason = "deduplicated: same goal, near-identical summary";
+      console.log(`[gap-audit] origin-deduplicated write gap=${gap.id} onto=${gaps[dup]!.id} origin=${origin} reason="${dedupeReason}"`);
+      existingIdx = dup;
+    }
   }
 
   // Close-if-open semantics: a close/reject write whose class has no existing row
@@ -2370,6 +2446,7 @@ async function resolveSubstrateGapWriteInner(
     // detection time and leave close/reopen fields at their absent default.
     gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
     delete gap.reopened_at; // a new row has never been reopened, whatever the writer sent
+    if (origin) gap.classification_metadata = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>), origin_dispatch_id: origin };
     if (demandGoalAppends.length > 0) {
       const meta = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>) };
       for (const e of demandGoalAppends) meta["demand_goals"] = mergeDemandGoal(meta["demand_goals"], e);
@@ -2466,11 +2543,11 @@ async function resolveSubstrateGapWriteInner(
   }
 
   await saveGaps(gaps);
-  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, birthJob };
+  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, dedupeReason, birthJob };
   });
 
   if ("early" in outcome) return outcome.early;
-  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, birthJob } = outcome;
+  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, dedupeReason, birthJob } = outcome;
   if (birthJob) scheduleBirthEvaluation(birthJob, opts?.birthJudge ?? __birthJudgeOverride ?? defaultBirthJudge);
   // ONE LINE PER WRITE. A silent classification is worth nothing: this codebase has
   // repeatedly shipped mechanisms whose CONFIRMING case emitted no evidence, and a
@@ -2729,6 +2806,7 @@ async function resolveSubstrateGapWriteInner(
       falsifier,
       ...(unadvertisedShape ? { falsifier_unadvertised_shape: unadvertisedShape } : {}),
       ...(unresolvableReason ? { falsifier_unresolvable_reason: unresolvableReason } : {}),
+      ...(dedupeReason ? { reason: dedupeReason } : {}),
     },
   };
 }

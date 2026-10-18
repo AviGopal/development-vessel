@@ -190,28 +190,51 @@ export async function resolveSubstrateHealthTick(
   // self-misunderstanding defect this guard prevents.
   const corpus_complete = !fetchInterrupted && templatesTotal !== Infinity && templates.length >= templatesTotal;
 
-  // Fetch recent traces (last 30 days) to build execution counts per template.
-  const traceLookbackSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  // Execution counts per template over the last 30 days. The server aggregates
+  // (traceAggregateReport, a GROUP BY over the indexed executed_at window): the
+  // trace list route caps limit at 100, so paging it sorted the whole window and
+  // counted only its newest 100 rows, reported as 30 days. The success/fail split
+  // needs two metrics (count, success_count; fail = count - success): one aggregate
+  // carries one metric. A read that did not measure is UNKNOWN, never zero:
+  // confidence + stability (both read these counts) go unmeasured and say why.
   const traceCounts = new Map<string, { success: number; fail: number }>();
-  let traceOffset = 0;
-  while (traceOffset < 5000) {
-    const r = await fetchWithRetry(
-      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
-      { headers: auth },
-    );
-    if (!r?.ok) break;
-    const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
-    const rows = page.executions ?? [];
-    if (rows.length === 0) break;
-    for (const t of rows) {
-      const id = t.activity_id ?? "unknown";
-      const entry = traceCounts.get(id) ?? { success: 0, fail: 0 };
-      if (t.success === true || t.status === "success" || t.status === "completed") entry.success++;
-      else entry.fail++;
-      traceCounts.set(id, entry);
+  const aggArgs = { group_by: "activity_id", window_hours: 720, limit: 1000 };
+  console.log(`[substrate-health-tick] traceAggregateReport group_by=${aggArgs.group_by} window_hours=${aggArgs.window_hours} limit=${aggArgs.limit} metrics=count,success_count`);
+  let traceCountsReason: string | null = null;
+  const readAggregate = async (metric: string): Promise<Array<{ key: string; value: number }> | null> => {
+    if (traceCountsReason) return null;
+    const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/impulses/resolve`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ impulse: { pointer: { type: "traceAggregateReport", metric, ...aggArgs } } }),
+      timeoutMs: 30_000,
+    }, { attempts: 2, baseDelayMs: 250 });
+    if (!r || !r.ok) { traceCountsReason = `${metric}: ${r ? `http_${r.status}` : "request_failed"}`; return null; }
+    try {
+      const wire = await r.json() as { success?: boolean; content?: string; error?: string };
+      if (wire?.success !== true || typeof wire.content !== "string") { traceCountsReason = `${metric}: resolve_failed: ${wire?.error ?? "no content"}`; return null; }
+      const report = JSON.parse(wire.content) as { measured?: boolean; reason?: string; truncated?: boolean; rows?: Array<{ key?: unknown; value?: unknown }> };
+      if (report.measured !== true) { traceCountsReason = `${metric}: ${report.reason ?? "unmeasured"}`; return null; }
+      if (report.truncated === true) { traceCountsReason = `${metric}: aggregate_truncated`; return null; }
+      return (report.rows ?? []).filter((row): row is { key: string; value: number } =>
+        typeof row.key === "string" && typeof row.value === "number" && Number.isFinite(row.value));
+    } catch (e) {
+      traceCountsReason = `${metric}: unparseable: ${e instanceof Error ? e.message : String(e)}`;
+      return null;
     }
-    traceOffset += rows.length;
-    if (rows.length < 200) break;
+  };
+  const countRows = await readAggregate("count");
+  const successRows = await readAggregate("success_count");
+  if (countRows && successRows) {
+    const successById = new Map(successRows.map((row) => [row.key, row.value]));
+    for (const row of countRows) {
+      const success = Math.min(row.value, successById.get(row.key) ?? 0);
+      traceCounts.set(row.key === "(none)" ? "unknown" : row.key, { success, fail: Math.max(0, row.value - success) });
+    }
+  }
+  const trace_counts_measured = traceCountsReason === null;
+  if (!trace_counts_measured) {
+    console.error(`[substrate-health-tick] 30-day execution counts UNMEASURED (${traceCountsReason}): posterior_confidence and graph_stability are unmeasured this tick`);
   }
 
   const variantPairs: { alpha: number; beta: number }[] = [];
@@ -365,7 +388,7 @@ export async function resolveSubstrateHealthTick(
   // UNMEASURED (null), never a confident pass/fail. A null dimension makes
   // overall_passing null ("couldn't measure this tick"), which resets the lift
   // streak honestly instead of falsely signalling a regression.
-  const confidence_passing = !corpus_complete
+  const confidence_passing = !corpus_complete || !trace_counts_measured
     ? null
     // null, NOT false, on a thin sample. This file already treats null as "couldn't measure this
     // tick" three lines above, and the comment there states the reason: a null dimension "makes
@@ -375,7 +398,7 @@ export async function resolveSubstrateHealthTick(
     // pessimistic direction as the current behaviour is in the optimistic one. Subsumes the old
     // total_pairs === 0 guard, since 0 < confidenceMinPairs.
     : (total_pairs < confidenceMinPairs ? null : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
-  const stability_passing = !corpus_complete
+  const stability_passing = !corpus_complete || !trace_counts_measured
     ? null
     : mutation_rate_per_hour <= stabilityRateCeiling;
   const optimality_passing =
@@ -397,7 +420,7 @@ export async function resolveSubstrateHealthTick(
   const optimality_measured = optimality.mean_optimality_ratio !== null;
   const unmeasured_dimensions: string[] = [];
   if (!optimality_measured) unmeasured_dimensions.push("optimality");
-  if (!corpus_complete) unmeasured_dimensions.push("posterior_confidence", "graph_stability");
+  if (!corpus_complete || !trace_counts_measured) unmeasured_dimensions.push("posterior_confidence", "graph_stability");
 
   const report = {
     generated_at: new Date().toISOString(),
@@ -414,6 +437,13 @@ export async function resolveSubstrateHealthTick(
       corpus_complete,
       templates_fetched: template_count_at_window_end,
       templates_total: templatesTotal === Infinity ? null : templatesTotal,
+    },
+    trace_counts: {
+      measured: trace_counts_measured,
+      reason: traceCountsReason,
+      group_by: aggArgs.group_by,
+      window_hours: aggArgs.window_hours,
+      templates_counted: traceCounts.size,
     },
     health_verdict: {
       confidence_passing,

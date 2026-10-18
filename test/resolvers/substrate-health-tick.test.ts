@@ -27,12 +27,39 @@ interface FetchOpts {
   // force a page fetch to fail mid-pagination → interrupted/incomplete corpus
   failTemplatesAfterOffset?: number;
   traces?: Array<{ activity_id: string; status: string }>;
+  // replace the traceAggregateReport answer (default: the same traces, grouped per metric)
+  aggregate?: (metric: string) => Record<string, unknown>;
+  // every request the resolver made: aggregate pointers and trace-list urls
+  calls?: { aggregates: Array<Record<string, unknown>>; lists: string[] };
+}
+
+// What traceAggregateReport (group_by activity_id) answers over the given traces.
+function aggregateOf(traces: Array<{ activity_id: string; status: string }>, metric: string): Record<string, unknown> {
+  const counts = new Map<string, number>();
+  for (const t of traces) {
+    if (metric === "success_count" && t.status !== "success") continue;
+    counts.set(t.activity_id, (counts.get(t.activity_id) ?? 0) + 1);
+  }
+  const rows = [...counts].map(([key, value]) => ({ key, value }));
+  return {
+    shape: "traceAggregateReport", metric, group_by: "activity_id", window_hours: 720, rows,
+    total_groups: rows.length, truncated: false, empty: rows.length === 0, measured: true,
+    matched_total: rows.reduce((a, r) => a + r.value, 0), query_ms: 1,
+  };
 }
 
 function makeFetch(opts: FetchOpts = {}) {
-  const { reportTotal = true, failTemplatesAfterOffset, traces = CONFIDENT_TRACES } = opts;
-  return (async (url: string) => {
+  const { reportTotal = true, failTemplatesAfterOffset, traces = CONFIDENT_TRACES, aggregate, calls } = opts;
+  return (async (url: string, init?: RequestInit) => {
     const u = String(url);
+    if (u.includes("/v2/impulses/resolve")) {
+      const pointer = (JSON.parse(String(init?.body ?? "{}")) as { impulse?: { pointer?: Record<string, unknown> } }).impulse?.pointer ?? {};
+      calls?.aggregates.push(pointer);
+      if (pointer["type"] !== "traceAggregateReport") return new Response("not found", { status: 404 });
+      const metric = String(pointer["metric"] ?? "count");
+      const report = aggregate ? aggregate(metric) : aggregateOf(traces, metric);
+      return new Response(JSON.stringify({ success: true, content: JSON.stringify(report) }), { status: 200 });
+    }
     if (u.includes("/v2/activities/templates")) {
       const offset = Number(new URL(u, "http://x").searchParams.get("offset") ?? "0");
       if (failTemplatesAfterOffset !== undefined && offset > failTemplatesAfterOffset) {
@@ -48,6 +75,7 @@ function makeFetch(opts: FetchOpts = {}) {
       return new Response(JSON.stringify(body), { status: 200 });
     }
     if (u.includes("/v2/activities/execution-traces")) {
+      calls?.lists.push(u);
       const offset = Number(new URL(u, "http://x").searchParams.get("offset") ?? "0");
       return new Response(JSON.stringify({ executions: offset === 0 ? traces : [] }), { status: 200 });
     }
@@ -177,6 +205,104 @@ describe("substrate-health-tick resolver", () => {
     const body = result.body as { health_verdict: { overall_passing: boolean | null; corpus_complete: boolean } };
     expect(body.health_verdict.corpus_complete).toBe(false);
     expect(body.health_verdict.overall_passing).toBeNull();
+  });
+});
+
+// ---- 30-day execution counts come from the server-side aggregate ----
+//
+// The trace list route caps limit at 100, so the old offset loop was one request that sorted the
+// whole 30-day window and counted only its newest 100 rows, reported as 30 days. The per-template
+// counts now come from traceAggregateReport (group_by activity_id, 720h): one aggregate per metric,
+// count and success_count, and no trace-list read at all. An aggregate that did not measure leaves
+// confidence + stability UNMEASURED with a named reason, never a zero.
+describe("substrate-health-tick: 30-day counts by aggregate", () => {
+  beforeAll(() => {
+    process.env["METABOB_ENDPOINT"] = "https://activity.test";
+    process.env["METABOB_API_KEY"] = "test-key";
+  });
+  afterAll(() => { globalThis.fetch = originalFetch; });
+
+  it("must-fail: aggregate requests (group_by activity_id, window_hours 720) replace the trace-list paging", async () => {
+    const calls = { aggregates: [] as Array<Record<string, unknown>>, lists: [] as string[] };
+    globalThis.fetch = makeFetch({ calls });
+    await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
+    const aggs = calls.aggregates.filter((p) => p["type"] === "traceAggregateReport");
+    expect(aggs.map((p) => p["metric"]).sort()).toEqual(["count", "success_count"]);
+    for (const p of aggs) {
+      expect(p["group_by"]).toBe("activity_id");
+      expect(p["window_hours"]).toBe(720);
+    }
+    expect(calls.lists).toEqual([]);
+  });
+
+  it("must-fail: the posterior pairs are built from the aggregate's counts, not from list rows", async () => {
+    // The list would answer WEAK (1 trace per template); the aggregate says 30 runs, 20 successes each.
+    const counted = TEMPLATES.map((t) => t.id);
+    globalThis.fetch = makeFetch({
+      traces: WEAK_TRACES,
+      aggregate: (metric) => ({
+        ...aggregateOf([], metric),
+        rows: counted.map((key) => ({ key, value: metric === "count" ? 30 : 20 })),
+        empty: false,
+      }),
+    });
+    const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
+    const body = result.body as {
+      posterior_confidence: { total_pairs: number; pairs_above_floor: number; median_alpha_plus_beta: number; mean_variance: number };
+      health_verdict: { confidence_passing: boolean | null };
+      trace_counts: { measured: boolean; reason: string | null; group_by: string; window_hours: number; templates_counted: number };
+    };
+    expect(body.posterior_confidence.total_pairs).toBe(10);
+    expect(body.posterior_confidence.pairs_above_floor).toBe(10);
+    expect(body.posterior_confidence.median_alpha_plus_beta).toBe(32); // 30 runs + 2
+    // α = 21, β = 11: the success/fail split survives the move to the aggregate.
+    expect(body.posterior_confidence.mean_variance).toBeCloseTo((21 * 11) / (32 * 32 * 33), 12);
+    expect(body.health_verdict.confidence_passing).toBe(true);
+    expect(body.trace_counts).toEqual({ measured: true, reason: null, group_by: "activity_id", window_hours: 720, templates_counted: 10 });
+  });
+
+  it("control: the report keeps its sections for a fixed aggregate response", async () => {
+    globalThis.fetch = makeFetch();
+    const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
+    expect(result.shape).toBe("substrateHealthReport");
+    const body = result.body as Record<string, Record<string, unknown>>;
+    for (const k of ["posterior_confidence", "graph_stability", "optimality", "vessel_liveness", "registry_fetch", "health_verdict"]) {
+      expect(typeof body[k]).toBe("object");
+    }
+    for (const k of ["total_pairs", "pairs_above_floor", "floor", "median_alpha_plus_beta", "p25_alpha_plus_beta", "p75_alpha_plus_beta", "mean_variance"]) {
+      expect(typeof body["posterior_confidence"]![k]).toBe("number");
+    }
+    // CONFIDENT fixtures: 10 templates × 10 successes → α+β = 12, no failures.
+    expect(body["posterior_confidence"]!["total_pairs"]).toBe(10);
+    expect(body["posterior_confidence"]!["median_alpha_plus_beta"]).toBe(12);
+    expect(body["health_verdict"]!["confidence_passing"]).toBe(true);
+  });
+
+  it("control: measured:false is a named failure — confidence + stability UNMEASURED, never a zero count", async () => {
+    globalThis.fetch = makeFetch({
+      aggregate: (metric) => ({ ...aggregateOf([], metric), measured: false, matched_total: null, reason: "unserved_group_by" }),
+    });
+    const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
+    const body = result.body as {
+      trace_counts: { measured: boolean; reason: string | null };
+      health_verdict: { confidence_passing: boolean | null; stability_passing: boolean | null; overall_passing: boolean | null; corpus_complete: boolean; unmeasured_dimensions: string[] };
+    };
+    expect(body.trace_counts.measured).toBe(false);
+    expect(body.trace_counts.reason).toBe("count: unserved_group_by");
+    expect(body.health_verdict.confidence_passing).toBeNull();
+    expect(body.health_verdict.stability_passing).toBeNull();
+    expect(body.health_verdict.overall_passing).toBeNull();
+    // The registry corpus itself was complete: the unmeasured cause is the counts, not the registry.
+    expect(body.health_verdict.corpus_complete).toBe(true);
+    expect(body.health_verdict.unmeasured_dimensions).toEqual(expect.arrayContaining(["posterior_confidence", "graph_stability"]));
+  });
+
+  it("control: a truncated aggregate is unmeasured (it drops the low-count groups)", async () => {
+    globalThis.fetch = makeFetch({ aggregate: (metric) => ({ ...aggregateOf(CONFIDENT_TRACES, metric), truncated: true }) });
+    const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
+    const body = result.body as { trace_counts: { measured: boolean; reason: string | null }; health_verdict: { confidence_passing: boolean | null } };
+    expect(body.trace_counts).toMatchObject({ measured: false, reason: "count: aggregate_truncated" });
+    expect(body.health_verdict.confidence_passing).toBeNull();
   });
 });
 

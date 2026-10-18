@@ -26,6 +26,9 @@ import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ISO_ROOT } = await isolateRuntimeRoot("fc-isolation-vessels", { who: "feature-compose-isolation-vessels.test.ts" });
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+// The call site asserts the refusal an UNREADABLE scope gives, so it must not see a scope another file in the same
+// process read and cached (the judge-split harness answers an explicitly unrestricted one and leaves it cached).
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 
 const PRIOR_SEED = "repos/activity-api/src/lib/prior-seed.ts";
 const CONCEPT = "repos/concept-db/src/resolvers/concept.ts";
@@ -137,6 +140,7 @@ describe("the call site: resolveFeatureCompose refuses before acquiring a worksp
     const capture = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
     console.log = capture; console.warn = capture; console.error = capture;
     globalThis.fetch = (async () => new Response("unavailable (test)", { status: 503 })) as unknown as typeof fetch;
+    __resetPolicyReadsForTests();
     let r: any;
     try {
       r = await fc.resolveFeatureCompose({
@@ -149,6 +153,7 @@ describe("the call site: resolveFeatureCompose refuses before acquiring a worksp
       });
     } finally {
       globalThis.fetch = origFetch; console.log = origLog; console.warn = origWarn; console.error = origErr;
+      __resetPolicyReadsForTests();
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     }
     expect(r?.body?.verdict).toBe("REFUSED");

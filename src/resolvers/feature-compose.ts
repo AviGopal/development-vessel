@@ -5671,7 +5671,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
     }
     if (stored && land) {
-      if (!observeRun) landingLeaseGap = _gapIdForSlot; // OBSERVE: an observe compose never lands, so takes no landing lease
+      landingLeaseGap = _gapIdForSlot;
       admittedCapture = (draftingStarted) => admissionCapture({ decision: "admitted", draftingStarted, stage: null, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
       if (!supplyMarker && admissionRow) composeArmed = (await import("../judge/gap-eligibility.js")).composeEligibilitySkipReason(admissionRow) === null;
     }
@@ -5697,7 +5697,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // cutover releases it when it lands, refuses or fails; this exit releases it only when nothing is left
   // pending for a cutover (see releaseOrKeepLandingLease).
   let landingLease: { gapId: string; holder: string; attempt: string } | null = null;
-  if (landingLeaseGap) {
+  // OBSERVE (compose-observe.ts): an observe compose never lands, so it takes no landing lease.
+  if (landingLeaseGap && !observeRun) {
     const { thisNode } = await import("./self-fact-reconcile.js");
     const holder = thisNode();
     let v: LandingLeaseVerdict;

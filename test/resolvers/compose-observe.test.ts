@@ -168,7 +168,7 @@ describe("an observe compose never lands", () => {
     expect(FC_SRC).toContain("const outcome = await resolveFeatureComposeUncapped(observeComposePointer(pointer));");
     expect(FC_SRC).toContain("const observeRun = enterComposeObserve(pointer);");
     expect(FC_SRC).toContain("const admissionLand = admissionLandOf(pointer);");
-    expect(FC_SRC).toContain("if (!observeRun) landingLeaseGap = _gapIdForSlot;");
+    expect(FC_SRC).toContain("if (landingLeaseGap && !observeRun) {");
   });
   it("[CONTROL] the landing step is unchanged for a learn compose (FAVORABLE && pointer.land)", () => {
     expect(FC_SRC).toContain('if (verdict === "FAVORABLE" && pointer.land) {');

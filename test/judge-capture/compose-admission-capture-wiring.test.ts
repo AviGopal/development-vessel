@@ -41,7 +41,9 @@ function returnPreludes(segment: string): string[] {
 
 const PRE_START = "const supplyMarker = csa.checkSupplyMarkerOf(pointer);";
 const ADMISSION_END = "admittedCapture = (draftingStarted) => admissionCapture({ decision: \"admitted\", draftingStarted, stage: null,";
-const DRAFT_START = "const outcome = await resolveFeatureComposeUncapped(pointer);";
+// The drafting start: the uncapped body called with the pointer it runs with (an observe compose's is land:false,
+// skip_push:true; compose-observe.ts observeComposePointer).
+const DRAFT_START = "const outcome = await resolveFeatureComposeUncapped(observeComposePointer(pointer));";
 
 describe("feature_compose admission writes a composeAdmission record at every decision", () => {
   it("[MUST-FAIL] the recorder is imported from the closed src/judge/routing-capture.ts", () => {

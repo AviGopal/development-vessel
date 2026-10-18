@@ -31,8 +31,14 @@ import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-worksp
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
+import { admissionLandOf, composeObserveActive, composeObserveSkip, enterComposeObserve, observeComposePointer, observeReportFields } from "./compose-observe.js";
+/** Every gap-store write in this file: an observe compose writes none (compose-observe.ts). */
+const resolveSubstrateGapWrite: typeof resolveSubstrateGapWriteStore = async (p) => {
+  if (composeObserveSkip("gap_store_write")) return { shape: "substrateGap_write", body: { ok: false, skipped: "observe" } } as Awaited<ReturnType<typeof resolveSubstrateGapWriteStore>>;
+  return await resolveSubstrateGapWriteStore(p);
+};
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
@@ -172,6 +178,7 @@ export function parkedLandingPath(gapId: string): string {
 }
 
 export async function writeParkedLanding(park: ParkedLanding): Promise<void> {
+  if (composeObserveSkip("parked_landing")) return; // OBSERVE (compose-observe.ts): nothing is parked to land later
   try {
     await parkMkdir(parkedLandingsDir(), { recursive: true });
     const path = parkedLandingPath(park.gap_id);
@@ -192,6 +199,7 @@ export async function readParkedLanding(gapId: string): Promise<ParkedLanding | 
 }
 
 export async function deleteParkedLanding(gapId: string): Promise<void> {
+  if (composeObserveSkip("parked_landing")) return; // OBSERVE (compose-observe.ts): another compose's park is left alone
   try {
     await parkUnlink(parkedLandingPath(gapId));
   } catch (err) {
@@ -487,6 +495,9 @@ export interface FeatureComposePointer {
   model?: string;
   /** If true: plan only, do not apply. */
   dry_run?: boolean;
+  /** "observe" (goal-host's observe dispatch): admitted as a landing compose, drafted and verified, never landed;
+   *  no gap-store or ledger write (compose-observe.ts). */
+  learning_mode?: "observe" | "learn";
   /** If true: keep edits on UNFAVORABLE instead of rolling back (for debugging). */
   keep_on_fail?: boolean;
   /** Hard cap on ops in a single plan (default 24). */
@@ -4814,6 +4825,7 @@ export async function recordDecomposeNoOps(
 }
 
 export async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
+  if (composeObserveSkip("compose_lesson")) return; // OBSERVE (compose-observe.ts): no lesson, mark, concept or gap write
   // A VERIFY FAILURE MAKES THE GAP'S STAGED MITOSIS UNLANDABLE (2026-10-02). A tree staged for this
   // gap's lineage (e.g. by patch_with_tools) must not be landed later by mitosis-tick on typecheck
   // alone once the gap's own verify has failed: the cutover reads this mark and discards the tree.
@@ -5507,6 +5519,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const bad = featureComposeInputProblem(pointer);
     if (bad) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "input", error: bad } };
   }
+  // OBSERVE (compose-observe.ts): goal-host's observe dispatch. Admitted exactly as the landing compose it measures,
+  // drafted and verified, never landed; its writers read the mode from this compose's context.
+  const observeRun = enterComposeObserve(pointer);
   // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
   // `inFlight >= NaN` is ALWAYS FALSE — so a mistyped env var would silently
   // disable the cap while the code still looks like it has one. Any
@@ -5555,7 +5570,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const supplyMarker = csa.checkSupplyMarkerOf(pointer);
     // The admission record (src/judge/routing-capture.ts) for every decision from here on: the refusals before the
     // admission block and every admission-block decision. Builds a record and writes one line; never throws.
-    const admissionLand = (pointer as { land?: boolean }).land !== false;
+    const admissionLand = admissionLandOf(pointer); // an observe compose is admitted as a landing one
     // The gap's localizationRecord (gap.localization; the stored row's, else the caller's copy), recorded as read.
     let admissionLocalization: unknown = (pointer.gap as { localization?: unknown } | undefined)?.localization ?? null;
     const admissionCapture = (o: { decision: "admitted" | "refused"; draftingStarted: boolean; stage: AdmissionRefusalStage | null; stored: "unreadable" | "absent" | "present"; row: Record<string, unknown> | null; why?: string | null; supply?: { admitted: boolean; why: string } | null; supplyVerdict?: { admit: boolean; why: string | null } | null }): void =>
@@ -5656,7 +5671,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
     }
     if (stored && land) {
-      landingLeaseGap = _gapIdForSlot;
+      if (!observeRun) landingLeaseGap = _gapIdForSlot; // OBSERVE: an observe compose never lands, so takes no landing lease
       admittedCapture = (draftingStarted) => admissionCapture({ decision: "admitted", draftingStarted, stage: null, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
       if (!supplyMarker && admissionRow) composeArmed = (await import("../judge/gap-eligibility.js")).composeEligibilitySkipReason(admissionRow) === null;
     }
@@ -5665,7 +5680,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // for auto-picks only; a caller naming a gap started an undirected land:true compose every 10
   // minutes while autonomy was paused (09-27 14:55-15:25, db_performance_slow_queries). No
   // undirected compose lands while the envelope refuses; directed and non-landing composes are unaffected.
-  if (!isDirected && (pointer as { land?: boolean }).land !== false) {
+  if (!isDirected && admissionLandOf(pointer)) {
     const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");
     const envelope = await spendEnvelopeAllows();
     if (!envelope.allow) {
@@ -5747,7 +5762,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   let leaseOutcome: ResolverResult | null = null;
   admittedCapture?.(true);
   try {
-    const outcome = await resolveFeatureComposeUncapped(pointer);
+    const outcome = await resolveFeatureComposeUncapped(observeComposePointer(pointer)); // OBSERVE: land:false, skip_push:true
     try {
       const ob = (outcome?.body ?? {}) as Record<string, unknown>;
       if (ob["verdict"] === "REFUSED") {
@@ -7703,7 +7718,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     }
   }
 
-  for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
+  for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; if (composeObserveSkip("gap_store_write")) break; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
 
   // UNTESTED TARGET = TEXT-ONLY VERIFICATION. Say so before drafting.
   //
@@ -9670,7 +9685,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // Files left edited because a THIRD PARTY's bytes were on disk. Distinct from
   // restoreFailed (we tried and could not) and from restored (we did).
   const rollbackConflicts: string[] = [];
-  if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
+  // OBSERVE (compose-observe.ts): an observe compose leaves nothing in a tree, FAVORABLE or not.
+  if (((verdict as string) === "UNFAVORABLE" || composeObserveActive()) && !pointer.keep_on_fail) {
     for (const [abs, original] of preEditContent) {
       // WHOSE BYTES ARE ON DISK? That is the only question worth asking here, and the
       // previous form of this guard asked a different one.
@@ -10326,6 +10342,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       cutovers: pointer.land ? cutovers : undefined,
+      ...(composeObserveActive() ? observeReportFields(ops) : {}),
       ...(testWritingOutside.length > 0 ? { stage: "test_writing_diff_outside_tests", outside_tests: testWritingOutside } : {}),
       next: verdict === "FAVORABLE"
         ? "staged + typecheck-clean; dispatch a cutover (commit/push) to land"

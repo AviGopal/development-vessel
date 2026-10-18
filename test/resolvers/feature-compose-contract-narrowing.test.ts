@@ -194,6 +194,47 @@ describe("controls: a change that keeps the documented contract, or proves its n
   });
 });
 
+// LINEAR TIME. cb6bb0b4's read pattern put whitespace quantifiers side by side (`\s*:\s*[…\s]+` then `\s*\)`), so a
+// line like `({ limit }` + spaces + `:` + spaces backtracked polynomially: 4 KB took ~1.7 s, 16 KB minutes. A regex
+// that hangs does not throw, so the floor would not fail closed — it would block the vessel's event loop on every
+// landing of that file. The param-head, max and default patterns had the same adjacency (quadratic). Each 16 KB line
+// below must be extracted in under 50 ms. It runs in a CHILD process with a hard timeout, so the red run on a
+// backtracking tree is bounded: it is killed and fails, it does not hang the suite.
+describe("the contract extract runs in linear time on pathological lines (must-fail at cb6bb0b4)", () => {
+  it("MUST-FAIL: 16 KB whitespace lines (read, param head, max, default) each extract in under 50 ms", () => {
+    // The vessel's modules may log at import, so stdout is silenced first and the result is one marked line. Each line
+    // is timed as the best of three runs, so a GC pause or a loaded host is not read as backtracking.
+    const script = `
+      const write = process.stdout.write.bind(process.stdout);
+      console.log = () => {}; console.info = () => {}; console.warn = () => {};
+      const m = await import(${JSON.stringify(join(import.meta.dir, "../../src/resolvers/feature-compose.js"))});
+      const et = await Bun.file(${JSON.stringify(join(FIX, "execution-traces.before-ddf9b46.excerpt.txt"))}).text();
+      const sp = " ".repeat(8192);
+      const lines = { read: "({ limit }" + sp + ":" + sp, head: sp + sp + "x = 1; // c", max: " * - limit: max" + sp + sp + ".", def: " * - offset: default" + sp + sp };
+      m.contractNarrowings(et, et.replace("1), 500)", "1), 100)"));
+      const out = {};
+      for (const [k, l] of Object.entries(lines)) {
+        const pre = l + "\\n" + et;
+        let best = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const t = performance.now();
+          m.contractNarrowings(pre, pre.replace("1), 500)", "1), 100)"));
+          best = Math.min(best, performance.now() - t);
+        }
+        out[k] = Math.round(best * 10) / 10;
+      }
+      write("\\nCN_LINEAR " + JSON.stringify(out) + "\\n");
+    `;
+    const r = Bun.spawnSync({ cmd: [process.execPath, "-e", script], stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+    const line = r.stdout.toString().split("\n").find((l) => l.startsWith("CN_LINEAR ")) ?? "";
+    expect({ exited: r.exitCode, killed: r.signalCode ?? null, result: line !== "", stderr: line !== "" ? "" : r.stderr.toString().slice(-600) })
+      .toEqual({ exited: 0, killed: null, result: true, stderr: "" });
+    const ms = JSON.parse(line.slice("CN_LINEAR ".length)) as Record<string, number>;
+    expect(Object.keys(ms).sort()).toEqual(["def", "head", "max", "read"]);
+    for (const [k, v] of Object.entries(ms)) expect({ line: k, under50ms: v < 50, ms: v }).toMatchObject({ line: k, under50ms: true });
+  }, 40_000);
+});
+
 describe("the documented-contract extract (deterministic, pre-image only)", () => {
   it("reads the maxima, defaults and optional parameters both fixtures document", () => {
     const agg = fc.documentedContract(AGG_PRE) as Array<Record<string, unknown>>;

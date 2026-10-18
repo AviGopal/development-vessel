@@ -2365,17 +2365,17 @@ export type ContractNarrowing = {
 
 const CONTRACT_COMMENT_LINE = /^\s*(?:\/\*\*?|\*|\/\/)/;
 const CONTRACT_PARAM_HEADS: RegExp[] = [
-  /^\s*(?:\/\*\*?|\*|\/\/)?\s*-\s*`?([A-Za-z_]\w*)`?\??\s*:/,   // ` * - limit: Max records (default: 50, max: 500)`
-  /^\s*(?:\/\*\*?|\*|\/\/)?\s*([A-Za-z_]\w*)\?\s*:/,             // ` *   group_by?: "a" | "b",   // default a`
+  /^\s*(?:(?:\/\*\*?|\*|\/\/)\s*)?-\s*`?([A-Za-z_]\w*)`?\??\s*:/,   // ` * - limit: Max records (default: 50, max: 500)`
+  /^\s*(?:(?:\/\*\*?|\*|\/\/)\s*)?([A-Za-z_]\w*)\?\s*:/,             // ` *   group_by?: "a" | "b",   // default a`
   /@param\s+(?:\{[^}]*\}\s*)?\[([A-Za-z_]\w*)/,                   // `@param {number} [limit=10]`
 ];
 const CONTRACT_MAX_RES: RegExp[] = [
-  /\bmax(?:imum)?\b\s*[:=]?\s*(\d+)/i,
+  /\bmax(?:imum)?\b\s*(?:[:=]\s*)?(\d+)/i,
   /\bat most\s+(\d+)/i,
   /\bclamped\s*(?:to\s*)?\[\s*-?\d+\s*,\s*(\d+)\s*\]/i,
   /\b(?:up to|limited to|capped at)\s+(\d+)/i,
 ];
-const CONTRACT_DEFAULT_RE = /\bdefaults?\b(?:\s+to)?\s*[:=]?\s*[`'"]?([A-Za-z0-9_.-]+)/i;
+const CONTRACT_DEFAULT_RE = /\bdefaults?\b(?:\s+to\b)?\s*(?:[:=]\s*)?[`'"]?([A-Za-z0-9_.-]+)/i;
 // Omission words, read only in a test's TITLE beside the parameter: a word anywhere else (a value, a comment) is not a test.
 const CONTRACT_OMIT_WORDS = /\b(?:omit\w*|absent|missing|undefined|without|unset)\b/i;
 
@@ -2398,8 +2398,10 @@ function contractAccessRe(p: string): RegExp {
 function contractReadRe(p: string): RegExp {
   const e = contractEsc(p);
   const pattern = `\\{[^{}]*(?:^|[{,\\s])${e}\\s*(?=[:=,}])[^{}]*\\}`;
-  const typeAnn = `(?:\\s*:\\s*[\\w$.<>\\[\\]|&\\s]+)?`;
-  return new RegExp(`(?:${contractAccessRe(p).source}|${pattern}\\s*=(?![=>])|${pattern}${typeAnn}\\s*\\)\\s*(?::[^=;{]*)?(?:=>|\\{))`);
+  // The annotation is `[^)]*` after its colon: one run, so no two whitespace quantifiers are ever adjacent (a long
+  // run of spaces around a `:` backtracked polynomially, and a regex that hangs does not throw, so it would not fail
+  // closed — it would block the event loop on every landing of that file).
+  return new RegExp(`(?:${contractAccessRe(p).source}|${pattern}\\s*=(?![=>])|${pattern}(?:\\s*:[^)]*|\\s*)\\)\\s*(?::[^=;{]*)?(?:=>|\\{))`);
 }
 /** Any mention: a read, the bare name, or a local derived from it (limitParam, groupBy). */
 function contractMentionRe(p: string): RegExp {
@@ -2499,7 +2501,7 @@ function contractAbsenceGuarded(cond: string, p: string, def: string | undefined
   const e = contractEsc(p);
   if (new RegExp(`\\.${e}\\s*!==?\\s*(?:undefined|null)\\b`).test(cond)) return true;
   if (new RegExp(`typeof\\s+[\\w$.]*\\.${e}\\s*!==?\\s*['"\`]undefined`).test(cond)) return true;
-  if (new RegExp(`[\\w$.]*\\.${e}\\s*&&`).test(cond)) return true;
+  if (new RegExp(`\\.${e}\\s*&&`).test(cond)) return true;
   if (new RegExp(`['"\`]${e}['"\`]\\s+in\\s`).test(cond)) return true;
   if (def !== undefined && new RegExp(`\\.${e}\\s*(?:\\?\\?|\\|\\|)\\s*['"\`]?${contractEsc(def)}\\b`).test(cond)) return true;
   return false;

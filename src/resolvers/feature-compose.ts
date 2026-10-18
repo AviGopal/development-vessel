@@ -5577,8 +5577,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // on the STORED row. goal-host's edit-intent route reached this function with none of that: boredom's
     // gap-goal supply landed the unarmed, pending-verification gap-env-gated-sf-discount four times this way.
     // EVERY caller, directed or not: `directed` is goal-host's operatorOrigin, i.e. trigger "operator", which any
-    // dispatcher that sets the request's `operator` field gets (development-vessel's own expectation-scan and
-    // trend-expectation-check dispatches do, for attribution), so it is not an authority to compose an unarmed
+    // dispatcher that sets the request's `operator` field gets (an attribution field, not a credential; the
+    // operator:/probe: TAGS on development-vessel's own scan and trend dispatches do not set it), so it is not an authority to compose an unarmed
     // gap. A non-landing compose and an id the store does not hold (route-edit-*) are unaffected. A refusal is a
     // non-attempt.
     // The evidence is gathered here; the decision is compose-admission-core.ts's (its closed floor is the admission this

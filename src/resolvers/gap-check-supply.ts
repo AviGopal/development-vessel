@@ -336,20 +336,31 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
  * lets the writer avoid it. The list is read by the same extractor the refusal uses (moduleExports, over the clone the
  * goal's reader reads, the tree vesselTestInventory walks for the decompose prompt) and bounded like that prompt's
  * source list: at most EXPORT_LIST_MAX names, those the gap's own words name first, then source order, the rest
- * counted. Empty when the module cannot be read or exports nothing.
+ * counted. The names are clamped by characters too (EXPORT_LIST_MAX_CHARS): dispatch_goal refuses a goal over
+ * MAX_GOAL_LEN (8192), and 80 long names alone could pass it. Empty when the module cannot be read or exports nothing.
  */
 export const EXPORT_LIST_MAX = 80;
+export const EXPORT_LIST_MAX_CHARS = 3000;
 export function exportListSentence(siteRel: string, reader: SrcReader, summary: string): string {
   const ex = moduleExports(siteRel, reader);
   if (!ex || ex.names.size === 0) return "";
   const words = summary.toLowerCase();
   const ranked = [...ex.names].map(([name, kind], i) => ({ name, kind, i, hit: name.length >= 3 && words.includes(name.toLowerCase()) ? 1 : 0 }))
     .sort((a, b) => b.hit - a.hit || a.i - b.i);
-  const shown = ranked.slice(0, EXPORT_LIST_MAX);
+  const shown: typeof ranked = [];
+  let chars = 0;
+  for (const x of ranked) {
+    if (shown.length >= EXPORT_LIST_MAX) break;
+    const len = x.name.length + x.kind.length + 4; // "name: kind, "
+    if (chars + len > EXPORT_LIST_MAX_CHARS) continue;
+    shown.push(x);
+    chars += len;
+  }
+  if (shown.length === 0) return "";
   const more = ex.names.size - shown.length;
   return `${siteRel} exports ${more > 0 ? `${ex.names.size} names; ${shown.length} of them` : `exactly these ${shown.length} name${shown.length === 1 ? "" : "s"}`}${ex.open ? " (and what it re-exports from a module not readable here)" : ""} (name: kind): ` +
     `${shown.map((x) => `${x.name}: ${x.kind}`).join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
-    "The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is red on every tree and is refused; reach internal code through an export on the list. ";
+    "The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is refused; reach internal code through an export on the list. ";
 }
 
 /**

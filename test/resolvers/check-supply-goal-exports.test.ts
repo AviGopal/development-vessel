@@ -59,4 +59,13 @@ describe("the check writer's goal names the edit site's real exports", () => {
     }
     expect(unread).toBe(noReader);
   });
+
+  it("[MUST-FAIL] the list is clamped by characters too: 80 very long names keep the goal under the dispatch bound, the rest counted", () => {
+    expect(supply["EXPORT_LIST_MAX_CHARS"]).toBe(3000);
+    const long = Array.from({ length: 80 }, (_, i) => `export function ${"averyLongExportNameThatGoesOnAndOn".repeat(4)}${i}(): number { return ${i}; }`).join("\n") + "\n";
+    const goal = supply.checkSupplyGoal("fixture-vessel", "test/checks/x.check.ts", "x".repeat(600), "repos/fixture-vessel/src/long.ts", reader({ "src/long.ts": long }));
+    expect(goal.length).toBeLessThanOrEqual(MAX_GOAL_LEN);
+    expect(goal).toMatch(/src\/long\.ts exports 80 names; \d+ of them/);
+    expect(goal).toMatch(/, and \d+ more\. /);
+  });
 });

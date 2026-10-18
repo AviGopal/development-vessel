@@ -218,6 +218,9 @@ function nonAttemptBodies(id: string): Array<{ label: string; body: Record<strin
     { label: "BUSY stage budget", body: { ok: false, stage: "budget", verdict: "BUSY", error: "spend envelope: exhausted (selection skipped)", reason: "budget_exhausted", cap_usd: 1, spent_usd: 1, skipped_selection: true } },
     { label: "compose-forwarded BUSY capacity", body: { ok: false, gap_id: id, verdict: "BUSY", stage: "capacity", error: "compose slots full" } },
     { label: "failure_kind environment", body: { ok: false, gap_id: id, verdict: "UNFAVORABLE", failure_kind: "environment", error: "workspace unavailable" } },
+    // The targeted entry's refusals (gap-admission targetedComposeExclusion, gap-to-feature gapPickRefusal): nothing started.
+    { label: "targeted admission refused (compose_ineligible_unarmed)", body: { ok: false, stage: "select", verdict: "REFUSED", reason: "compose_ineligible_unarmed", exclusion: "needs_information(falsifier=none)", gap_id: id, non_attempt: true } },
+    { label: "targeted pick refused (pick_refused_backoff)", body: { ok: false, stage: "select", verdict: "REFUSED", reason: "pick_refused_backoff", refused_by: "backoff", detail: { lineage_attempts: 138, depth: 0, remaining_ms: 82_800_000 }, gap_id: id, gap_category: "trace_store_reconciliation", non_attempt: true } },
   ];
 }
 

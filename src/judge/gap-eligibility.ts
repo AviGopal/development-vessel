@@ -180,5 +180,9 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
   // calls it a non-attempt; graded as a failure it bumped failed_attempts on every drain tick, which narrowed and
   // escalated the gap again each time (gap-lane livelock, 2026-10-10).
   if (String(cb.verdict ?? "") === "REFUSED" && String(cb.stage ?? "") === "ineligible") return true;
+  // A report that says so itself: gap-to-feature's targeted refusals (targetedComposeExclusion's compose_ineligible_*,
+  // the pick brakes' pick_refused_*) answer HTTP 200 with non_attempt:true and nothing started. Unrecognised here, the
+  // drain observer cleared its backoff on every such 200 and re-dispatched the gap on the next scan.
+  if (cb.non_attempt === true) return true;
   return false;
 }

@@ -547,10 +547,45 @@ describe("gap-drain observer: a livelock hold expires after the observer's windo
     expect(dispatches().length).toBe(0);
   });
 
-  test("[CONTROL] a review_by in the future holds past the window", async () => {
+  test("[MUST-FAIL] a review_by past the window does not extend the hold (7 h old, window 6 h, review_by in 2099)", async () => {
     const id = `drain-probe-livelock-review-${Math.random().toString(36).slice(2, 8)}`;
     const ll = livelockRow(`remedy-livelock-${id}`, id);
     ll["detected_at"] = hoursAgo(7);
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    (ll["classification_metadata"] as Record<string, unknown>)["review_by"] = "review 2099";
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+
+  test("[MUST-FAIL] a detected_at far in the future is unreadable: no hold", async () => {
+    const id = `drain-probe-livelock-future-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = "detected 2099";
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+
+  test("[CONTROL] a review_by earlier than the window ends the hold early (1 h old, window 6 h, review_by passed)", async () => {
+    const id = `drain-probe-livelock-review-early-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(1);
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    (ll["classification_metadata"] as Record<string, unknown>)["review_by"] = new Date(Date.now() - 60_000).toISOString();
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+
+  test("[CONTROL] a review_by later but inside the window keeps the hold (1 h old, window 6 h, review_by in 1 h)", async () => {
+    const id = `drain-probe-livelock-review-inside-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(1);
     (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
     (ll["classification_metadata"] as Record<string, unknown>)["review_by"] = new Date(Date.now() + 3_600_000).toISOString();
     writeGapStore([gapRow(id, {}), ll]);

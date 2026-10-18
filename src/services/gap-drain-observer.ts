@@ -66,19 +66,22 @@ const livelockExpiredLogged = new Set<string>();
 
 /**
  * When a livelock gap's hold ends. Nothing closes a remedy_livelock gap (remedy_effectiveness_observer only opens
- * them), so a hold keyed on "open" alone would never lift. It lasts one observer window from detection: the
- * livelock gap's review_by when it carries one, else detected_at plus the window_hours the observer stamped on it
- * (its pointer default when absent). Null when no detection time can be read: such a gap holds nothing.
+ * them), so a hold keyed on "open" alone would never lift. It lasts at most one observer window from detection:
+ * detected_at plus the window_hours the observer stamped on it (its pointer default when absent), or the livelock
+ * gap's review_by when that is earlier. review_by only shortens a hold; it never extends one past the window
+ * (Date.parse reads loose strings such as "review 2099" as real dates). Null when no plausible detection time can be
+ * read, including a detected_at later than now plus one window: such a gap holds nothing.
  */
-export async function livelockHoldUntilMs(row: Record<string, unknown>): Promise<number | null> {
+export async function livelockHoldUntilMs(row: Record<string, unknown>, nowMs: number = Date.now()): Promise<number | null> {
   const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
-  const review = Date.parse(String(meta["review_by"] ?? row["review_by"] ?? ""));
-  if (Number.isFinite(review)) return review;
   const detected = Date.parse(String(row["detected_at"] ?? row["created_at"] ?? ""));
   if (!Number.isFinite(detected)) return null;
   const stamped = Number(meta["window_hours"]);
   const { DEFAULT_WINDOW_HOURS } = await import("../resolvers/remedy-effectiveness-observer.js");
-  return detected + (Number.isFinite(stamped) && stamped > 0 ? stamped : DEFAULT_WINDOW_HOURS) * 3_600_000;
+  const windowMs = (Number.isFinite(stamped) && stamped > 0 ? stamped : DEFAULT_WINDOW_HOURS) * 3_600_000;
+  if (detected > nowMs + windowMs) return null;
+  const review = Date.parse(String(meta["review_by"] ?? row["review_by"] ?? ""));
+  return Number.isFinite(review) ? Math.min(review, detected + windowMs) : detected + windowMs;
 }
 
 /** The id of an OPEN remedy_livelock gap whose failing_gap_id is `gapId` and whose hold has not expired, or null
@@ -94,7 +97,7 @@ export async function openLivelockHolderOf(gapId: string): Promise<string | null
     const now = Date.now();
     for (const x of naming) {
       const id = String(x["id"] ?? "");
-      const until = await livelockHoldUntilMs(x);
+      const until = await livelockHoldUntilMs(x, now);
       if (until !== null && now < until) return id || null;
       const key = `${id}\u0000${gapId}`;
       if (!livelockExpiredLogged.has(key)) {

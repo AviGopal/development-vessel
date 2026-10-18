@@ -162,10 +162,10 @@ export type PoolWriteAuth = { operator: boolean; key_id?: string | null; why?: s
  */
 export const EVALUATOR_TRUST_ROOT_WRITERS: Readonly<Record<string, string>> = { autonomyScope: 'scope_earn_in_apply' };
 /** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */
-export function trustRootWriteShape(pointer: { id?: string; shape?: string }): string | null {
+export function trustRootWriteShape(pointer: { id?: string; shape?: string }, all?: StandingImpulse[]): string | null {
   if (typeof pointer.shape === 'string' && TRUST_ROOT_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
   if (typeof pointer.id === 'string') {
-    const existing = loadImpulses().find((imp) => imp.id === pointer.id);
+    const existing = (all ?? loadImpulses()).find((imp) => imp.id === pointer.id);
     if (existing && TRUST_ROOT_POOL_SHAPES.has(existing.shape)) return existing.shape;
   }
   return null;
@@ -269,21 +269,22 @@ export async function verdictCorpusWriterGrant(authHeader: string | undefined): 
 
 /** The runner-only shape a write would create or modify (its own shape, its reserved id, or the shape of the row its id
  *  names), or null. */
-export function runnerOnlyWriteShape(pointer: { id?: string; shape?: string }): string | null {
+export function runnerOnlyWriteShape(pointer: { id?: string; shape?: string }, all?: StandingImpulse[]): string | null {
   if (typeof pointer.shape === 'string' && RUNNER_ONLY_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
   if (pointer.id === VERDICT_CORPUS_STATUS_ID) return VERDICT_CORPUS_STATUS_SHAPE;
   if (typeof pointer.id === 'string' && pointer.id.startsWith(VERDICT_CORPUS_REFUSAL_ID_PREFIX)) return VERDICT_CORPUS_REFUSAL_SHAPE;
   if (typeof pointer.id === 'string') {
-    const existing = loadImpulses().find((imp) => imp.id === pointer.id);
+    const existing = (all ?? loadImpulses()).find((imp) => imp.id === pointer.id);
     if (existing && RUNNER_ONLY_POOL_SHAPES.has(existing.shape)) return existing.shape;
   }
   return null;
 }
 
-/** Record a refused runner-only write: one row per caller, upserted (bounded by distinct authenticated principals). */
-function recordRunnerRefusal(principal: string, why: string, attemptedId: string): void {
+/** Record a refused runner-only write: one row per caller, upserted (bounded by distinct authenticated principals).
+ *  `into`: a batch's loaded rows, upserted in place and saved by the batch (its own save would be overwritten). */
+function recordRunnerRefusal(principal: string, why: string, attemptedId: string, into?: { rows: StandingImpulse[]; recorded: number }): void {
   try {
-    const all = loadImpulses();
+    const all = into?.rows ?? loadImpulses();
     const now = new Date().toISOString();
     const id = VERDICT_CORPUS_REFUSAL_ID_PREFIX + principal;
     const idx = all.findIndex((imp) => imp.id === id);
@@ -291,7 +292,7 @@ function recordRunnerRefusal(principal: string, why: string, attemptedId: string
     const body = { principal, count: (typeof prev['count'] === 'number' ? prev['count'] : 0) + 1, first_at: typeof prev['first_at'] === 'string' ? prev['first_at'] : now, last_at: now, last_why: why, last_attempted_id: attemptedId };
     const row: StandingImpulse = { id, shape: VERDICT_CORPUS_REFUSAL_SHAPE, body, source: 'pool-impulse', status: 'open', injected_at: idx >= 0 ? all[idx]!.injected_at : now, updated_at: now };
     if (idx >= 0) all[idx] = row; else all.push(row);
-    saveImpulses(all);
+    if (into) into.recorded++; else saveImpulses(all);
   } catch (err) {
     console.error(`[pool] could not record the refused verdictCorpusStatus write by ${principal}: ${String((err as Error)?.message ?? err)}`);
   }
@@ -343,7 +344,7 @@ function stripCallerAttestation(body: unknown): unknown {
   return rest;
 }
 
-export function resolvePoolImpulseWrite(pointer: {
+export type PoolWritePointer = {
   type: string;
   id?: string;
   shape?: string;
@@ -356,17 +357,22 @@ export function resolvePoolImpulseWrite(pointer: {
   if_updated_at?: string;
   /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
   attested?: unknown;
-}, auth?: PoolWriteAuth, runner?: { grant?: VerdictCorpusWriterGrant | null; principal?: string; why?: string }): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } } {
+};
+export type PoolWriteResult = { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } };
+
+/** One write applied to `all` (the loaded rows) in place; the caller saves when body.ok. Every check reads `all`, never
+ *  a fresh load. `refusalsInto`: a batch's rows, so a recorded runner refusal is not overwritten by the batch's save. */
+function applyPoolImpulseWrite(all: StandingImpulse[], pointer: PoolWritePointer, auth?: PoolWriteAuth, runner?: { grant?: VerdictCorpusWriterGrant | null; principal?: string; why?: string }, refusalsInto?: { rows: StandingImpulse[]; recorded: number }): PoolWriteResult {
   // RUNNER-ONLY SHAPES (the verdict corpus runner grant above). Checked first: a runner-only write is never also a
   // trust-root write, and no operator credential admits one.
-  const runnerShape = runnerOnlyWriteShape(pointer);
+  const runnerShape = runnerOnlyWriteShape(pointer, all);
   const runnerGrant = runner?.grant && runnerGrants.has(runner.grant) ? runner.grant : null;
   if (runnerShape) {
     const principal = runner?.principal ?? (auth ? (auth.key_id ? `key_id:${auth.key_id}` : 'unidentified') : 'in-process');
     const attempted = String(pointer.id ?? '(new)');
     const refuse = (code: string, why: string, hint?: string) => {
       console.warn(`[pool] REFUSED ${runnerShape} write (id=${attempted}) by ${principal}: ${why}`);
-      recordRunnerRefusal(principal, `${code}: ${why}`, attempted);
+      recordRunnerRefusal(principal, `${code}: ${why}`, attempted, refusalsInto);
       return { shape: 'poolImpulse_write', body: { ok: false, id: String(pointer.id ?? ''), error: `${code}: ${why}`, ...(hint ? { hint } : {}) } };
     };
     if (runnerShape === VERDICT_CORPUS_REFUSAL_SHAPE) return refuse('runner_principal_required', `${VERDICT_CORPUS_REFUSAL_SHAPE} rows are written only by this store`);
@@ -374,7 +380,7 @@ export function resolvePoolImpulseWrite(pointer: {
     if (pointer.shape !== VERDICT_CORPUS_STATUS_SHAPE || (pointer.id !== undefined && pointer.id !== VERDICT_CORPUS_STATUS_ID)) {
       return refuse('runner_shape_immutable', `the runner writes shape ${VERDICT_CORPUS_STATUS_SHAPE} under id ${VERDICT_CORPUS_STATUS_ID} only`, 'name both shape and id; no other id may hold this shape and this id holds no other shape');
     }
-    const existing = loadImpulses().find((imp) => imp.id === VERDICT_CORPUS_STATUS_ID);
+    const existing = all.find((imp) => imp.id === VERDICT_CORPUS_STATUS_ID);
     if (existing && existing.shape !== VERDICT_CORPUS_STATUS_SHAPE) return refuse('runner_shape_immutable', `${VERDICT_CORPUS_STATUS_ID} is held by a ${existing.shape} row`);
     if (pointer.source !== VERDICT_CORPUS_RUN_SOURCE) return refuse('runner_principal_required', `a status write names source ${VERDICT_CORPUS_RUN_SOURCE} (the runner path)`);
     if (pointer.status !== undefined && pointer.status !== 'open') return refuse('runner_principal_required', 'the status record is never retired or consumed; a newer run replaces it');
@@ -385,13 +391,12 @@ export function resolvePoolImpulseWrite(pointer: {
     }
     pointer = { ...pointer, id: VERDICT_CORPUS_STATUS_ID };
   }
-  const trustRoot = trustRootWriteShape(pointer);
+  const trustRoot = trustRootWriteShape(pointer, all);
   const evaluatorGrant = !!trustRoot && auth?.operator !== true && typeof auth?.evaluator === 'string' && EVALUATOR_TRUST_ROOT_WRITERS[trustRoot] === auth.evaluator;
   if (trustRoot && auth?.operator !== true && !evaluatorGrant) {
     console.warn(`[pool] REFUSED ${trustRoot} write (id=${String(pointer.id ?? '(new)')}): operator credential required${auth?.why ? ` (${auth.why})` : ''}`);
     return { shape: 'poolImpulse_write', body: { ok: false, id: String(pointer.id ?? ''), error: `operator_credential_required: ${trustRoot} is a trust-root pool shape${auth?.why ? `; ${auth.why}` : ''}` } };
   }
-  const all = loadImpulses();
   const now = new Date().toISOString();
   const id = pointer.id ?? randomUUID();
   const idx = all.findIndex((imp) => imp.id === id);
@@ -470,6 +475,36 @@ export function resolvePoolImpulseWrite(pointer: {
     };
     all.push(sign(entry));
   }
-  saveImpulses(all);
   return { shape: 'poolImpulse_write', body: { ok: true, id } };
+}
+
+export function resolvePoolImpulseWrite(pointer: PoolWritePointer, auth?: PoolWriteAuth, runner?: { grant?: VerdictCorpusWriterGrant | null; principal?: string; why?: string }): PoolWriteResult {
+  const all = loadImpulses();
+  const r = applyPoolImpulseWrite(all, pointer, auth, runner);
+  if (r.body.ok) saveImpulses(all);
+  return r;
+}
+
+/**
+ * MANY WRITES, ONE REWRITE. Each write above loads and rewrites the whole pool file synchronously, so a caller that
+ * writes N rows in a loop pays N full parse+stringify passes with the event loop blocked throughout (a tick writing
+ * ~240 rows into a ~22 MB pool held the loop for 48-131 s, past the health probe's window). This applies every pointer
+ * to ONE load with exactly the single write's checks, in order, and saves once if any was accepted. A refused pointer
+ * refuses only itself: its result says why and the rest still land. Runner-only writes carry no grant here, so they are
+ * refused (and recorded) as from any unprivileged caller. A failed save throws: then none of the batch landed.
+ */
+export function resolvePoolImpulseWriteMany(pointers: PoolWritePointer[], auth?: PoolWriteAuth): PoolWriteResult[] {
+  if (pointers.length === 0) return [];
+  const all = loadImpulses();
+  const refusals = { rows: all, recorded: 0 };
+  const results = pointers.map((p) => applyPoolImpulseWrite(all, p, auth, undefined, refusals));
+  // A recorded runner refusal changed `all` too, so it is saved with the accepted writes.
+  const accepted = results.filter((r) => r.body.ok).length;
+  if (accepted > 0 || refusals.recorded > 0) {
+    saveImpulses(all);
+    // ONE LINE PER REWRITE, naming the writer, so pool rewrites are countable by caller from the log.
+    const from = [...new Set(pointers.map((p) => p.source || 'unnamed'))].join(',');
+    console.log(`[pool-impulse] batch write: ${accepted} impulse(s) from ${from}${accepted < pointers.length ? ` (${pointers.length - accepted} refused)` : ''}`);
+  }
+  return results;
 }

@@ -863,6 +863,8 @@ export interface GoalReachIO {
   scopeExcludes(): Promise<((path: string) => string | null) | null>;
   loadRecords(): Promise<Record<string, GoalReachRecord>>;
   saveRecord(rec: GoalReachRecord): Promise<void>;
+  /** Persist many records in ONE store write; one entry per record, in order. Absent ⇒ saveRecord per record. */
+  saveRecords?(recs: GoalReachRecord[]): Promise<Array<{ goal_hash: string; ok: boolean; why?: string }>>;
   dispatchGoal(req: GoalDispatchRequest): Promise<{ ok: true; dispatch_id: string; coalesced: boolean } | { ok: false; why: string }>;
   /** Templates written since `fromMs`, with their provenance fields (a READ of the template store). */
   readTemplatesSince(fromMs: number): Promise<{ ok: true; templates: Array<Record<string, unknown>> } | { ok: false; why: string }>;
@@ -946,6 +948,35 @@ export interface GoalReachTickResult {
 
 const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 300);
 
+/** A record's content as a change test sees it: `updated_at` and `last_action.at` are stamps of WHEN, so a tick that
+ *  re-decides the same action on an unchanged record has changed nothing. */
+function contentOf(rec: GoalReachRecord): string {
+  const { updated_at: _u, last_action, ...rest } = rec;
+  return JSON.stringify({ ...rest, ...(last_action ? { last_action: { ...last_action, at: 0 } } : {}) });
+}
+
+/**
+ * Persist the records whose content changed since `prior` (the state loaded at the tick's start), stamping each
+ * updated_at, in ONE store write. Every failure is loud and lands in `errors`; one refused record never drops another.
+ */
+export async function flushChangedRecords(io: GoalReachIO, prior: Record<string, GoalReachRecord>, recs: GoalReachRecord[], now: number, errors: string[]): Promise<number> {
+  const changed = recs.filter((r) => !prior[r.goal_hash] || contentOf(r) !== contentOf(prior[r.goal_hash]!));
+  if (changed.length === 0) return 0;
+  for (const r of changed) r.updated_at = now;
+  const fail = (h: string, why: string): void => {
+    errors.push(`record ${h} not persisted: ${why}`);
+    console.error(`[goal-reach] RECORD NOT PERSISTED goal_hash=${h}: ${why}`);
+  };
+  if (io.saveRecords) {
+    try {
+      for (const r of await io.saveRecords(changed)) if (!r.ok) fail(r.goal_hash, r.why ?? "write refused");
+    } catch (e) { for (const r of changed) fail(r.goal_hash, `batch write threw: ${errText(e)}`); }
+  } else {
+    for (const r of changed) { try { await io.saveRecord(r); } catch (e) { fail(r.goal_hash, errText(e)); } }
+  }
+  return changed.length;
+}
+
 /**
  * Link each gap a terminal, non-reaching walk filed to that walk's goal. Every filed entry ends in exactly one
  * of linked / already / skipped (with why): nothing is dropped. Only open gaps are linked (never a reopen).
@@ -1004,7 +1035,7 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
   const live = Object.values(records);
   const gapsRead = await io.readGaps(live.map((r) => r.goal_hash));
   if (!gapsRead.ok) {
-    for (const r of live) await io.saveRecord(r);
+    await flushChangedRecords(io, prior, live, now, result.errors);
     result.ledger.errors.push(`gaps unreadable: ${gapsRead.why}`);
     return { ...result, ok: false, why: `gaps unreadable: ${gapsRead.why}`, summary: summarize(live) };
   }
@@ -1017,113 +1048,118 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
   const scope = await io.scopeExcludes().catch(() => null);
   let landings: LandingView[] | null = null;
 
-  for (const rec of live) {
-    const wasTerminal = prior[rec.goal_hash]?.status === "stopped";
-    linkGaps(rec, gaps);
+  // ONE WRITE PER TICK. The loop decides; what it changed is persisted once, below, and in `finally` when the loop
+  // is cut by a throw, so a transition it already made (a REACHED, a stop) is never decided again on the next tick.
+  let flushed = false;
+  try {
+    for (const rec of live) {
+      const wasTerminal = prior[rec.goal_hash]?.status === "stopped";
+      linkGaps(rec, gaps);
 
-    if (rec.status === "reached") {
-      const before = JSON.stringify(rec);
-      if (!rec.attribution_final) {
-        if (landings === null) {
-          const from = Math.min(...live.map((r) => r.first_failure_at ?? now));
-          const lr = await io.readLandings(from, now).catch((e) => ({ ok: false as const, why: errText(e) }));
-          if (lr.ok) landings = lr.landings;
-          else result.errors.push(`landings unreadable (${lr.why}); attribution taken without them would over-credit, so held`);
+      if (rec.status === "reached") {
+        if (!rec.attribution_final) {
+          if (landings === null) {
+            const from = Math.min(...live.map((r) => r.first_failure_at ?? now));
+            const lr = await io.readLandings(from, now).catch((e) => ({ ok: false as const, why: errText(e) }));
+            if (lr.ok) landings = lr.landings;
+            else result.errors.push(`landings unreadable (${lr.why}); attribution taken without them would over-credit, so held`);
+          }
+          if (landings !== null) {
+            const a = attributeReach(rec, gaps, landings, now);
+            rec.attribution = a.attribution;
+            rec.attribution_reasons = a.reasons;
+            rec.operator_hands = handsOf(a.attribution);
+            rec.attribution_final = true;
+            rec.last_action = { kind: "reached", reason: `attribution=${a.attribution}`, at: now };
+            console.log(`[goal-reach] REACHED goal_hash=${rec.goal_hash} dispatch=${rec.reached_dispatch_id} attribution=${a.attribution}${a.reasons.length ? ` (${a.reasons.slice(0, 3).join("; ")})` : ""}`);
+          }
         }
-        if (landings !== null) {
-          const a = attributeReach(rec, gaps, landings, now);
-          rec.attribution = a.attribution;
-          rec.attribution_reasons = a.reasons;
-          rec.operator_hands = handsOf(a.attribution);
-          rec.attribution_final = true;
-          rec.last_action = { kind: "reached", reason: `attribution=${a.attribution}`, at: now };
-          console.log(`[goal-reach] REACHED goal_hash=${rec.goal_hash} dispatch=${rec.reached_dispatch_id} attribution=${a.attribution}${a.reasons.length ? ` (${a.reasons.slice(0, 3).join("; ")})` : ""}`);
+        if (needsExtractionCheck(rec)) {
+          const read = await io.readTemplatesSince((rec.reached_at ?? now) - 60_000).catch((e) => ({ ok: false as const, why: errText(e) }));
+          const step = extractionStep(rec, read, now, policy);
+          rec.extraction = step.extraction;
+          if (step.extracted_template_id) rec.extracted_template_id = step.extracted_template_id;
+          if (step.extraction.status === "found" || step.extraction.status === "absent") {
+            console.log(`[goal-reach] EXTRACTION ${step.extraction.status.toUpperCase()} goal_hash=${rec.goal_hash} execution=${rec.reached_execution_id}${step.extracted_template_id ? ` template=${step.extracted_template_id}` : ""}`);
+          }
+          if (step.file_evidence) {
+            try {
+              const f = await io.attachExtractionEvidence({
+                goal_hash: rec.goal_hash, dispatch_id: rec.reached_dispatch_id ?? null, execution_id: rec.reached_execution_id ?? null,
+                attribution: rec.attribution, reached_at: new Date(rec.reached_at ?? now).toISOString(),
+                window_min: Math.round(policy.extraction_window_ms / 60_000), observed_at: new Date(now).toISOString(), source: "goal_reach_tick",
+              });
+              rec.extraction_evidence_filed = f.ok;
+              if (!f.ok) result.errors.push(`extraction evidence for ${rec.goal_hash} not filed: ${f.why ?? "unknown"}`);
+            } catch (e) { result.errors.push(`extraction evidence for ${rec.goal_hash} threw: ${errText(e)}`); }
+          }
         }
+        continue;
       }
-      if (needsExtractionCheck(rec)) {
-        const read = await io.readTemplatesSince((rec.reached_at ?? now) - 60_000).catch((e) => ({ ok: false as const, why: errText(e) }));
-        const step = extractionStep(rec, read, now, policy);
-        rec.extraction = step.extraction;
-        if (step.extracted_template_id) rec.extracted_template_id = step.extracted_template_id;
-        if (step.extraction.status === "found" || step.extraction.status === "absent") {
-          console.log(`[goal-reach] EXTRACTION ${step.extraction.status.toUpperCase()} goal_hash=${rec.goal_hash} execution=${rec.reached_execution_id}${step.extracted_template_id ? ` template=${step.extracted_template_id}` : ""}`);
-        }
-        if (step.file_evidence) {
+      if (wasTerminal) continue;
+
+      const action = nextAction(rec, gaps, policy, { scopeExcludes: scope });
+      rec.last_action = { kind: action.kind, ...("reason" in action ? { reason: action.reason } : {}), at: now };
+      if (action.kind === "stop" || action.kind === "ask_human" || action.kind === "redispatch") result.ledger.eligible.push(rec.goal_hash);
+      if (action.kind === "stop") {
+        rec.status = "stopped";
+        rec.stop_reason = action.reason;
+        result.stopped.push({ goal_hash: rec.goal_hash, reason: action.reason });
+        result.ledger.actions.push({ kind: "stop", goal_hash: rec.goal_hash, would: policy.dry_run, reason: action.reason, linked: linkedSnapshot(rec) });
+        console.log(`[goal-reach] ${policy.dry_run ? "DRY-RUN would stop" : "STOPPED"} goal_hash=${rec.goal_hash} reason=${action.reason}`);
+        if (action.limit_proposal && !rec.limit_proposal_filed) {
           try {
-            const f = await io.attachExtractionEvidence({
-              goal_hash: rec.goal_hash, dispatch_id: rec.reached_dispatch_id ?? null, execution_id: rec.reached_execution_id ?? null,
-              attribution: rec.attribution, reached_at: new Date(rec.reached_at ?? now).toISOString(),
-              window_min: Math.round(policy.extraction_window_ms / 60_000), observed_at: new Date(now).toISOString(), source: "goal_reach_tick",
-            });
-            rec.extraction_evidence_filed = f.ok;
-            if (!f.ok) result.errors.push(`extraction evidence for ${rec.goal_hash} not filed: ${f.why ?? "unknown"}`);
-          } catch (e) { result.errors.push(`extraction evidence for ${rec.goal_hash} threw: ${errText(e)}`); }
+            const f = await io.fileLimitProposal({ ...action.limit_proposal, reason: action.reason });
+            rec.limit_proposal_filed = f.ok;
+            if (!f.ok) result.errors.push(`limit proposal for ${rec.goal_hash} not filed: ${f.why ?? "unknown"}`);
+          } catch (e) { result.errors.push(`limit proposal for ${rec.goal_hash} threw: ${errText(e)}`); }
         }
-      }
-      if (JSON.stringify(rec) !== before || !prior[rec.goal_hash]) { rec.updated_at = now; await io.saveRecord(rec); }
-      continue;
-    }
-    if (wasTerminal) continue;
-
-    const action = nextAction(rec, gaps, policy, { scopeExcludes: scope });
-    rec.last_action = { kind: action.kind, ...("reason" in action ? { reason: action.reason } : {}), at: now };
-    if (action.kind === "stop" || action.kind === "ask_human" || action.kind === "redispatch") result.ledger.eligible.push(rec.goal_hash);
-    if (action.kind === "stop") {
-      rec.status = "stopped";
-      rec.stop_reason = action.reason;
-      result.stopped.push({ goal_hash: rec.goal_hash, reason: action.reason });
-      result.ledger.actions.push({ kind: "stop", goal_hash: rec.goal_hash, would: policy.dry_run, reason: action.reason, linked: linkedSnapshot(rec) });
-      console.log(`[goal-reach] ${policy.dry_run ? "DRY-RUN would stop" : "STOPPED"} goal_hash=${rec.goal_hash} reason=${action.reason}`);
-      if (action.limit_proposal && !rec.limit_proposal_filed) {
+      } else if (action.kind === "ask_human") {
+        // No ask channel exists yet: the honest state is stopped-with-reason, visible in the summary.
+        rec.status = "stopped";
+        // The ask goes to the goal's ORIGIN (an operator-session goal asks that operator id; a surface goal
+        // its human). No ask channel exists yet, so the stop reason names the intended addressee.
+        rec.stop_reason = `needs_human:ask=${action.addressee}:write_effects:${action.write_shapes.join(",")}`;
+        result.asked_human.push({ goal_hash: rec.goal_hash, write_shapes: action.write_shapes });
+        result.ledger.actions.push({ kind: "ask_human", goal_hash: rec.goal_hash, would: policy.dry_run, reason: rec.stop_reason, linked: linkedSnapshot(rec) });
+        console.log(`[goal-reach] ${tag}stop for a human ask goal_hash=${rec.goal_hash} reason=${rec.stop_reason}`);
+      } else if (action.kind === "redispatch") {
+        const cycle = rec.cycles + 1;
         try {
-          const f = await io.fileLimitProposal({ ...action.limit_proposal, reason: action.reason });
-          rec.limit_proposal_filed = f.ok;
-          if (!f.ok) result.errors.push(`limit proposal for ${rec.goal_hash} not filed: ${f.why ?? "unknown"}`);
-        } catch (e) { result.errors.push(`limit proposal for ${rec.goal_hash} threw: ${errText(e)}`); }
-      }
-    } else if (action.kind === "ask_human") {
-      // No ask channel exists yet: the honest state is stopped-with-reason, visible in the summary.
-      rec.status = "stopped";
-      // The ask goes to the goal's ORIGIN (an operator-session goal asks that operator id; a surface goal
-      // its human). No ask channel exists yet, so the stop reason names the intended addressee.
-      rec.stop_reason = `needs_human:ask=${action.addressee}:write_effects:${action.write_shapes.join(",")}`;
-      result.asked_human.push({ goal_hash: rec.goal_hash, write_shapes: action.write_shapes });
-      result.ledger.actions.push({ kind: "ask_human", goal_hash: rec.goal_hash, would: policy.dry_run, reason: rec.stop_reason, linked: linkedSnapshot(rec) });
-      console.log(`[goal-reach] ${tag}stop for a human ask goal_hash=${rec.goal_hash} reason=${rec.stop_reason}`);
-    } else if (action.kind === "redispatch") {
-      const cycle = rec.cycles + 1;
-      try {
-        const r = await io.dispatchGoal({
-          goal: action.goal,
-          goal_hash: action.goal_hash,
-          // NEVER `operator`: goal-host maps any operator id to trigger "operator", which would make
-          // R's own re-dispatch read as operator hands. The tag yields trigger "goal_reach".
-          tags: ["dispatcher_reason:goal_reach", `goal_reach:${action.goal_hash}`, `goal_reach_cycle:${cycle}`, ...(action.landed ?? []).map((l) => `goal_reach_landing:${l.sha}`)],
-          variables: { source: "goal_reach", goal_reach_goal_hash: action.goal_hash, goal_reach_cycle: cycle },
-        });
-        if (!r.ok) { result.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); result.ledger.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); }
-        else if (r.coalesced) {
-          rec.last_action = { kind: "redispatch_coalesced", reason: `goal-host returned the already-running ${r.dispatch_id}`, at: now };
-        } else {
-          rec.r_issued.push(r.dispatch_id);
-          if (action.landed?.length) (rec.redispatch_triggers ??= []).push({ dispatch_id: r.dispatch_id, landed: action.landed });
-          rec.last_redispatch_at = now;
-          rec.status = "redispatching";
-          rec.cycles = cycle;
-          result.redispatched.push({ goal_hash: rec.goal_hash, dispatch_id: r.dispatch_id });
-          result.ledger.actions.push({ kind: "redispatch", goal_hash: rec.goal_hash, would: policy.dry_run, linked: linkedSnapshot(rec) });
-          const why = action.landed?.length ? `landing ${action.landed.map((l) => `${l.gap}@${l.sha.slice(0, 12)}`).join(",")} on an open linked gap` : `all ${rec.linked.length} linked gap(s) closed`;
-          console.log(policy.dry_run
-            ? `[goal-reach] DRY-RUN would redispatch goal_hash=${rec.goal_hash} cycle=${cycle}/${policy.max_cycles} (${why})`
-            : `[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles} (${why})`);
+          const r = await io.dispatchGoal({
+            goal: action.goal,
+            goal_hash: action.goal_hash,
+            // NEVER `operator`: goal-host maps any operator id to trigger "operator", which would make
+            // R's own re-dispatch read as operator hands. The tag yields trigger "goal_reach".
+            tags: ["dispatcher_reason:goal_reach", `goal_reach:${action.goal_hash}`, `goal_reach_cycle:${cycle}`, ...(action.landed ?? []).map((l) => `goal_reach_landing:${l.sha}`)],
+            variables: { source: "goal_reach", goal_reach_goal_hash: action.goal_hash, goal_reach_cycle: cycle },
+          });
+          if (!r.ok) { result.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); result.ledger.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); }
+          else if (r.coalesced) {
+            rec.last_action = { kind: "redispatch_coalesced", reason: `goal-host returned the already-running ${r.dispatch_id}`, at: now };
+          } else {
+            rec.r_issued.push(r.dispatch_id);
+            if (action.landed?.length) (rec.redispatch_triggers ??= []).push({ dispatch_id: r.dispatch_id, landed: action.landed });
+            rec.last_redispatch_at = now;
+            rec.status = "redispatching";
+            rec.cycles = cycle;
+            result.redispatched.push({ goal_hash: rec.goal_hash, dispatch_id: r.dispatch_id });
+            result.ledger.actions.push({ kind: "redispatch", goal_hash: rec.goal_hash, would: policy.dry_run, linked: linkedSnapshot(rec) });
+            const why = action.landed?.length ? `landing ${action.landed.map((l) => `${l.gap}@${l.sha.slice(0, 12)}`).join(",")} on an open linked gap` : `all ${rec.linked.length} linked gap(s) closed`;
+            console.log(policy.dry_run
+              ? `[goal-reach] DRY-RUN would redispatch goal_hash=${rec.goal_hash} cycle=${cycle}/${policy.max_cycles} (${why})`
+              : `[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles} (${why})`);
+          }
+        } catch (e) {
+          result.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
+          result.ledger.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
         }
-      } catch (e) {
-        result.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
-        result.ledger.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
       }
     }
-    rec.updated_at = now;
-    await io.saveRecord(rec);
+    flushed = true;
+    await flushChangedRecords(io, prior, live, now, result.errors);
+  } finally {
+    if (!flushed) await flushChangedRecords(io, prior, live, now, result.errors).catch((e) => console.error(`[goal-reach] cut tick's records not persisted: ${errText(e)}`));
   }
   result.summary = summarize(live);
   console.log(`[goal-reach] tick linked_filed=${result.linked_filed.linked.length} already=${result.linked_filed.already} not_linked=${result.linked_filed.skipped.length} goals=${result.summary.goals} unlinked=${result.summary.open_unlinked} waiting=${result.summary.waiting} redispatched=${result.redispatched.length} reached_without_hands=${result.summary.reached_without_hands} reached_by_r=${result.summary.reached_by_r} stopped=${result.summary.stopped} errors=${result.errors.length}`);
@@ -1497,6 +1533,12 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       resolvePoolImpulseWrite({ type: "poolImpulse_write", id: recordId(rec.goal_hash), shape: GOAL_REACH_SHAPE, body: rec, source: "goal_reach_tick", status: "open" });
     },
 
+    async saveRecords(recs) {
+      const { resolvePoolImpulseWriteMany } = await import("./pool-impulse.js");
+      const out = resolvePoolImpulseWriteMany(recs.map((rec) => ({ type: "poolImpulse_write", id: recordId(rec.goal_hash), shape: GOAL_REACH_SHAPE, body: rec, source: "goal_reach_tick", status: "open" as const })));
+      return out.map((r, i) => ({ goal_hash: recs[i]!.goal_hash, ok: r.body.ok, ...(r.body.ok ? {} : { why: r.body.error ?? "refused" }) }));
+    },
+
     async dispatchGoal(req) {
       const prod = await ownUrls("goalDispatchAsync");
       if (!prod.ok) return { ok: false, why: prod.why };
@@ -1762,6 +1804,7 @@ export function dryRunIO(io: GoalReachIO): GoalReachIO {
   return {
     ...io,
     saveRecord: async () => {},
+    saveRecords: async (recs) => recs.map((r) => ({ goal_hash: r.goal_hash, ok: true })),
     dispatchGoal: async (req) => ({ ok: true, dispatch_id: `dry-run:${req.goal_hash}`, coalesced: false }),
     attachExtractionEvidence: async (e) => { console.log(`[goal-reach] DRY-RUN would attach extraction evidence goal_hash=${e.goal_hash}`); return { ok: true }; },
     fileLimitProposal: async (p) => { console.log(`[goal-reach] DRY-RUN would file limitChangeProposal goal_hash=${p.goal_hash} paths=${p.paths.join(",")}`); return { ok: true }; },

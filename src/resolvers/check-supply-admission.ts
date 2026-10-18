@@ -488,23 +488,67 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
  * any cast, parenthesis or non-null wrapper (`(ns as unknown as Record<string, unknown>)["x"]`), plus
  * `(await import("…")).x` and `const { x } = await import("…")`. A computed key that is not a string literal is not a
  * name and is skipped. Shadowing a binding's name inside the check is not modelled (it can only add names).
+ *
+ * `absence` marks a member read whose only use is an assertion that the name is NOT there (qa ruling on control (a)):
+ * `expect(typeof R).toBe("undefined")` (toEqual / toStrictEqual too), `expect(R).toBeUndefined()`,
+ * `expect(R).toBe(undefined)`, `expect(typeof R === "undefined").toBe(true)` and `expect(typeof R !== "undefined").toBe(false)`
+ * (and the same with `R === undefined`), none of them negated by `.not`. Every other read, a named or default import
+ * and a destructured name REQUIRE the name.
  */
-export function checkModuleReferences(source: string, checkRel: string): Array<{ spec: string; symbol: string }> {
+export function checkModuleReferences(source: string, checkRel: string): Array<{ spec: string; symbol: string; absence?: true }> {
   const ts = loadTs();
   if (!ts) return [];
   const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const out: Array<{ spec: string; symbol: string }> = [];
-  const add = (spec: string, symbol: string): void => { if (!out.some((r) => r.spec === spec && r.symbol === symbol)) out.push({ spec, symbol }); };
+  const out: Array<{ spec: string; symbol: string; absence?: true }> = [];
+  const add = (spec: string, symbol: string, absence = false): void => {
+    if (!out.some((r) => r.spec === spec && r.symbol === symbol && (r.absence === true) === absence)) out.push({ spec, symbol, ...(absence ? { absence: true as const } : {}) });
+  };
   const namespaces = new Map<string, string>();
   const isWrapper = (n: TS.Node): boolean => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n) || ts.isSatisfiesExpression(n) || ts.isAwaitExpression(n);
   const outermost = (n: TS.Node): TS.Node => { let e = n; while (e.parent && isWrapper(e.parent)) e = e.parent; return e; };
+  const isUndefined = (n: TS.Node | undefined): boolean => !!n && ts.isIdentifier(n) && n.text === "undefined";
+  const isUndefinedText = (n: TS.Node | undefined): boolean => !!n && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === "undefined";
+  const isBool = (n: TS.Node | undefined, v: boolean): boolean => !!n && n.kind === (v ? ts.SyntaxKind.TrueKeyword : ts.SyntaxKind.FalseKeyword);
+  /** `expect(arg)…<matcher>(args)` around `arg`: the matcher, whether `.not` negates it, and its arguments. */
+  const matcherOf = (arg: TS.Node): { name: string; negated: boolean; args: readonly TS.Expression[] } | null => {
+    const call = arg.parent;
+    if (!call || !ts.isCallExpression(call) || call.arguments[0] !== arg || !ts.isIdentifier(call.expression) || call.expression.text !== "expect") return null;
+    let n: TS.Node = call;
+    let negated = false;
+    while (n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n) {
+      const name = n.parent.name.text;
+      if (name === "not") { negated = !negated; n = n.parent; continue; }
+      const c = n.parent.parent;
+      return c && ts.isCallExpression(c) && c.expression === n.parent ? { name, negated, args: c.arguments } : null;
+    }
+    return null;
+  };
+  const EQ = new Set(["toBe", "toEqual", "toStrictEqual"]);
+  /** Is the member read `r` used only to assert the name is absent? */
+  const assertsAbsence = (r: TS.Node): boolean => {
+    let e = outermost(r);
+    let typeOf = false;
+    if (e.parent && ts.isTypeOfExpression(e.parent)) { typeOf = true; e = outermost(e.parent); }
+    const p = e.parent;
+    if (p && ts.isBinaryExpression(p) && (p.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken || p.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)) {
+      const other = p.left === e ? p.right : p.left;
+      if (!(typeOf ? isUndefinedText(other) : isUndefined(other))) return false;
+      const m = matcherOf(outermost(p));
+      const want = p.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+      return !!m && !m.negated && EQ.has(m.name) && isBool(m.args[0], want);
+    }
+    const m = matcherOf(e);
+    if (!m || m.negated) return false;
+    if (typeOf) return EQ.has(m.name) && isUndefinedText(m.args[0]);
+    return m.name === "toBeUndefined" || (EQ.has(m.name) && isUndefined(m.args[0]));
+  };
   /** What the expression `e` (a namespace value) has read off it at its use site. */
   const readsOff = (e: TS.Node, spec: string, bindAs: boolean): void => {
     const o = outermost(e);
     const p = o.parent;
     if (!p) return;
-    if (ts.isPropertyAccessExpression(p) && p.expression === o) add(spec, p.name.text);
-    else if (ts.isElementAccessExpression(p) && p.expression === o && (ts.isStringLiteral(p.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(p.argumentExpression))) add(spec, p.argumentExpression.text);
+    if (ts.isPropertyAccessExpression(p) && p.expression === o) add(spec, p.name.text, assertsAbsence(p));
+    else if (ts.isElementAccessExpression(p) && p.expression === o && (ts.isStringLiteral(p.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(p.argumentExpression))) add(spec, p.argumentExpression.text, assertsAbsence(p));
     else if (ts.isVariableDeclaration(p) && p.initializer === o) {
       if (ts.isObjectBindingPattern(p.name)) {
         for (const el of p.name.elements) {
@@ -553,14 +597,17 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
  * on goal-host src/index.ts, where shellResult is a shape name, not an export). Such a check is red for the invented
  * name on every tree, never for the defect, and the arm step attached it as the gap's falsifier. Each name the check
  * reads off a src module of its vessel (checkModuleReferences) is compared with that module's real exports
- * (moduleExports); the first one missing refuses, `check_references_missing_export:<symbol>`. A module the reader cannot
+ * (moduleExports); the first one missing refuses, `check_references_missing_export:<symbol>`. A read that only asserts
+ * the name is ABSENT (checkModuleReferences `absence`) requires nothing and never refuses. A module the reader cannot
  * read, or whose export list is open, decides nothing; a check that reads no module member (behaviour through a spawned
- * process, say) is unaffected. null = no refusal.
+ * process, say) is unaffected. null = no refusal. Applied at attach (gap-check-supply's arm step) and at the verify of
+ * a test_writing compose (judgeTestWritingCheck), so the check that would be refused at attach never lands.
  */
 export const MISSING_EXPORT_STAGE = "check_references_missing_export";
 export function missingExportRefusal(source: string, checkRel: string, reader: SrcReader): { symbol: string; module: string; reason: string } | null {
   const cache = new Map<string, ModuleExports | null>();
   for (const ref of checkModuleReferences(source, checkRel)) {
+    if (ref.absence) continue;
     const target = resolveModule(checkRel, ref.spec, reader);
     if (!target || !target.rel.startsWith("src/")) continue;
     if (!cache.has(target.rel)) cache.set(target.rel, moduleExports(target.rel, reader));
@@ -577,7 +624,7 @@ export const TEST_WRITING_CHECK_RUNS = 3;
 
 export type TestWritingJudgement = {
   ok: boolean;
-  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable";
+  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof MISSING_EXPORT_STAGE;
   cause?: string;
   reason: string;
   check_file: string;
@@ -589,7 +636,11 @@ export type TestWritingJudgement = {
  * B′ P2: THE VERIFY OF A test_writing COMPOSE. The check file test/checks/<checkSupplyCheckFile(gapId)> must exist in
  * the vessel root, import the gap's edit site (W2, checkImportsEditSite: static, before anything runs), and, run ALONE
  * up to `runs` times through `run` (feature_compose's shell; the caller supplies the command; stopping at the first run
- * that is not an assertion red), be the same assertion red every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier). ok only then.
+ * that is not an assertion red), be the same assertion red every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier),
+ * and require no export its module lacks (missingExportRefusal, the attach guard: a red on a missing name is red on every
+ * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify). The export check runs
+ * after the runs so every earlier stage keeps its verdict (a named import of a missing export still fails to LOAD and is
+ * wrong_reason). ok only then.
  */
 export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: string; editSite: unknown; run: (checkRel: string) => Promise<string>; runs?: number }): Promise<TestWritingJudgement> {
   const { existsSync, readFileSync } = await import("node:fs");
@@ -615,6 +666,8 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   const v = testWritingRunsVerdict(raws);
   const runs = v.runs.map((r) => ({ verdict: r.verdict, keys: r.keys.map((k) => k.replace("\u0000", " :: ")), red: r.red.slice(0, 10), unhandled: r.unhandled }));
   if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });
+  const missing = missingExportRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
+  if (missing) return out(MISSING_EXPORT_STAGE, missing.reason, { edit_site: site.edit_site, runs });
   return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs });
 }
 

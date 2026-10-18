@@ -305,13 +305,13 @@ export function classifyCheckRun(raw: string): CheckRunClass {
 
 /** The drafter-facing cure for each wrong reason (carried in the refusal, read by the next attempt's prompt). */
 export const RED_REASON_GUIDANCE: Readonly<Record<RedCause, string>> = {
-  missing_export: "the check failed to LOAD because it imports a name the edit site does not export (bun ESM: a missing named export is a load error, not a red). Import the edit site as a NAMESPACE, e.g. import * as mod from \"<edit_site path>\", and assert on it, e.g. expect(typeof (mod as Record<string, unknown>)[\"newThing\"]).toBe(\"function\"), so the red is an assertion failure",
-  module: "the check failed to LOAD: a module it imports cannot be found. Import the edit site by its exact relative path from test/checks/ (e.g. \"../../src/<file>\"); if the defect is that a symbol is missing, import the module as a namespace (import * as mod) and assert typeof on it",
+  missing_export: "the check failed to LOAD because it imports a name the edit site does not export (bun ESM: a missing named export is a load error, not a red). Reference an export on the module's list and assert its behaviour, e.g. call it on the defect's input and expect(...) what it should return, so the red is an assertion failure (a check that reads a name the module does not export is red on every tree and is refused)",
+  module: "the check failed to LOAD: a module it imports cannot be found. Import the edit site by its exact relative path from test/checks/ (e.g. \"../../src/<file>\"), reference an export on the module's list and assert its behaviour",
   network: "the check's failure is a network error: a reproduction must not reach a service. Exercise the edit site in-process and assert on what it returns",
   timeout: "a test in the check did not finish in time: a reproduction must not wait on services, timers or a hung promise. Call the edit site directly and assert on its result",
   syntax: "the check does not parse (a syntax error): write it as valid TypeScript that loads",
   reference: "the check throws a ReferenceError (a name that is not defined): import what it uses",
-  non_assertion: "a test in the check fails by throwing, not by an expect() assertion. Assert on the edit site's values with expect(...) so the red names the defect (to check that a symbol exists, assert typeof on a namespace import)",
+  non_assertion: "a test in the check fails by throwing, not by an expect() assertion. Assert on the edit site's values with expect(...) so the red names the defect (reference an export on the module's list and assert its behaviour, not that a name exists)",
   load_error: "the check failed to LOAD (an unhandled error between tests): it must load cleanly and fail on an expect() assertion",
   did_not_run: "the check printed no bun summary, so it did not run",
 };

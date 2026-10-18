@@ -207,6 +207,24 @@ describe("F-ARM: controls", () => {
     }
   });
 
+  it("[CONTROL] a read that only asserts a missing name's ABSENCE requires nothing (qa ruling on verify control (a)); negated or mixed with a requiring read, it refuses", () => {
+    const H = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/x";\n`;
+    for (const body of [
+      `expect(typeof mod.nope).toBe("undefined");`,
+      `expect(typeof (mod as Record<string, unknown>)["nope"]).toEqual("undefined");`,
+      `expect(mod.nope).toBeUndefined();`,
+      `expect((mod as any).nope).toBe(undefined);`,
+      `expect(typeof mod.nope === "undefined").toBe(true);`,
+      `expect(typeof mod.nope !== "undefined").toBe(false);`,
+    ]) expect({ body, r: refusalOf(`${H}test("t", () => { ${body} expect(mod.widget).toBe(2); });\n`, CHECK, reader(SITE)) }).toEqual({ body, r: null });
+    for (const body of [
+      `expect(typeof mod.nope).not.toBe("undefined");`,
+      `expect(typeof mod.nope).toBe("function");`,
+      `expect(mod.nope).toBeDefined();`,
+      `expect(typeof mod.nope).toBe("undefined"); expect(mod.nope()).toBe(1);`,
+    ]) expect({ body, symbol: refusalOf(`${H}test("t", () => { ${body} });\n`, CHECK, reader(SITE))?.symbol ?? null }).toEqual({ body, symbol: "nope" });
+  });
+
   it("[CONTROL] a check with no module access (behaviour through a spawned process) is unaffected", () => {
     const src = `import { expect, test } from "bun:test";\ntest("cli prints usage", () => {\n  const p = Bun.spawnSync(["bun", "src/index.ts", "--help"]);\n  expect(new TextDecoder().decode(p.stdout)).toContain("usage");\n});\n`;
     expect(refusalOf(src, CHECK, reader({ "src/index.ts": GOAL_HOST_INDEX }))).toBeNull();

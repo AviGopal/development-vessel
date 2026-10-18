@@ -17,7 +17,12 @@
 // not a TS/JS module refuses. Refusal stages: test_writing_check_not_red, test_writing_check_wrong_reason,
 // test_writing_check_flaky, test_writing_check_misses_edit_site, edit_site_not_importable.
 // qa: a named import of a missing export fails at LOAD (bun ESM "Export named … not found"), so the wrong_reason for it
-// names the cure: import the edit site as a namespace (import * as mod) and assert typeof; that form is an assertion red.
+// names the cure: reference an export on the module's list and assert its behaviour (a namespace typeof red on a
+// missing name is refused at this verify, below, so it is not taught).
+// qa ruling (F-ARM, re-scoping control (a)): a red that REQUIRES a missing export (typeof X "function"/"object", calls
+// it, reads its members) is red on every tree, so the verify refuses it, check_references_missing_export:<name>
+// (missingExportRefusal, the attach guard; the two landed instances, 2f36f62's shellResult and 7b54fc7's AuthCache, are
+// replayed below). A check that asserts a name's ABSENCE (typeof X "undefined") still passes.
 //
 // REAL BUN: every judgement below is bun's own output on fixtures under TMPDIR, run with the bun on PATH and, when it
 // is present, the container's bun 1.4.2 (BUN_ALT_BINARY, else $TMPDIR/bun142/node_modules/.bin/bun). A missing 1.4.2
@@ -26,6 +31,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+const FIX = join(import.meta.dir, "..", "fixtures", "check-references-missing-export");
+const fixture = (name: string): string => readFileSync(join(FIX, name), "utf8");
 
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const re = await import("../../src/resolvers/retry-evidence.js") as Record<string, unknown>;
@@ -230,19 +237,54 @@ for (const [label, bin, present] of [["host bun", HOST_BUN, true], ["bun 1.4.2",
       expect(j).toMatchObject({ ok: true, stage: null });
     });
 
-    // qa: "X must exist" gaps.
-    t("[CONTROL] (qa a) a NAMESPACE import of a missing export, asserted with typeof, is an assertion red x3 and passes", async () => {
+    // qa: "X must exist" gaps. Re-scoped (qa ruling, F-ARM): a red that requires the missing name is refused; a check
+    // asserting a name's absence still passes.
+    t("[MUST-FAIL] (qa a, re-scoped) a NAMESPACE import of a missing export, asserted typeof \"function\", is refused: check_references_missing_export", async () => {
       const j = await verdict("tw-ns", `import * as mod from "../../src/x";\ntest("newThing exists", () => { expect(typeof (mod as Record<string, unknown>)["newThing"]).toBe("function"); });\n`);
-      expect(j).toMatchObject({ ok: true, stage: null, edit_site: "src/x.ts" });
+      expect(j).toMatchObject({ ok: false, stage: "check_references_missing_export", edit_site: "src/x.ts" });
+      expect(j.reason.startsWith("check_references_missing_export:newThing")).toBe(true);
+      expect(j.runs.length).toBe(3); // judged after the runs: it was the same assertion red each time
     });
 
-    t("[MUST-FAIL] (qa b) a NAMED import of the same missing export is refused wrong_reason (missing_export) and the reason teaches the namespace import", async () => {
+    t("[CONTROL] (qa a, re-scoped) a check asserting a MISSING name's absence (typeof … \"undefined\") passes", async () => {
+      const gone = await verdict("tw-ns-absent", `import * as mod from "../../src/x";\ntest("oldThing is gone and widget is two", () => { expect(typeof (mod as Record<string, unknown>)["oldThing"]).toBe("undefined"); expect(mod.widget).toBe(2); });\n`);
+      expect(gone).toMatchObject({ ok: true, stage: null, edit_site: "src/x.ts" });
+    });
+
+    t("[CONTROL] (qa a, re-scoped) a check asserting a PRESENT name's absence (red while it is exported) passes", async () => {
+      const present = await verdict("tw-ns-present", `import * as mod from "../../src/x";\ntest("widget is not exported", () => { expect(typeof mod.widget).toBe("undefined"); });\n`);
+      expect(present).toMatchObject({ ok: true, stage: null, edit_site: "src/x.ts" });
+    });
+
+    t("[MUST-FAIL] the landed route-edit-bd252f8c check (2f36f62) against goal-host's src/index.ts exports is refused at verify: check_references_missing_export:shellResult", async () => {
+      expect(typeof judge).toBe("function");
+      const id = "tw-route-edit";
+      // the surface keeps its one real re-export, so the module it re-exports from must exist for the check to load
+      const root = vessel(id, "", { "src/index.ts": fixture("goal-host-index.exports.ts.txt"), "src/two-source-parse.ts": "export function parseTwoSourceCompare(): null { return null; }\n" });
+      writeFileSync(join(root, "test", "checks", checkFile(id)), fixture("route-edit-bd252f8c.check.ts.txt"));
+      const j = await judge!({ gapId: id, vesselRoot: root, editSite: "repos/goal-host-vessel/src/index.ts", run: runner(bin, root), runs: 3 });
+      expect(j).toMatchObject({ ok: false, stage: "check_references_missing_export", edit_site: "src/index.ts" });
+      expect(j.reason.startsWith("check_references_missing_export:shellResult")).toBe(true);
+    });
+
+    t("[MUST-FAIL] the landed AuthCache check (7b54fc7) against activity-api's src/middleware/auth-cache.ts exports is refused at verify: check_references_missing_export:AuthCache", async () => {
+      expect(typeof judge).toBe("function");
+      const id = "tw-authcache";
+      const root = vessel(id, "", { "src/middleware/auth-cache.ts": fixture("activity-api-auth-cache.exports.ts.txt") });
+      writeFileSync(join(root, "test", "checks", checkFile(id)), fixture("pull-sync-testgate-unresolvable-modules-activity-api.check.ts.txt"));
+      const j = await judge!({ gapId: id, vesselRoot: root, editSite: "repos/activity-api/src/middleware/auth-cache.ts", run: runner(bin, root), runs: 3 });
+      expect(j).toMatchObject({ ok: false, stage: "check_references_missing_export", edit_site: "src/middleware/auth-cache.ts" });
+      expect(j.reason.startsWith("check_references_missing_export:AuthCache")).toBe(true);
+    });
+
+    t("[MUST-FAIL] (qa b) a NAMED import of the same missing export is refused wrong_reason (missing_export) and the reason teaches a real export's behaviour, not the refused typeof form", async () => {
       const j = await verdict("tw-named", `import { newThing } from "../../src/x";\ntest("newThing exists", () => { expect(typeof newThing).toBe("function"); });\n`);
       expect(j.ok).toBe(false);
       expect(j.stage).toBe("test_writing_check_wrong_reason");
       expect(j.cause).toBe("missing_export");
-      expect(j.reason).toContain("import * as mod");
-      expect(j.reason).toContain("typeof");
+      expect(j.reason).toContain("Reference an export on the module's list and assert its behaviour");
+      expect(j.reason).not.toContain("typeof");
+      expect(j.reason).not.toContain("import * as mod");
     });
 
     // W2: the check must import the gap's edit site.

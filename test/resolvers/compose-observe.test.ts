@@ -12,6 +12,9 @@
 //   - [MUST-FAIL] the observe compose runs with land:false + skip_push:true, rolls its edits back even when FAVORABLE,
 //     parks nothing, writes no lesson and reports the would-be ops with "observe: dry run, not landed";
 //     [CONTROL] a learn compose's pointer is passed through unchanged, so it still reaches its landing step.
+//   - [MUST-FAIL] the mode is the compose's own (AsyncLocalStorage run): the caller's continuation does not inherit it;
+//   - [MUST-FAIL] an observe compose's traces carry learning_mode:"observe" (body field and tag) and no reach verdict,
+//     and gap-to-feature's /reach for an observe report says observe; [CONTROL] a learn compose's carry neither.
 // Harness: compose-landing-lease-admission.test.ts's (fixture store, fetch/fs/exec guards, a pre-claimed slot).
 import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -138,17 +141,30 @@ describe("inside an observe compose no gap-store write reaches the store", () =>
     expect(gapWrites).toBe(0);
     expect(logs.filter((l) => l === "[observe] skipped gap_store_write (compose observe)").length).toBe(1);
   });
-  it("[MUST-FAIL] the mode entered at the compose's start is what its later, awaited writers read", async () => {
-    await co.composeObserveContext.run({ observe: false, announced: new Set() }, async () => {
-      expect(co.enterComposeObserve({ learning_mode: "observe" })).toBe(true);
+  it("[MUST-FAIL] a compose runs inside its own mode: its later, awaited writers read it, and it ends with the compose", async () => {
+    await co.runComposeObserve({ learning_mode: "observe" }, async (observe) => {
+      expect(observe).toBe(true);
       await new Promise((r) => setTimeout(r, 5));
       expect(co.composeObserveActive()).toBe(true);
       await (async () => { await Promise.resolve(); expect(co.composeObserveSkip("gap_store_write")).toBe(true); })();
-      expect(co.enterComposeObserve({ learning_mode: "learn" })).toBe(false);
+    });
+    expect(co.composeObserveActive()).toBe(false);
+    await co.runComposeObserve({ learning_mode: "learn" }, async (observe) => {
+      expect(observe).toBe(false);
       await new Promise((r) => setTimeout(r, 5));
       expect(co.composeObserveActive()).toBe(false);
       expect(co.composeObserveSkip("gap_store_write")).toBe(false);
     });
+  });
+  it("[MUST-FAIL] the caller's continuation after an observe compose does not inherit its mode (run, not enterWith)", async () => {
+    preClaimSlot(UNARMED);
+    expect(co.composeObserveActive()).toBe(false);
+    const b = (await resolveFeatureCompose(observePointer(UNARMED) as never)).body as Report;
+    expect(b.stage).toBe("ineligible");
+    expect(co.composeObserveActive()).toBe(false);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(co.composeObserveActive()).toBe(false);
+    expect(co.composeObserveSkip("gap_store_write")).toBe(false);
   });
   it("[CONTROL] learn: the same write reaches the store", async () => {
     await co.composeObserveContext.run({ observe: false, announced: new Set() }, async () => { await fc.recordSemanticDissent(ARMED, dissent); });
@@ -159,16 +175,35 @@ describe("inside an observe compose no gap-store write reaches the store", () =>
 describe("an observe compose never lands", () => {
   it("[MUST-FAIL] the compose body runs with land:false + skip_push:true; a learn pointer passes through unchanged", () => {
     const p = { type: "feature_compose", spec: "x", land: true, learning_mode: "observe" as const };
-    expect(co.observeComposePointer(p)).toEqual({ ...p, land: false, skip_push: true });
+    expect(co.observeComposePointer(p)).toEqual({ ...p, land: false, skip_push: true, keep_on_fail: false });
+    // keep_on_fail would keep an observe compose's edits in the tree: an observe compose keeps none
+    expect(co.observeComposePointer({ ...p, keep_on_fail: true }).keep_on_fail).toBe(false);
     const learn = { type: "feature_compose", spec: "x", land: true };
     expect(co.observeComposePointer(learn)).toBe(learn);
     expect(co.admissionLandOf({ land: false, learning_mode: "observe" })).toBe(true);
     expect(co.admissionLandOf({ land: false })).toBe(false);
     expect(co.admissionLandOf({})).toBe(true);
     expect(FC_SRC).toContain("const outcome = await resolveFeatureComposeUncapped(observeComposePointer(pointer));");
-    expect(FC_SRC).toContain("const observeRun = enterComposeObserve(pointer);");
+    expect(FC_SRC).toContain("return await runComposeObserve(pointer, (observeRun) => resolveFeatureComposeInMode(pointer, observeRun));");
+    expect(FC_SRC).not.toContain("enterWith");
     expect(FC_SRC).toContain("const admissionLand = admissionLandOf(pointer);");
     expect(FC_SRC).toContain("if (landingLeaseGap && !observeRun) {");
+  });
+  it("[MUST-FAIL] an observe compose's traces are tagged observe and carry no reach verdict; /reach of an observe report says so", async () => {
+    await co.runComposeObserve({ learning_mode: "observe" }, async () => {
+      expect(co.observeTraceFields()).toEqual({ learning_mode: "observe", tags: ["learning_mode:observe"] });
+    });
+    // both feature_compose trace POSTs (the plan-refusal trace and the compose trace) spread the fields
+    expect(FC_SRC.match(/\.\.\.observeTraceFields\(\), \/\/ OBSERVE: recorded ungraded \(compose-observe\.ts\)/g)?.length).toBe(2);
+    expect(FC_SRC).toContain('refusal_reason: refusalReason, ...(composeObserveActive() ? { learning_mode: "observe" } : {}) },');
+    expect(FC_SRC).toContain('...(composeObserveActive() ? { learning_mode: "observe" } : { reached: verdict === "FAVORABLE" && landedVessels.length > 0 }), landed_vessels:');
+    expect(FC_SRC).not.toContain("          reached: verdict === \"FAVORABLE\" && landedVessels.length > 0, landed_vessels:");
+    const G2F = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8");
+    for (const id of ["reachId", "reachId2"]) expect(G2F).toContain(`body: JSON.stringify({ execution_id: ${id}, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }),`);
+  });
+  it("[CONTROL] a learn compose's traces carry no observe field", async () => {
+    await co.runComposeObserve({ learning_mode: "learn" }, async () => { expect(co.observeTraceFields()).toEqual({}); });
+    expect(co.observeTraceFields()).toEqual({});
   });
   it("[CONTROL] the landing step is unchanged for a learn compose (FAVORABLE && pointer.land)", () => {
     expect(FC_SRC).toContain('if (verdict === "FAVORABLE" && pointer.land) {');

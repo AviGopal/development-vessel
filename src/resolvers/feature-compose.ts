@@ -33,7 +33,7 @@ import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
-import { admissionLandOf, composeObserveActive, composeObserveSkip, enterComposeObserve, observeComposePointer, observeReportFields, observeJournalLine, OBSERVE_DRY_RUN_REASON } from "./compose-observe.js";
+import { admissionLandOf, composeObserveActive, composeObserveSkip, runComposeObserve, observeComposePointer, observeReportFields, observeJournalLine, observeTraceFields, OBSERVE_DRY_RUN_REASON } from "./compose-observe.js";
 /** Every gap-store write in this file: an observe compose writes none (compose-observe.ts). */
 const resolveSubstrateGapWrite: typeof resolveSubstrateGapWriteStore = async (p) => {
   if (composeObserveSkip("gap_store_write")) return { shape: "substrateGap_write", body: { ok: false, skipped: "observe" } } as Awaited<ReturnType<typeof resolveSubstrateGapWriteStore>>;
@@ -5522,13 +5522,16 @@ export function featureComposeInputProblem(pointer: { verify_vessels?: unknown }
 }
 
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  // OBSERVE (compose-observe.ts): goal-host's observe dispatch. Admitted exactly as the landing compose it measures,
+  // drafted and verified, never landed; its writers read the mode from this compose's context, which ends with it.
+  return await runComposeObserve(pointer, (observeRun) => resolveFeatureComposeInMode(pointer, observeRun));
+}
+
+async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, observeRun: boolean): Promise<ResolverResult> {
   {
     const bad = featureComposeInputProblem(pointer);
     if (bad) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "input", error: bad } };
   }
-  // OBSERVE (compose-observe.ts): goal-host's observe dispatch. Admitted exactly as the landing compose it measures,
-  // drafted and verified, never landed; its writers read the mode from this compose's context.
-  const observeRun = enterComposeObserve(pointer);
   // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
   // `inFlight >= NaN` is ALWAYS FALSE — so a mistyped env var would silently
   // disable the cap while the code still looks like it has one. Any
@@ -5797,7 +5800,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
             cost: 0,
             tokens: { input: 0, output: 0, cache: 0 },
             error_message: refusalReason,
-            metadata: { gap_id: pointer.gap?.id ?? "adhoc", stage: "plan", outcome: "refused", refusal_reason: refusalReason },
+            metadata: { gap_id: pointer.gap?.id ?? "adhoc", stage: "plan", outcome: "refused", refusal_reason: refusalReason, ...(composeObserveActive() ? { learning_mode: "observe" } : {}) },
+            ...observeTraceFields(), // OBSERVE: recorded ungraded (compose-observe.ts)
           }),
           signal: AbortSignal.timeout(5000),
         }).catch(() => null);
@@ -10263,11 +10267,13 @@ const earlyAttempt = await Promise.race([
           // empty so "no conflicts" is a readable fact rather than an absent key — the whole
           // failure this replaces was invisible precisely because nothing recorded it.
           rollback_conflicts: rollbackConflicts.map((f) => f.replace(`${REPO_ROOT}/`, "")),
-          reached: verdict === "FAVORABLE" && landedVessels.length > 0, landed_vessels: landedVessels.filter((v) => v.length > 0),
+          // OBSERVE: no reach verdict (nothing can land), so the executions route's posterior update reads it as ungraded.
+          ...(composeObserveActive() ? { learning_mode: "observe" } : { reached: verdict === "FAVORABLE" && landedVessels.length > 0 }), landed_vessels: landedVessels.filter((v) => v.length > 0),
           cutover_refusals: (cutovers as Array<Record<string, unknown>>)
             .map((c) => String((c?.result as Record<string, unknown> | undefined)?.kind ?? ""))
             .filter((k) => k.length > 0),
         },
+        ...observeTraceFields(), // OBSERVE: recorded ungraded (compose-observe.ts)
       }),
       signal: AbortSignal.timeout(5000),
     }).catch(() => null);

@@ -1859,7 +1859,8 @@ async function routeCapabilityGapToNewResolver(
       void fetch(`${reachEndpoint}/v2/activities/execution-traces/reach`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(reachKey ? { Authorization: `ApiKey ${reachKey}` } : {}) },
-        body: JSON.stringify({ execution_id: reachId, reached: cb["ok"] === true }),
+        // An observe compose's verdict (its report says observe:true) is recorded, never graded (activity-api /reach).
+        body: JSON.stringify({ execution_id: reachId, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }),
         signal: AbortSignal.timeout(5000),
       }).catch(() => { /* grading must never affect the compose result */ });
     }
@@ -2917,7 +2918,7 @@ const familySample: string[] = await (async () => {
       void fetch(`${reachEndpoint2}/v2/activities/execution-traces/reach`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(reachKey2 ? { Authorization: `ApiKey ${reachKey2}` } : {}) },
-        body: JSON.stringify({ execution_id: reachId2, reached: cb["ok"] === true }),
+        body: JSON.stringify({ execution_id: reachId2, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }), // OBSERVE: as above
         signal: AbortSignal.timeout(5000),
       }).catch(() => { /* grading must never affect the compose result */ });
     }

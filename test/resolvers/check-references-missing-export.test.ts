@@ -258,6 +258,34 @@ describe("F-ARM: import() is a promise until awaited", () => {
   });
 });
 
+describe("F-ARM: what the parser reads (qa minor items)", () => {
+  const H = `import { expect, test } from "bun:test";\n`;
+  const ex = (rel: string, files: Record<string, string>) => (csa["moduleExports"] as (r: string, rd: Reader) => { names: Map<string, string>; open: string | null } | null)(rel, reader(files));
+  it("[MUST-FAIL] `export import Z = …` is an export", () => {
+    expect(ex("src/x.ts", { "src/x.ts": "namespace NS { export const y = 1; }\nexport import Z = NS.y;\n" })?.names.get("Z")).toBe("alias");
+  });
+  it("[MUST-FAIL] a module with no ESM syntax (CommonJS module.exports) has an OPEN list, so it decides nothing; an ESM module with no exports does not", () => {
+    const cjs = { "src/x.js": "module.exports = { widget: 1 };\n" };
+    expect(ex("src/x.js", cjs)?.open).not.toBeNull();
+    expect(refusalOf(`${H}import * as mod from "../../src/x.js";\ntest("t", () => { expect(mod.widget).toBe(2); });\n`, CHECK, reader(cjs))).toBeNull();
+    const esmEmpty = { "src/x.ts": `import { a } from "./a";\nconsole.log(a);\n` };
+    expect(ex("src/x.ts", esmEmpty)?.open).toBeNull();
+    expect(refusalOf(`${H}import * as mod from "../../src/x";\ntest("t", () => { expect(mod.widget).toBe(2); });\n`, CHECK, reader(esmEmpty))?.symbol).toBe("widget");
+  });
+  it("[MUST-FAIL] a local that shadows the module binding is not the module; the binding in scope is", () => {
+    const SITE = { "src/x.ts": "export const widget = 1;\n", "src/y.ts": "export const other = 1;\n" };
+    expect(refusalOf(`${H}import * as mod from "../../src/x";\ntest("t", () => { const mod = { nope: 1 }; expect(mod.nope + 1).toBe(3); });\n`, CHECK, reader(SITE))).toBeNull();
+    // two tests binding mod to different modules stay apart
+    expect(refusalOf(`${H}test("a", async () => { const mod = await import("../../src/x"); expect(mod.widget).toBe(2); });\ntest("b", async () => { const mod = await import("../../src/y"); expect(mod.other).toBe(2); });\n`, CHECK, reader(SITE))).toBeNull();
+    expect(refusalOf(`${H}test("a", async () => { const mod = await import("../../src/x"); expect(mod.other).toBe(2); });\ntest("b", async () => { const mod = await import("../../src/y"); expect(mod.widget).toBe(2); });\n`, CHECK, reader(SITE))?.symbol).toBe("other");
+  });
+  it("[MUST-FAIL] a named import used only as a type is erased and names nothing; used as a value it is checked", () => {
+    const SITE = { "src/x.ts": "export const widget = 1;\n" };
+    expect(refusalOf(`${H}import { widget, Nope } from "../../src/x";\ntest("t", () => { const v: Nope | null = null; expect(widget).toBe(v); });\n`, CHECK, reader(SITE))).toBeNull();
+    expect(refusalOf(`${H}import { widget, Nope } from "../../src/x";\ntest("t", () => { expect(widget).toBe(Nope); });\n`, CHECK, reader(SITE))?.symbol).toBe("Nope");
+  });
+});
+
 describe("F-ARM: the arm step refuses at attach and records it on the gap", () => {
   it("[MUST-FAIL] the route-edit-bd252f8c check, landed for a gap whose edit site is goal-host src/index.ts, is NOT armed: arm_refused, check_references_missing_export:shellResult, counted, no birth verdict", async () => {
     const { id, body } = await landAndTick("me-route-edit", "goal-host-vessel", "src/index.ts", ROUTE_EDIT_CHECK);

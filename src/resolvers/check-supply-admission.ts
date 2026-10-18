@@ -390,8 +390,8 @@ function posixRelative(fromFile: string, toRel: string): string {
 /**
  * WHAT A MODULE EXPORTS, read from its source with the TypeScript parser (no type checker, no execution): every
  * `export` declaration (function, class, const/let/var including destructured names, enum, interface, type, namespace),
- * `export default`, `export { a, b as c }` (kind from the local declaration), `export { a } from`, `export * as ns from`,
- * and `export * from "./x"` followed through `reader` (cycle-safe). Type-only exports count as present: bun erases them,
+ * `export default`, `export import Z = …`, `export { a, b as c }` (kind from the local declaration), `export { a } from`,
+ * `export * as ns from`, and `export * from "./x"` followed through `reader` (cycle-safe). Type-only exports count as present: bun erases them,
  * so naming one is not what makes a red hollow. `open` says why the list may be incomplete (an `export *` from a module
  * this reader cannot read); null when the module itself cannot be read. A caller treats both as "unknown", never as absent.
  */
@@ -440,6 +440,7 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
     if (ts.isInterfaceDeclaration(s)) return [[s.name.text, "interface"]];
     if (ts.isTypeAliasDeclaration(s)) return [[s.name.text, "type"]];
     if (ts.isModuleDeclaration(s) && ts.isIdentifier(s.name)) return [[s.name.text, "namespace"]];
+    if (ts.isImportEqualsDeclaration(s)) return [[s.name.text, "alias"]];
     if (ts.isVariableStatement(s)) {
       const kind = s.declarationList.flags & ts.NodeFlags.Const ? "const" : s.declarationList.flags & ts.NodeFlags.Let ? "let" : "var";
       const out: string[] = [];
@@ -478,6 +479,10 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
       open ??= sub.open;
     }
   }
+  // A module with no ESM import or export syntax at all (CommonJS module.exports, say) exports what this parser cannot
+  // see: its list is open, never empty.
+  const esm = sf.statements.some((s) => ts.isImportDeclaration(s) || ts.isExportDeclaration(s) || ts.isExportAssignment(s) || ts.isImportEqualsDeclaration(s) || hasExport(ts, s));
+  if (!esm) open ??= "the module has no ESM import or export syntax (CommonJS exports cannot be read statically)";
   return { names, open };
 }
 
@@ -488,7 +493,8 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
  * import, and the parameter of `import("…").then((ns) => …)`): `ns.x`, `ns["x"]`, `const { x } = ns`, through any
  * cast, parenthesis or non-null wrapper (`(ns as unknown as Record<string, unknown>)["x"]`), plus
  * `(await import("…")).x` and `const { x } = await import("…")`. A method of the import's promise is not a name. A computed key that is not a string literal is not a
- * name and is skipped. Shadowing a binding's name inside the check is not modelled (it can only add names).
+ * name and is skipped. A use is attributed to the binding IN SCOPE (a shadowing local of the same name is not the
+ * module), and a named or default import that is used only as a type, or not at all, is erased by bun and names nothing.
  *
  * `absence` marks a member read whose only use is an assertion that the name is NOT there (qa ruling on control (a)):
  * `expect(typeof R).toBe("undefined")` (toEqual / toStrictEqual too), `expect(R).toBeUndefined()`,
@@ -504,7 +510,64 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
   const add = (spec: string, symbol: string, absence = false): void => {
     if (!out.some((r) => r.spec === spec && r.symbol === symbol && (r.absence === true) === absence)) out.push({ spec, symbol, ...(absence ? { absence: true as const } : {}) });
   };
-  const namespaces = new Map<string, string>();
+  /** Namespace bindings by their DECLARING identifier, so a use resolves to the binding in scope (a local of the same
+   *  name shadows it, and two tests' `const mod = await import(…)` of different modules stay apart). */
+  const namespaces = new Map<TS.Node, string>();
+  const nsNames = new Set<string>();
+  const bindNamespace = (id: TS.Identifier, spec: string): void => { namespaces.set(id, spec); nsNames.add(id.text); };
+  const fromBinding = (b: TS.BindingName, name: string): TS.Identifier | null => {
+    if (ts.isIdentifier(b)) return b.text === name ? b : null;
+    for (const el of b.elements) if (!ts.isOmittedExpression(el)) { const r = fromBinding(el.name, name); if (r) return r; }
+    return null;
+  };
+  const fromList = (l: TS.VariableDeclarationList, name: string): TS.Identifier | null => {
+    for (const d of l.declarations) { const r = fromBinding(d.name, name); if (r) return r; }
+    return null;
+  };
+  /** The identifier that declares `name` directly in `scope`, or null. */
+  const declIn = (scope: TS.Node, name: string): TS.Identifier | null => {
+    if (ts.isFunctionLike(scope)) {
+      for (const p of scope.parameters) { const r = fromBinding(p.name, name); if (r) return r; }
+      if (ts.isFunctionExpression(scope) && scope.name?.text === name) return scope.name;
+    }
+    if (ts.isCatchClause(scope) && scope.variableDeclaration) return fromBinding(scope.variableDeclaration.name, name);
+    if ((ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) && scope.initializer && ts.isVariableDeclarationList(scope.initializer)) return fromList(scope.initializer, name);
+    const stmts = ts.isSourceFile(scope) || ts.isBlock(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope) || ts.isDefaultClause(scope) ? scope.statements : null;
+    for (const s of stmts ?? []) {
+      if (ts.isVariableStatement(s)) { const r = fromList(s.declarationList, name); if (r) return r; }
+      if ((ts.isFunctionDeclaration(s) || ts.isClassDeclaration(s)) && s.name?.text === name) return s.name;
+      if (ts.isImportDeclaration(s) && s.importClause) {
+        const c = s.importClause, nb = c.namedBindings;
+        if (c.name?.text === name) return c.name;
+        if (nb && ts.isNamespaceImport(nb) && nb.name.text === name) return nb.name;
+        if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (el.name.text === name) return el.name;
+      }
+    }
+    return null;
+  };
+  const resolveName = (id: TS.Identifier): TS.Identifier | null => {
+    for (let a: TS.Node | undefined = id.parent; a; a = a.parent) { const d = declIn(a, id.text); if (d) return d; }
+    return null;
+  };
+  /** A use bun erases: inside a type (an annotation, a type argument, `typeof X` in a type), but not a class's `extends`. */
+  const inTypePosition = (id: TS.Node): boolean => {
+    for (let a: TS.Node | undefined = id.parent; a; a = a.parent) {
+      if (ts.isExpressionWithTypeArguments(a) && a.parent && ts.isHeritageClause(a.parent) && a.parent.token === ts.SyntaxKind.ExtendsKeyword && ts.isClassLike(a.parent.parent)) return false;
+      if (ts.isTypeNode(a)) return true;
+    }
+    return false;
+  };
+  /** Is the import binding `decl` used as a VALUE anywhere (a binding used only as a type, or not at all, is erased)? */
+  const valueUsed = (decl: TS.Identifier): boolean => {
+    let hit = false;
+    const visit = (n: TS.Node): void => {
+      if (hit) return;
+      if (ts.isIdentifier(n) && n !== decl && n.text === decl.text && !(n.parent && (ts.isPropertyAccessExpression(n.parent) || ts.isPropertyAssignment(n.parent)) && n.parent.name === n) && resolveName(n) === decl && !inTypePosition(n)) { hit = true; return; }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return hit;
+  };
   const isWrapper = (n: TS.Node): boolean => ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n) || ts.isSatisfiesExpression(n) || ts.isAwaitExpression(n);
   const outermost = (n: TS.Node): TS.Node => { let e = n; while (e.parent && isWrapper(e.parent)) e = e.parent; return e; };
   const isUndefined = (n: TS.Node | undefined): boolean => !!n && ts.isIdentifier(n) && n.text === "undefined";
@@ -557,7 +620,7 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
           const key = el.propertyName ?? el.name;
           if (ts.isIdentifier(key) || ts.isStringLiteral(key)) add(spec, key.text);
         }
-      } else if (bindAs && ts.isIdentifier(p.name)) namespaces.set(p.name.text, spec);
+      } else if (bindAs && ts.isIdentifier(p.name)) bindNamespace(p.name, spec);
     }
   };
   /**
@@ -586,7 +649,7 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
     const cb = p.parent.arguments[0];
     const param = cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) ? cb.parameters[0] : undefined;
     if (!param) return;
-    if (ts.isIdentifier(param.name)) namespaces.set(param.name.text, spec);
+    if (ts.isIdentifier(param.name)) bindNamespace(param.name, spec);
     else if (ts.isObjectBindingPattern(param.name)) {
       for (const el of param.name.elements) {
         if (el.dotDotDotToken) continue;
@@ -601,10 +664,10 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
       const spec = relSpec(n.moduleSpecifier);
       const c = n.importClause;
       if (spec && c && !c.isTypeOnly) {
-        if (c.name) add(spec, "default");
+        if (c.name && valueUsed(c.name)) add(spec, "default");
         const nb = c.namedBindings;
-        if (nb && ts.isNamespaceImport(nb)) namespaces.set(nb.name.text, spec);
-        if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (!el.isTypeOnly) add(spec, moduleName(el.propertyName ?? el.name));
+        if (nb && ts.isNamespaceImport(nb)) bindNamespace(nb.name, spec);
+        if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (!el.isTypeOnly && valueUsed(el.name)) add(spec, moduleName(el.propertyName ?? el.name));
       }
       return;
     }
@@ -620,10 +683,12 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
   };
   collect(sf);
   const uses = (n: TS.Node): void => {
-    if (ts.isIdentifier(n) && namespaces.has(n.text)) {
+    if (ts.isIdentifier(n) && nsNames.has(n.text) && !namespaces.has(n)) {
       const p = n.parent;
-      const declaring = (ts.isVariableDeclaration(p) && p.name === n) || ts.isNamespaceImport(p) || (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isPropertyAssignment(p) && p.name === n) || ts.isImportSpecifier(p);
-      if (!declaring) readsOff(n, namespaces.get(n.text)!, false);
+      const notAUse = (ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isPropertyAssignment(p) && p.name === n) || ts.isImportSpecifier(p) || ts.isBindingElement(p);
+      const decl = notAUse ? null : resolveName(n);
+      const spec = decl ? namespaces.get(decl) : undefined;
+      if (spec !== undefined) readsOff(n, spec, false);
     }
     ts.forEachChild(n, uses);
   };

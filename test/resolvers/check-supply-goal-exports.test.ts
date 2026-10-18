@@ -7,7 +7,9 @@
 // a code edit site carries the site's export list (names and kinds), read by the extractor the refusal uses, bounded
 // like the decompose prompt's source list (80 names, the gap's own words first, the rest counted), and says checks may
 // reference only exports from that list. Controls: an unreadable site gets no list; the goal stays under the dispatch
-// bound (dispatch-goal.ts MAX_GOAL_LEN, 8192).
+// bound (dispatch-goal.ts MAX_GOAL_LEN, 8192). The next attempt's brief (priorAttemptSentence) keeps the invented
+// name a refusal named: an existence_only reason puts check_references_missing_export:<symbol> past the 160-char cut
+// (the AuthCache check's ended at "check_references_missing_exp"), so the cut is made after the symbol.
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,7 +17,9 @@ import { join } from "node:path";
 const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 type Reader = { read: (rel: string) => string | null; list: (dir: string) => string[] };
 const reader = (files: Record<string, string>): Reader => ({ read: (rel) => files[rel] ?? null, list: () => [] });
-const GOAL_HOST_INDEX = readFileSync(join(import.meta.dir, "..", "fixtures", "check-references-missing-export", "goal-host-index.exports.ts.txt"), "utf8");
+const csa = (await import("../../src/resolvers/check-supply-admission.js")) as typeof import("../../src/resolvers/check-supply-admission.js");
+const fixture = (name: string): string => readFileSync(join(import.meta.dir, "..", "fixtures", "check-references-missing-export", name), "utf8");
+const GOAL_HOST_INDEX = fixture("goal-host-index.exports.ts.txt");
 const GH = "goal-host-vessel";
 const CHECK = "test/checks/route-edit-bd252f8c.check.ts";
 const SUMMARY = "route-edit-bd252f8c: when correctness requires an exact procedure, the universal fallback generates a value instead of executing it, despite a `shellResult` tool being available (17 letters reported for a 16-letter word)";
@@ -67,5 +71,26 @@ describe("the check writer's goal names the edit site's real exports", () => {
     expect(goal.length).toBeLessThanOrEqual(MAX_GOAL_LEN);
     expect(goal).toMatch(/src\/long\.ts exports 80 names; \d+ of them/);
     expect(goal).toMatch(/, and \d+ more\. /);
+  });
+});
+
+describe("the next attempt is told the name a refusal named", () => {
+  const AUTHCACHE_TITLE = "auth-cache module resolves and exports AuthCache function";
+  it("[MUST-FAIL] an existence_only reason naming a missing export (the AuthCache check, 7b54fc7) keeps check_references_missing_export:AuthCache through the cut", () => {
+    const missing = csa.missingExportRefusal(fixture("pull-sync-testgate-unresolvable-modules-activity-api.check.ts.txt"), "test/checks/pull-sync-testgate-unresolvable-modules-activity-api.check.ts", reader({ "src/middleware/auth-cache.ts": fixture("activity-api-auth-cache.exports.ts.txt") }));
+    expect(missing?.symbol).toBe("AuthCache");
+    // the arm step's existence_only reason, as gap-check-supply writes it
+    const reason = `existence_only: all 1 assertion(s) of the named test(s) only check that a name exists or has a type; a check must assert behaviour; ${missing!.reason}`;
+    expect(reason.indexOf("AuthCache")).toBeGreaterThan(160);
+    const s = supply.priorAttemptSentence([{ state: "existence_only", reason, titles: [AUTHCACHE_TITLE] }]);
+    expect(s).toContain("check_references_missing_export:AuthCache");
+    expect(s).toContain(`(${reason.slice(0, reason.indexOf("AuthCache") + "AuthCache".length)})`);
+  });
+
+  it("[CONTROL] a short reason passes through unchanged, and a long one that names no refused export is still cut at 160", () => {
+    const short = "network: connection refused";
+    expect(supply.priorAttemptSentence([{ state: "arm_refused", titles: ["t one"], reason: short }])).toBe(`An earlier attempt wrote "t one", which was not accepted (${short}): write a different test that avoids that. `);
+    const long = "x".repeat(300);
+    expect(supply.priorAttemptSentence([{ state: "arm_refused", titles: ["t one"], reason: long }])).toBe(`An earlier attempt wrote "t one", which was not accepted (${"x".repeat(160)}): write a different test that avoids that. `);
   });
 });

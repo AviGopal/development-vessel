@@ -68,7 +68,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, exportGuardUnavailable, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -366,7 +366,9 @@ export function exportListSentence(siteRel: string, reader: SrcReader, summary: 
 /**
  * WHAT THE LAST JUDGED ATTEMPT SHOWED, said to the next one. Without it a check that landed green at HEAD was followed
  * by the same goal text, so the drafter wrote the same check again. The wording follows the dissent child's ("must
- * differ from … which already passes"): it names the check that did not reproduce and asks for a different one.
+ * differ from … which already passes"): it names the check that did not reproduce and asks for a different one. The
+ * reason is cut at 160 characters, or after the `check_references_missing_export:<symbol>` it carries when that ends
+ * later (an existence_only reason puts it past 160), so the next attempt is told the name it must not read.
  */
 export function priorAttemptSentence(prior: readonly Row[]): string {
   const last = [...prior].reverse().find((h) => JUDGED_NOT_ARMED.has(String(h?.["state"] ?? "")));
@@ -375,7 +377,9 @@ export function priorAttemptSentence(prior: readonly Row[]): string {
   const named = titles.length ? titles.map((t) => JSON.stringify(t)).join(", ") : "the previous check";
   if (last["state"] === "green_at_head")
     return `An earlier attempt wrote ${named}, which already PASSES at HEAD, so it does not reproduce the defect: write a different test whose assertion fails because of the defect. Tests already in the file do not count. `;
-  return `An earlier attempt wrote ${named}, which was not accepted (${String(last["reason"] ?? "").slice(0, 160)}): write a different test that avoids that. `;
+  const reason = String(last["reason"] ?? "");
+  const sym = new RegExp(`${MISSING_EXPORT_STAGE}:[\\w$]+`).exec(reason);
+  return `An earlier attempt wrote ${named}, which was not accepted (${reason.slice(0, Math.max(160, sym ? sym.index + sym[0].length : 0))}): write a different test that avoids that. `;
 }
 
 /** The source of the call `test("<title>", …)` / `it(…)` from its opening parenthesis to the matching close (strings skipped). */

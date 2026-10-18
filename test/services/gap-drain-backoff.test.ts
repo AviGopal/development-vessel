@@ -448,3 +448,54 @@ describe("gap-drain observer: controls (current correct behaviour)", () => {
     expect(dispatches().length).toBe(0);
   });
 });
+
+// THE LIVELOCK HOLD. remedy_effectiveness_observer files an open remedy_livelock gap naming the gap whose remedy
+// keeps being dispatched without moving its metric (classification_metadata.failing_gap_id); nothing consumed it, so
+// this observer kept re-dispatching the named gap. While that livelock gap is open the named gap is held from drain
+// dispatch, read from the store at use time, with a counted held_livelock line.
+function livelockRow(id: string, failingGapId: string, status = "open"): Record<string, unknown> {
+  const now = new Date().toISOString();
+  return {
+    id, category: "remedy_livelock", source: "substrate_detected", status, summary: `probe livelock ${id}`,
+    detected_at: now, created_at: now, updated_at: now, route: "dispatchable",
+    remedy: { vessel: "goal-host-vessel", goal: "probe" },
+    classification_metadata: { failing_gap_id: failingGapId, failing_remedy: "gap_to_feature", metric_moved: false },
+  };
+}
+const drainLines = (): Array<Record<string, unknown>> => {
+  try {
+    return readFileSync(join(ROOT, "pool", "drain-log.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+};
+
+describe("gap-drain observer: an open remedy_livelock gap holds the gap it names", () => {
+  test("[MUST-FAIL] a gap named by an open remedy_livelock gap is not dispatched, and each hold is a counted held_livelock line", async () => {
+    const id = `drain-probe-livelocked-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = `remedy-livelock-${id}`;
+    writeGapStore([gapRow(id, {}), livelockRow(ll, id)]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(0);
+    const held = drainLines().filter((l) => l["action"] === "held_livelock" && l["gap_id"] === id);
+    expect(held.map((l) => [l["livelock_gap_id"], l["held_count"]])).toEqual([[ll, 1], [ll, 2]]);
+  });
+
+  test("[CONTROL] a CLOSED remedy_livelock gap holds nothing: the named gap is dispatched", async () => {
+    const id = `drain-probe-livelock-closed-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([gapRow(id, {}), livelockRow(`remedy-livelock-${id}`, id, "closed")]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+
+  test("[CONTROL] an open remedy_livelock gap naming ANOTHER gap holds nothing here", async () => {
+    const id = `drain-probe-livelock-other-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([gapRow(id, {}), livelockRow(`remedy-livelock-other-${id}`, `${id}-other`)]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+});

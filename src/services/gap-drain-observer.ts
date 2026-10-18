@@ -55,6 +55,25 @@ async function readGapRowForNudge(gapId: string): Promise<Record<string, unknown
   return row;
 }
 
+/** Drain dispatches held per gap by an open remedy_livelock gap (counted in the held_livelock line). */
+const livelockHeldCounts = new Map<string, number>();
+
+/** The id of an OPEN remedy_livelock gap whose failing_gap_id is `gapId`, or null (none, or the store unreadable). */
+export async function openLivelockHolderOf(gapId: string): Promise<string | null> {
+  if (!gapId) return null;
+  try {
+    const { resolveSubstrateGap } = await import("../resolvers/substrate-gap.js");
+    const r = await resolveSubstrateGap({ type: "substrateGap", category: "remedy_livelock", status: "open", limit: Number.MAX_SAFE_INTEGER } as never);
+    if (r.shape !== "substrateGap") throw new Error(`gap store answered ${r.shape}`);
+    const rows = ((r.body as { gaps?: unknown }).gaps ?? []) as Array<Record<string, unknown>>;
+    const hit = rows.find((x) => String(x["status"] ?? "open") === "open" && String(((x["classification_metadata"] ?? {}) as Record<string, unknown>)["failing_gap_id"] ?? "") === gapId);
+    return hit ? String(hit["id"] ?? "") || null : null;
+  } catch (err) {
+    console.log(`[gap-drain-observer] livelock hold read failed for ${gapId} (dispatching as before): ${String(err).slice(0, 200)}`);
+    return null;
+  }
+}
+
 export async function composeNudgeSkipReason(gapId: string): Promise<ComposeNudgeSkipReason | null> {
   if (!gapId) return "not_found";
   let row: Record<string, unknown> | null;
@@ -327,6 +346,20 @@ export class GapDrainObserver {
       console.warn(`[gap-drain-observer] REFUSED remedy for gap ${gapId}: impulse_type ${JSON.stringify(remedy.impulse_type.slice(0, 80))} is not on the drain remedy allowlist (${[...DRAIN_REMEDY_ALLOWLIST].join(", ")})`);
       this.recordDrain({ action: "refused_remedy_type", gap_id: gapId, category, impulse_type: remedy.impulse_type.slice(0, 80) });
       return;
+    }
+    // LIVELOCK HOLD. remedy_effectiveness_observer files an open remedy_livelock gap naming the gap whose remedy keeps
+    // being dispatched without moving its metric (classification_metadata.failing_gap_id). Nothing consumed it, so
+    // this observer kept re-dispatching the very gap it names. While such a gap is open, the named gap is held
+    // from drain dispatch. Read from the gap store at use time; an unreadable store holds nothing (dispatch as before).
+    {
+      const holder = await openLivelockHolderOf(gapId);
+      if (holder) {
+        const held = (livelockHeldCounts.get(gapId) ?? 0) + 1;
+        livelockHeldCounts.set(gapId, held);
+        console.log(`[gap-drain-observer] held ${gapId}: open remedy_livelock gap ${holder} names it (held ${held}x)`);
+        this.recordDrain({ action: "held_livelock", gap_id: gapId, category, livelock_gap_id: holder, held_count: held });
+        return;
+      }
     }
     const gd = globalThis as any;
     gd.__drainBackoff ??= new Map();

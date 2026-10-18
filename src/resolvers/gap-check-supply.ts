@@ -68,7 +68,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, missingExportRefusal, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -320,10 +320,34 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
   const named = anchors.length
     ? `Build it on what the evidence names (${anchorText(anchors)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
     : "";
+  const exportsList = siteRel && reader && /\.(?:[cm]?[jt]sx?)$/.test(siteRel) ? exportListSentence(siteRel, reader, summary) : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
-    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + named +
+    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named +
     priorAttemptSentence(prior) +
     "No network, no services, no timers. Do not change src/ or any other file.";
+}
+
+/**
+ * THE MODULE'S REAL EXPORTS, GIVEN TO THE CHECK WRITER (F-ARM). The writer drafted without them and invented one
+ * (2f36f62, route-edit-bd252f8c: `mod["shellResult"]` on goal-host src/index.ts, where shellResult is a shape name):
+ * the arm step now refuses such a check (check-supply-admission.ts missingExportRefusal), and this is the fact that
+ * lets the writer avoid it. The list is read by the same extractor the refusal uses (moduleExports, over the clone the
+ * goal's reader reads, the tree vesselTestInventory walks for the decompose prompt) and bounded like that prompt's
+ * source list: at most EXPORT_LIST_MAX names, those the gap's own words name first, then source order, the rest
+ * counted. Empty when the module cannot be read or exports nothing.
+ */
+export const EXPORT_LIST_MAX = 80;
+export function exportListSentence(siteRel: string, reader: SrcReader, summary: string): string {
+  const ex = moduleExports(siteRel, reader);
+  if (!ex || ex.names.size === 0) return "";
+  const words = summary.toLowerCase();
+  const ranked = [...ex.names].map(([name, kind], i) => ({ name, kind, i, hit: name.length >= 3 && words.includes(name.toLowerCase()) ? 1 : 0 }))
+    .sort((a, b) => b.hit - a.hit || a.i - b.i);
+  const shown = ranked.slice(0, EXPORT_LIST_MAX);
+  const more = ex.names.size - shown.length;
+  return `${siteRel} exports ${more > 0 ? `${ex.names.size} names; ${shown.length} of them` : `exactly these ${shown.length} name${shown.length === 1 ? "" : "s"}`}${ex.open ? " (and what it re-exports from a module not readable here)" : ""} (name: kind): ` +
+    `${shown.map((x) => `${x.name}: ${x.kind}`).join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
+    "The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is red on every tree and is refused; reach internal code through an export on the list. ";
 }
 
 /**

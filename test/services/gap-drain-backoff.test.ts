@@ -503,6 +503,60 @@ describe("gap-drain observer: an open remedy_livelock gap holds the gap it names
   });
 });
 
+// THE HOLD EXPIRES. Nothing closes a remedy_livelock gap, so a hold keyed on "open" alone never lifted. It lasts one
+// observer window from detection: review_by when the livelock gap carries one, else detected_at plus its stamped
+// window_hours (the observer's default when absent). An expired hold logs "hold expired" once and dispatches.
+describe("gap-drain observer: a livelock hold expires after the observer's window", () => {
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  test("[MUST-FAIL] a livelock gap older than its window no longer holds; 'hold expired' is logged once", async () => {
+    const id = `drain-probe-livelock-expired-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(7);
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(2);
+    const expired = drainLines().filter((l) => l["action"] === "livelock_hold_expired" && l["gap_id"] === id);
+    expect(expired.length).toBe(1);
+    expect(drainLines().some((l) => l["action"] === "held_livelock" && l["gap_id"] === id)).toBe(false);
+  });
+
+  test("[MUST-FAIL] with no stamped window, the observer's default window applies (7 h old: expired)", async () => {
+    const id = `drain-probe-livelock-default-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(7);
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(1);
+  });
+
+  test("[CONTROL] inside its stamped window (1 h old, window 6 h) the hold stands", async () => {
+    const id = `drain-probe-livelock-young-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(1);
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(0);
+  });
+
+  test("[CONTROL] a review_by in the future holds past the window", async () => {
+    const id = `drain-probe-livelock-review-${Math.random().toString(36).slice(2, 8)}`;
+    const ll = livelockRow(`remedy-livelock-${id}`, id);
+    ll["detected_at"] = hoursAgo(7);
+    (ll["classification_metadata"] as Record<string, unknown>)["window_hours"] = 6;
+    (ll["classification_metadata"] as Record<string, unknown>)["review_by"] = new Date(Date.now() + 3_600_000).toISOString();
+    writeGapStore([gapRow(id, {}), ll]);
+    dispatchResponse = report({ ok: true, gap_id: id, verdict: "FAVORABLE", commit: "abc1234" });
+    await makeObserver().handleEvent(writtenEvent(id));
+    expect(dispatches().length).toBe(0);
+  });
+});
+
 // A GOAL-HOST REMEDY TAKES THE SAME BRAKES. A remedy {vessel:"goal-host-vessel", goal} (no impulse_type), which is what a
 // remedy_livelock gap carries, was POSTed to goal-host /run-goal before every brake: no drain backoff, no livelock hold,
 // no non-attempt recognition. It now takes the impulse path's checks.

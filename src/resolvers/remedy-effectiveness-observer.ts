@@ -50,6 +50,9 @@ export interface RemedyEffectivenessObserverPointer {
 }
 
 const DEFAULT_EMIT = "http://127.0.0.1:8090/v2/impulses/resolve";
+/** The lookback window when the pointer names none. Exported for the drain observer's livelock hold, which expires a
+ *  livelock gap that carries no window of its own at detected_at plus this. */
+export const DEFAULT_WINDOW_HOURS = 6;
 const DEFAULT_API = "http://127.0.0.1:8080";
 
 interface DrainEntry {
@@ -95,7 +98,7 @@ export async function resolveRemedyEffectivenessObserver(
   const emitUrl = pointer.dev_vessel_impulses_url ?? DEFAULT_EMIT;
   const apiBase = pointer.activity_api_url ?? process.env["ACTIVITY_API_URL"] ?? DEFAULT_API;
   const drainPath = pointer.drain_log_path ?? join(WORKSPACE_ROOT, "pool", "drain-log.jsonl");
-  const windowHours = pointer.window_hours ?? 6;
+  const windowHours = pointer.window_hours ?? DEFAULT_WINDOW_HOURS;
   const minDispatches = pointer.min_dispatches ?? 3;
   const dryRun = pointer.dry_run ?? false;
 

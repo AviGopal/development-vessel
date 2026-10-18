@@ -58,7 +58,28 @@ async function readGapRowForNudge(gapId: string): Promise<Record<string, unknown
 /** Drain dispatches held per gap by an open remedy_livelock gap (counted in the held_livelock line). */
 const livelockHeldCounts = new Map<string, number>();
 
-/** The id of an OPEN remedy_livelock gap whose failing_gap_id is `gapId`, or null (none, or the store unreadable). */
+/** Expired livelock holds already logged ("hold expired" once per livelock gap and named gap). */
+const livelockExpiredLogged = new Set<string>();
+
+/**
+ * When a livelock gap's hold ends. Nothing closes a remedy_livelock gap (remedy_effectiveness_observer only opens
+ * them), so a hold keyed on "open" alone would never lift. It lasts one observer window from detection: the
+ * livelock gap's review_by when it carries one, else detected_at plus the window_hours the observer stamped on it
+ * (its pointer default when absent). Null when no detection time can be read: such a gap holds nothing.
+ */
+export async function livelockHoldUntilMs(row: Record<string, unknown>): Promise<number | null> {
+  const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const review = Date.parse(String(meta["review_by"] ?? row["review_by"] ?? ""));
+  if (Number.isFinite(review)) return review;
+  const detected = Date.parse(String(row["detected_at"] ?? row["created_at"] ?? ""));
+  if (!Number.isFinite(detected)) return null;
+  const stamped = Number(meta["window_hours"]);
+  const { DEFAULT_WINDOW_HOURS } = await import("../resolvers/remedy-effectiveness-observer.js");
+  return detected + (Number.isFinite(stamped) && stamped > 0 ? stamped : DEFAULT_WINDOW_HOURS) * 3_600_000;
+}
+
+/** The id of an OPEN remedy_livelock gap whose failing_gap_id is `gapId` and whose hold has not expired, or null
+ *  (none, all expired, or the store unreadable). An expired hold logs "hold expired" once. */
 export async function openLivelockHolderOf(gapId: string): Promise<string | null> {
   if (!gapId) return null;
   try {
@@ -66,8 +87,20 @@ export async function openLivelockHolderOf(gapId: string): Promise<string | null
     const r = await resolveSubstrateGap({ type: "substrateGap", category: "remedy_livelock", status: "open", limit: Number.MAX_SAFE_INTEGER } as never);
     if (r.shape !== "substrateGap") throw new Error(`gap store answered ${r.shape}`);
     const rows = ((r.body as { gaps?: unknown }).gaps ?? []) as Array<Record<string, unknown>>;
-    const hit = rows.find((x) => String(x["status"] ?? "open") === "open" && String(((x["classification_metadata"] ?? {}) as Record<string, unknown>)["failing_gap_id"] ?? "") === gapId);
-    return hit ? String(hit["id"] ?? "") || null : null;
+    const naming = rows.filter((x) => String(x["status"] ?? "open") === "open" && String(((x["classification_metadata"] ?? {}) as Record<string, unknown>)["failing_gap_id"] ?? "") === gapId);
+    const now = Date.now();
+    for (const x of naming) {
+      const id = String(x["id"] ?? "");
+      const until = await livelockHoldUntilMs(x);
+      if (until !== null && now < until) return id || null;
+      const key = `${id}\u0000${gapId}`;
+      if (!livelockExpiredLogged.has(key)) {
+        livelockExpiredLogged.add(key);
+        console.log(`[gap-drain-observer] hold expired: remedy_livelock gap ${id} no longer holds ${gapId} (${until === null ? "no detection time" : `expired ${new Date(until).toISOString()}`}); dispatching`);
+        appendDrainLine({ action: "livelock_hold_expired", gap_id: gapId, livelock_gap_id: id, expired_at: until === null ? null : new Date(until).toISOString() });
+      }
+    }
+    return null;
   } catch (err) {
     console.log(`[gap-drain-observer] livelock hold read failed for ${gapId} (dispatching as before): ${String(err).slice(0, 200)}`);
     return null;
@@ -330,6 +363,12 @@ export class GapDrainObserver {
     // being dispatched without moving its metric (classification_metadata.failing_gap_id). Nothing consumed it, so
     // this observer kept re-dispatching the very gap it names. While such a gap is open, the named gap is held
     // from drain dispatch. Read from the gap store at use time; an unreadable store holds nothing (dispatch as before).
+    // The hold lasts one observer window (livelockHoldUntilMs). The cheap in-process backoff is asked first, so the
+    // store read runs only when the backoff would not already block.
+    const gd = globalThis as any;
+    gd.__drainBackoff ??= new Map();
+    const boEntry = gd.__drainBackoff.get(gapId);
+    if (boEntry && Date.now() < boEntry.until) { return; }
     {
       const holder = await openLivelockHolderOf(gapId);
       if (holder) {
@@ -340,10 +379,6 @@ export class GapDrainObserver {
         return;
       }
     }
-    const gd = globalThis as any;
-    gd.__drainBackoff ??= new Map();
-    const boEntry = gd.__drainBackoff.get(gapId);
-    if (boEntry && Date.now() < boEntry.until) { return; }
     const g = globalThis as unknown as { __drainInflight?: Set<string> };
     g.__drainInflight ??= new Set<string>();
     if (g.__drainInflight.has(category) || g.__drainInflight.size >= 2) {

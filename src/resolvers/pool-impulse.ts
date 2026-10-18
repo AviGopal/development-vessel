@@ -78,13 +78,16 @@ function loadImpulses(): StandingImpulse[] {
   }
 }
 
-function saveImpulses(impulses: StandingImpulse[]): void {
+/** Rewrite the whole pool file. `line`: what this rewrite was, logged once it landed, so every rewrite of the
+ *  file is attributable to its writer from the log ("[pool-impulse] write: ..." / "[pool-impulse] batch write: ..."). */
+function saveImpulses(impulses: StandingImpulse[], line: string): void {
   mkdirSync(poolFileOverride ? join(poolFileOverride, '..') : POOL_DIR, { recursive: true });
   const tmp = poolFile() + '.tmp.' + Date.now();
   writeFileSync(tmp, JSON.stringify(impulses, null, 2), 'utf8');
   // atomic rename
   const fs = require('node:fs') as typeof import('node:fs');
   fs.renameSync(tmp, poolFile());
+  console.log(`[pool-impulse] ${line}`);
 }
 
 export function resolvePoolImpulse(pointer: {
@@ -292,7 +295,7 @@ function recordRunnerRefusal(principal: string, why: string, attemptedId: string
     const body = { principal, count: (typeof prev['count'] === 'number' ? prev['count'] : 0) + 1, first_at: typeof prev['first_at'] === 'string' ? prev['first_at'] : now, last_at: now, last_why: why, last_attempted_id: attemptedId };
     const row: StandingImpulse = { id, shape: VERDICT_CORPUS_REFUSAL_SHAPE, body, source: 'pool-impulse', status: 'open', injected_at: idx >= 0 ? all[idx]!.injected_at : now, updated_at: now };
     if (idx >= 0) all[idx] = row; else all.push(row);
-    if (into) into.recorded++; else saveImpulses(all);
+    if (into) into.recorded++; else saveImpulses(all, `write: 1 impulse(s) from pool-impulse (${VERDICT_CORPUS_REFUSAL_SHAPE} ${id})`);
   } catch (err) {
     console.error(`[pool] could not record the refused verdictCorpusStatus write by ${principal}: ${String((err as Error)?.message ?? err)}`);
   }
@@ -358,7 +361,22 @@ export type PoolWritePointer = {
   /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
   attested?: unknown;
 };
-export type PoolWriteResult = { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } };
+export type PoolWriteResult = { shape: string; body: { ok: boolean; id: string; unchanged?: boolean; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } };
+
+/**
+ * Shapes whose readers date a row by its updated_at or pick the newest row of the shape, so a write of one ALWAYS
+ * lands even when it changes no field (see "AN UNCHANGED WRITE IS A NO-OP" below). Found by reading every pool reader
+ * that consults updated_at, here and in the vessels that read the pool through this resolver:
+ *   timeShapedRhythm  rhythmDueScore ages staleness from updated_at (rhythm-conductor-tick, scope-earn-in,
+ *                     gap-check-supply); boredom-vessel and obsidian-vessel list rhythms newest-first under a limit;
+ *   rhythmPacing, gapClosingCadence, goalReachPolicy, goalDeficiencyPolicy
+ *                     read as the newest row of the shape (limit 1, sorted by updated_at);
+ *   composeCapacity, humanAskRoute
+ *                     the newest row of the shape wins (compose-slots, ui-write-passthrough).
+ * Trust-root and runner-only shapes (newest-wins in gap-policy and self-fact pins) always write anyway: every
+ * accepted write of one is attested afresh. A new reader of that kind adds its shape here.
+ */
+export const ALWAYS_WRITE_POOL_SHAPES: ReadonlySet<string> = new Set(['timeShapedRhythm', 'rhythmPacing', 'gapClosingCadence', 'goalReachPolicy', 'goalDeficiencyPolicy', 'composeCapacity', 'humanAskRoute']);
 
 /** One write applied to `all` (the loaded rows) in place; the caller saves when body.ok. Every check reads `all`, never
  *  a fresh load. `refusalsInto`: a batch's rows, so a recorded runner refusal is not overwritten by the batch's save. */
@@ -452,12 +470,23 @@ function applyPoolImpulseWrite(all: StandingImpulse[], pointer: PoolWritePointer
   };
   if (idx >= 0) {
     const existing = all[idx]!;
-    all[idx] = sign({
-      id,
+    const next = {
       shape: pointer.shape ?? existing.shape,
       body: stripCallerAttestation(pointer.body !== undefined ? pointer.body : existing.body),
       source: pointer.source ?? existing.source,
       status: pointer.status ?? existing.status,
+    };
+    // AN UNCHANGED WRITE IS A NO-OP. A write that would store exactly the row already stored (same shape, body, source
+    // and status; only the updated_at this write would stamp differs) rewrites nothing. Re-filed gaps mirror an
+    // identical row here in bursts, and each was a full rewrite of the pool file. Not for an attested row (every
+    // accepted trust-root or runner write is stamped afresh) nor ALWAYS_WRITE_POOL_SHAPES (read by their updated_at).
+    if (!attestation && !existing.attested && !ALWAYS_WRITE_POOL_SHAPES.has(next.shape) && next.shape === existing.shape
+      && next.source === existing.source && next.status === existing.status && canonicalJson(next.body) === canonicalJson(existing.body)) {
+      return { shape: 'poolImpulse_write', body: { ok: true, id, unchanged: true } };
+    }
+    all[idx] = sign({
+      id,
+      ...next,
       injected_at: existing.injected_at,
       updated_at: now,
       ...(attestation ? { attested: attestation } : {}),
@@ -481,7 +510,7 @@ function applyPoolImpulseWrite(all: StandingImpulse[], pointer: PoolWritePointer
 export function resolvePoolImpulseWrite(pointer: PoolWritePointer, auth?: PoolWriteAuth, runner?: { grant?: VerdictCorpusWriterGrant | null; principal?: string; why?: string }): PoolWriteResult {
   const all = loadImpulses();
   const r = applyPoolImpulseWrite(all, pointer, auth, runner);
-  if (r.body.ok) saveImpulses(all);
+  if (r.body.ok && !r.body.unchanged) saveImpulses(all, `write: 1 impulse(s) from ${pointer.source || 'unnamed'} (${r.body.id})`);
   return r;
 }
 
@@ -498,13 +527,15 @@ export function resolvePoolImpulseWriteMany(pointers: PoolWritePointer[], auth?:
   const all = loadImpulses();
   const refusals = { rows: all, recorded: 0 };
   const results = pointers.map((p) => applyPoolImpulseWrite(all, p, auth, undefined, refusals));
-  // A recorded runner refusal changed `all` too, so it is saved with the accepted writes.
-  const accepted = results.filter((r) => r.body.ok).length;
-  if (accepted > 0 || refusals.recorded > 0) {
-    saveImpulses(all);
-    // ONE LINE PER REWRITE, naming the writer, so pool rewrites are countable by caller from the log.
+  // A recorded runner refusal changed `all` too, so it is saved with the accepted writes. ONE LINE PER REWRITE, naming
+  // the writer, so pool rewrites are countable by caller from the log.
+  const written = results.filter((r) => r.body.ok && !r.body.unchanged).length;
+  const unchanged = results.filter((r) => r.body.ok && r.body.unchanged).length;
+  const refused = results.length - written - unchanged;
+  if (written > 0 || refusals.recorded > 0) {
     const from = [...new Set(pointers.map((p) => p.source || 'unnamed'))].join(',');
-    console.log(`[pool-impulse] batch write: ${accepted} impulse(s) from ${from}${accepted < pointers.length ? ` (${pointers.length - accepted} refused)` : ''}`);
+    const notes = [unchanged ? `${unchanged} unchanged` : '', refused ? `${refused} refused` : ''].filter(Boolean).join(', ');
+    saveImpulses(all, `batch write: ${written} impulse(s) from ${from}${notes ? ` (${notes})` : ''}`);
   }
   return results;
 }

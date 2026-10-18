@@ -409,14 +409,27 @@ function resolveModule(fromRel: string, spec: string, reader: SrcReader): { rel:
 }
 type TsModule = typeof import("typescript");
 let tsMod: TsModule | null | undefined;
-/** The TypeScript parser, loaded once on first use as scope-earn-in.ts loads it (typescript is a devDependency); null
- *  when it is not installed, and then nothing below can read a module or a check, so the guard decides nothing. */
+const requireTs = (): TsModule | null => createRequire(import.meta.url)("typescript") as TsModule;
+let tsLoader: () => TsModule | null = requireTs;
+/** What an arm record and a verify judgement carry when the guard could not run: it decided nothing, loudly. */
+export const EXPORT_GUARD_UNAVAILABLE = "typescript unavailable";
+/**
+ * The TypeScript parser, loaded once on first use as scope-earn-in.ts loads it (typescript is a devDependency); null
+ * when it is not installed, and then nothing below can read a module or a check, so the guard and the check writer's
+ * export list decide nothing. That is said once, loudly, and exportGuardUnavailable() lets each record say so too.
+ */
 function loadTs(): TsModule | null {
   if (tsMod === undefined) {
-    try { tsMod = createRequire(import.meta.url)("typescript") as TsModule; } catch { tsMod = null; }
+    let why = "not installed";
+    try { tsMod = tsLoader(); } catch (e) { tsMod = null; why = String((e as Error)?.message ?? e).split("\n")[0]!.slice(0, 160); }
+    if (!tsMod) console.warn(`[check-supply-admission] ${EXPORT_GUARD_UNAVAILABLE} (${why}): the missing-export guard and the check writer's export list decide nothing`);
   }
   return tsMod;
 }
+/** EXPORT_GUARD_UNAVAILABLE when the parser cannot be loaded, else null. */
+export function exportGuardUnavailable(): string | null { return loadTs() ? null : EXPORT_GUARD_UNAVAILABLE; }
+/** Test seam: replace the parser's loader (null restores it); the next use loads again. */
+export function __setTsLoaderForTests(f: (() => TsModule | null) | null): void { tsLoader = f ?? requireTs; tsMod = undefined; }
 const hasExport = (ts: TsModule, n: TS.Node): boolean => (ts.canHaveModifiers(n) ? ts.getModifiers(n) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
 const hasDefault = (ts: TsModule, n: TS.Node): boolean => (ts.canHaveModifiers(n) ? ts.getModifiers(n) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
 function bindingNames(ts: TsModule, name: TS.BindingName, out: string[]): void {
@@ -732,6 +745,8 @@ export type TestWritingJudgement = {
   stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof MISSING_EXPORT_STAGE;
   cause?: string;
   reason: string;
+  /** Set when the missing-export guard could not run (EXPORT_GUARD_UNAVAILABLE): it decided nothing. */
+  guard_decided_nothing?: string;
   check_file: string;
   edit_site: string | null;
   runs: Array<{ verdict: string; keys: string[]; red: string[]; unhandled: boolean }>;
@@ -773,7 +788,8 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });
   const missing = missingExportRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
   if (missing) return out(MISSING_EXPORT_STAGE, missing.reason, { edit_site: site.edit_site, runs });
-  return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs });
+  const unguarded = exportGuardUnavailable();
+  return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) });
 }
 
 /**

@@ -314,7 +314,32 @@ describe("F-ARM: the arm step refuses at attach and records it on the gap", () =
     const { id } = await landAndTick("me-sound", "goal-host-vessel", "src/index.ts", sound);
     const row = await storeRow(id);
     expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(ledgerOf(row)["guard_decided_nothing"]).toBeUndefined(); // typescript present: nothing changes
     expect(metaOf(row)["falsifier"]).toBe("class2");
     expect(judged).toContain(id);
+  });
+});
+
+describe("F-ARM: typescript unavailable is loud", () => {
+  it("[MUST-FAIL] with no parser the guard decides nothing, says so ONCE, and the armed record carries guard_decided_nothing", async () => {
+    const setLoader = csa["__setTsLoaderForTests"] as ((f: (() => null) | null) => void) | undefined;
+    expect(typeof setLoader).toBe("function");
+    const warned: string[] = [];
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    try {
+      setLoader!(() => { throw new Error("Cannot find module 'typescript'"); });
+      expect(refusalOf(ROUTE_EDIT_CHECK, "test/checks/route-edit-bd252f8c.check.ts", reader({ "src/index.ts": GOAL_HOST_INDEX }))).toBeNull();
+      expect((csa["exportGuardUnavailable"] as () => string | null)()).toBe("typescript unavailable");
+      const { id } = await landAndTick("me-nots", "goal-host-vessel", "src/index.ts", ROUTE_EDIT_CHECK);
+      const led = ledgerOf(await storeRow(id));
+      expect(led["state"]).toBe("armed");
+      expect(led["guard_decided_nothing"]).toBe("typescript unavailable");
+      expect(warned.filter((w) => w.includes("typescript unavailable") && w.includes("decide nothing")).length).toBe(1);
+    } finally {
+      setLoader?.(null);
+      console.warn = () => {};
+    }
+    // restored: the guard refuses again
+    expect(refusalOf(ROUTE_EDIT_CHECK, "test/checks/route-edit-bd252f8c.check.ts", reader({ "src/index.ts": GOAL_HOST_INDEX }))?.symbol).toBe("shellResult");
   });
 });

@@ -68,7 +68,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, exportGuardUnavailable, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -115,6 +115,8 @@ type Ledger = {
   non_attempt_streak?: number;
   /** The new titles the arm step judged on the last attempt (kept so the next attempt can be told which check did not reproduce). */
   judged_titles?: string[];
+  /** Set on an armed record when the missing-export guard could not run (typescript unavailable): it decided nothing. */
+  guard_decided_nothing?: string;
 };
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
@@ -778,6 +780,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // for the defect (2f36f62, route-edit-bd252f8c: mod["shellResult"] on goal-host src/index.ts). Static, before anything
     // runs; the module's real exports come from the same clone the check imports (check-supply-admission.ts).
     const missing = missingExportRefusal(src, ledger.test_file, vesselReader);
+    const unguarded = exportGuardUnavailable();
     // A check that only asserts a name exists (or is defined, or has a type) is closed by adding the name: never armed.
     const ex = existenceOnlyCheck(src, titles);
     if (ex.existence_only) {
@@ -818,7 +821,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0 },
+      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) },
     }, { birthVerdict: stamp }); // the verdict minted by the run above: the seam honours nothing else
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

@@ -19,10 +19,11 @@
 // qa: a named import of a missing export fails at LOAD (bun ESM "Export named … not found"), so the wrong_reason for it
 // names the cure: reference an export on the module's list and assert its behaviour (a namespace typeof red on a
 // missing name is refused at this verify, below, so it is not taught).
-// qa ruling (F-ARM, re-scoping control (a)): a red that REQUIRES a missing export (typeof X "function"/"object", calls
-// it, reads its members) is red on every tree, so the verify refuses it, check_references_missing_export:<name>
-// (missingExportRefusal, the attach guard; the two landed instances, 2f36f62's shellResult and 7b54fc7's AuthCache, are
-// replayed below). A check that asserts a name's ABSENCE (typeof X "undefined") still passes.
+// Per the user ruling of 2026-10-18 07:09:57Z (the check-writer repair), F-ARM re-scopes control (a): a red that
+// REQUIRES a missing export (typeof X "function"/"object", calls it, reads its members) is red on every tree, so the
+// verify refuses it, check_references_missing_export:<name> (missingExportRefusal, the attach guard; the two landed
+// instances, 2f36f62's shellResult and 7b54fc7's AuthCache, are replayed below). A check that asserts a name's ABSENCE
+// (typeof X "undefined") still passes.
 //
 // REAL BUN: every judgement below is bun's own output on fixtures under TMPDIR, run with the bun on PATH and, when it
 // is present, the container's bun 1.4.2 (BUN_ALT_BINARY, else $TMPDIR/bun142/node_modules/.bin/bun). A missing 1.4.2
@@ -237,8 +238,8 @@ for (const [label, bin, present] of [["host bun", HOST_BUN, true], ["bun 1.4.2",
       expect(j).toMatchObject({ ok: true, stage: null });
     });
 
-    // qa: "X must exist" gaps. Re-scoped (qa ruling, F-ARM): a red that requires the missing name is refused; a check
-    // asserting a name's absence still passes.
+    // qa: "X must exist" gaps. Re-scoped (F-ARM, by the user ruling of 2026-10-18 07:09:57Z, the check-writer repair):
+    // a red that requires the missing name is refused; a check asserting a name's absence still passes.
     t("[MUST-FAIL] (qa a, re-scoped) a NAMESPACE import of a missing export, asserted typeof \"function\", is refused: check_references_missing_export", async () => {
       const j = await verdict("tw-ns", `import * as mod from "../../src/x";\ntest("newThing exists", () => { expect(typeof (mod as Record<string, unknown>)["newThing"]).toBe("function"); });\n`);
       expect(j).toMatchObject({ ok: false, stage: "check_references_missing_export", edit_site: "src/x.ts" });

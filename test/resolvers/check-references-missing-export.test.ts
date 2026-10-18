@@ -207,7 +207,7 @@ describe("F-ARM: controls", () => {
     }
   });
 
-  it("[CONTROL] a read that only asserts a missing name's ABSENCE requires nothing (qa ruling on verify control (a)); negated or mixed with a requiring read, it refuses", () => {
+  it("[CONTROL] a read that only asserts a missing name's ABSENCE requires nothing (verify control (a), re-scoped by the user ruling of 2026-10-18 07:09:57Z (the check-writer repair)); negated or mixed with a requiring read, it refuses", () => {
     const H = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/x";\n`;
     for (const body of [
       `expect(typeof mod.nope).toBe("undefined");`,

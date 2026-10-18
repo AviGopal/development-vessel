@@ -509,7 +509,8 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
  * name and is skipped. A use is attributed to the binding IN SCOPE (a shadowing local of the same name is not the
  * module), and a named or default import that is used only as a type, or not at all, is erased by bun and names nothing.
  *
- * `absence` marks a member read whose only use is an assertion that the name is NOT there (qa ruling on control (a)):
+ * `absence` marks a member read whose only use is an assertion that the name is NOT there (control (a), re-scoped by
+ * the user ruling of 2026-10-18 07:09:57Z (the check-writer repair)):
  * `expect(typeof R).toBe("undefined")` (toEqual / toStrictEqual too), `expect(R).toBeUndefined()`,
  * `expect(R).toBe(undefined)`, `expect(typeof R === "undefined").toBe(true)` and `expect(typeof R !== "undefined").toBe(false)`
  * (and the same with `R === undefined`), none of them negated by `.not`. Every other read, a named or default import

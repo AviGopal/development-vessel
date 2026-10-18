@@ -1112,15 +1112,22 @@ export function parentPredicate(meta: Record<string, unknown>): Record<string, u
   return predicate;
 }
 
+/** A step an OBSERVE decomposition would write: the same validation as a learn one, its verdict, nothing written.
+ *  `refusal` is the arming's own refusal text for the step (as a learn decomposition records it), null when it would arm. */
+export interface WouldBeChild { id: string; summary: string; edit_site: string; check: Record<string, unknown>; refusal: string | null }
+
 /** THE DECOMPOSITION ARMING, extracted from decomposeGap on F2's version (BOUNDARY.md 1.6): every proposed check
  *  (the parent's own, each step's) is validated, run red-before-write by the seam's own judge, and written with the
  *  minted birth verdict only. The residue hands over the LLM's parsed proposal and nothing else: the parent's
- *  falsifier and the judge are derived here, never passed in. */
+ *  falsifier and the judge are derived here, never passed in.
+ *  OBSERVE (`opts.observe`, a dispatch's learning_mode "observe"): every validation runs, the judge included (it reads,
+ *  and mints an in-process stamp only), and NOTHING is written: no child, no parent decomposition, no birth verdict.
+ *  The would-be children carry each step's verdict. */
 export async function armDecomposition(
   parent: Record<string, unknown>,
   parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown; parent_check?: unknown },
-  opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps } = {},
-): Promise<{ written: string[]; reason: string; parent_check?: string }> {
+  opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps; observe?: boolean } = {},
+): Promise<{ written: string[]; reason: string; parent_check?: string; observe?: true; would_be_children?: WouldBeChild[] }> {
   // THE DEPTH REFUSAL IS THE GATE'S, FIRST (qa): before any read or write, so a caller that skips decomposeGap's
   // pre-LLM check (the residue's cost short-circuit) still cannot arm a step or a non-dissent child. One function
   // on both paths, so the reasons cannot drift.
@@ -1131,6 +1138,7 @@ export async function armDecomposition(
   const scope = await autonomyScope();
   const written: string[] = [];
   const refusals: string[] = [];
+  const wouldArm = new Map<number, Record<string, unknown>>(); // OBSERVE: step k -> the check it would be written with
 
   // ONE VALIDATION CHAIN for every proposed check: the parent's own (k=0) and each step's. `siblings` are
   // checks a step may not restate (the parent's pre-existing one, and a parent check proposed in this call).
@@ -1315,6 +1323,7 @@ export async function armDecomposition(
     // A step carries its OWN check (the parent's is refused above: one step will not flip it), but the
     // operator's hand-off is the parent's: a step of a directed gap is directed too, or it is withheld.
     const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(childDirected ? { directed: true } : {}), ...cleared, ...childPredicate };
+    if (opts.observe) { wouldArm.set(k, childPredicate); continue; } // OBSERVE: validated and judged, never written
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
       childVerdict ? { birthVerdict: childVerdict } : undefined,
@@ -1326,8 +1335,9 @@ export async function armDecomposition(
   // of its wording: when there are refusals they are the reason and the decomposer's cannot_falsify rides alongside,
   // verbatim; with no refusals (no step proposed) it is the reason alone, exactly as before.
   const cf = typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify.trim() ? parsed.cannot_falsify.trim().slice(0, 200) : null;
-  const stepReason = written.length > 0
-    ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "")
+  const armedN = written.length + wouldArm.size; // wouldArm is filled only under observe, written only outside it
+  const stepReason = armedN > 0
+    ? `${opts.observe ? "would write" : "wrote"} ${armedN} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "")
     : refusals.length > 0 ? `no valid step: ${refusals.join("; ")}` + (cf ? `; cannot_falsify: ${cf}` : "")
     : cf ? `cannot_falsify: ${cf}` : "no valid step: none proposed";
   // CHANGE-37c: a decomposition's children ACCUMULATE. Each call wrote `children: written` fresh, so any re-decomposition
@@ -1347,10 +1357,10 @@ export async function armDecomposition(
     } catch { children.push(c); }
   }
   for (const c of written) if (!children.includes(c)) children.push(c);
-  const reason = (parentCheck ? "wrote the parent's own check; " : "") + stepReason;
+  const reason = (parentCheck ? (opts.observe ? "would write the parent's own check; " : "wrote the parent's own check; ") : "") + stepReason;
   // ONE WRITE OF THE PARENT: the decomposition record, and in parent-check mode its new check. The verdict
-  // the judge just took is handed to the seam in-process so it is not taken twice.
-  try {
+  // the judge just took is handed to the seam in-process so it is not taken twice. OBSERVE: not written.
+  if (!opts.observe) try {
     const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
     if (parentCheck) {
       // verify_shape is blanked, not deleted: the store carries an omitted key forward.
@@ -1361,7 +1371,15 @@ export async function armDecomposition(
       parentCheck && parentVerdict ? { birthVerdict: parentVerdict } : undefined,
     );
   } catch { /* the children stand on their own */ }
-  console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}`);
+  console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}${opts.observe ? " (observe: nothing written)" : ""}`);
+  if (opts.observe) {
+    const would_be_children: WouldBeChild[] = (parsed.steps ?? []).slice(0, 3).map((st, i) => {
+      const n = i + 1;
+      return { id: `${parentId}-step-${n}`, summary: `[step ${n} of ${parentId}] ${String(st.change ?? "").trim()}`, edit_site: String(st.edit_site ?? "").replace(/:\d+.*$/, ""),
+        check: wouldArm.get(n) ?? ((st.falsifier ?? {}) as Record<string, unknown>), refusal: wouldArm.has(n) ? null : (refusals.find((r) => r.startsWith(`step ${n}: `)) ?? "not armed") };
+    });
+    return { written, reason, ...(opts.parentCheck ? { parent_check: parentCheck ? "would be written" : parentCheckNote } : {}), observe: true, would_be_children };
+  }
   return { written, reason, ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote } : {}) };
 }
 

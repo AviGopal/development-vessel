@@ -595,7 +595,11 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const before = await resolveSubstrateGap({ type: "substrateGap", id: gid } as never).catch(() => null);
       const parentRow = (((before as { body?: { gaps?: Array<Record<string, unknown>> } } | null)?.body?.gaps) ?? []).find((g) => String(g.id) === gid);
       const priorChildren = new Set<string>(((((parentRow?.classification_metadata ?? {}) as Record<string, unknown>).decomposition as { children?: unknown } | undefined)?.children as string[] | undefined) ?? []);
-      const r = await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid } as Parameters<typeof resolveGapToFeature>[0]);
+      // OBSERVE: the pointer's learning_mode rides to the decomposition, which then writes nothing (gap-admission.ts).
+      const observe = (pointer as { learning_mode?: unknown }).learning_mode === "observe";
+      const r = observe
+        ? await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid, learning_mode: "observe" } as Parameters<typeof resolveGapToFeature>[0])
+        : await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid } as Parameters<typeof resolveGapToFeature>[0]);
       const body = ((r as { body?: unknown }).body ?? {}) as Record<string, unknown>;
       const written = Array.isArray(body.children) ? (body.children as unknown[]).filter((c): c is string => typeof c === "string") : [];
       return { shape: "gapDecomposition", body: { ...body, created: before ? written.filter((c) => !priorChildren.has(c)) : [], prior_children: priorChildren.size } };

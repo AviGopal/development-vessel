@@ -17,7 +17,9 @@ describe("gapDecomposition: the existing writer, advertised", () => {
     expect(read("config.ts")).toContain('"gapDecomposition", // CHANGE-35');
     const r = read("routes/impulses.ts");
     expect(r).toContain('case "gapDecomposition": {');
-    expect(r).toContain('const r = await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid }');
+    // the learn call, and the observe call carrying the pointer's mode (decompose-observe.test.ts)
+    expect(r).toContain(': await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid } as Parameters<typeof resolveGapToFeature>[0]);');
+    expect(r).toContain('? await resolveGapToFeature({ type: "gap_to_feature", decompose_gap_id: gid, learning_mode: "observe" } as Parameters<typeof resolveGapToFeature>[0])');
     expect(r).toContain('return { shape: "gapDecomposition", body: { ...body, created: before ? written.filter((c) => !priorChildren.has(c)) : [], prior_children: priorChildren.size } };');
   });
 

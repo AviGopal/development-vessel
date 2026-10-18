@@ -34,7 +34,7 @@ import { gapEditSite, composeEligibilitySkipReason, isNonAttemptComposeResult } 
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
 import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
-import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps } from "../judge/gap-admission.js";
+import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
 
 // The evaluator's tree is ONE resolver (lib/evaluator-tree.ts), shared with the class-1 classifier in substrate-gap
@@ -692,8 +692,8 @@ async function defaultDecomposeLlm(prompt: string, maxTokens: number): Promise<s
 
 export async function decomposeGap(
   parent: Record<string, unknown>,
-  opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps } = {},
-): Promise<{ written: string[]; reason: string; parent_check?: string; raw_len?: number; raw_tail?: string }> {
+  opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps; observe?: boolean } = {},
+): Promise<{ written: string[]; reason: string; parent_check?: string; raw_len?: number; raw_tail?: string; observe?: true; would_be_children?: WouldBeChild[]; edit_site?: string; excerpt?: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
   { const refused = decompositionRefusal(parent); if (refused) return { written: [], reason: refused }; }
@@ -766,9 +766,12 @@ export async function decomposeGap(
     // truncated reply ends mid-JSON), so they ride the answer, and the route's body, beside it.
     const rawTail = raw.slice(-300).replace(/[\x00-\x1f\x7f\s]+/g, " ").trim();
     console.log(`[gap-decompose] ${parentId}: unparseable decomposition (reply ${raw.length} chars, ends: ${rawTail})`);
-    return { written: [], reason: "unparseable decomposition", raw_len: raw.length, raw_tail: rawTail };
+    return { written: [], reason: "unparseable decomposition", raw_len: raw.length, raw_tail: rawTail, ...(opts.observe ? { observe: true as const, edit_site: site, excerpt: excerpt.slice(0, 1500) } : {}) };
   }
-  return armDecomposition(parent, parsed, opts);
+  // OBSERVE (opts.observe): the arming validates and judges every step and writes nothing (armDecomposition); the
+  // answer also says which edit site and excerpt the draft was given.
+  const armed = await armDecomposition(parent, parsed, opts);
+  return opts.observe ? { ...armed, edit_site: site, excerpt: excerpt.slice(0, 1500) } : armed;
 }
 
 export interface LocalizeResult {
@@ -986,6 +989,8 @@ export interface GapToFeaturePointer {
   dry_run?: boolean;
   /** How many open gaps to consider when auto-picking. */
   limit?: number;
+  /** "observe" (goal-host's observe dispatch): read by the decompose_gap_id branch only, which then writes nothing. */
+  learning_mode?: "observe" | "learn";
 }
 
 /**
@@ -1981,8 +1986,12 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const read = await resolveSubstrateGap({ type: "substrateGap", id: decomposeId } as never);
     const found = ((read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? []).find((g) => String(g.id) === decomposeId);
     if (!found) return { shape: "gapToFeatureReport", body: { ok: false, stage: "decompose", error: "gap not found: " + decomposeId } };
-    const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true });
-    return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason, ...(d.raw_len !== undefined ? { raw_len: d.raw_len, raw_tail: d.raw_tail } : {}) } };
+    // OBSERVE (the pointer's learning_mode "observe", goal-host's observe dispatch): the decomposer drafts and validates
+    // exactly as in learn and writes nothing; the answer carries the would-be children and their verdicts.
+    const observe = (pointer as { learning_mode?: unknown }).learning_mode === "observe";
+    const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true, ...(observe ? { observe: true } : {}) });
+    return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason, ...(d.raw_len !== undefined ? { raw_len: d.raw_len, raw_tail: d.raw_tail } : {}),
+      ...(observe ? { observe: true, would_be_children: d.would_be_children ?? [], edit_site: d.edit_site ?? null, excerpt: d.excerpt ?? null } : {}) } };
   }
   // 0-. AUTO-REVERT CATCH-UP, before the clone-heads fingerprint: a #1 regressed settlement from the attempt
   // sweep moves no HEAD, so behind the fingerprint it would wait for an unrelated landing. Not awaited.

@@ -615,11 +615,20 @@ async function defaultDecomposeLlm(prompt: string): Promise<string> {
 export async function decomposeGap(
   parent: Record<string, unknown>,
   opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps } = {},
-): Promise<{ written: string[]; reason: string; parent_check?: string }> {
+): Promise<{ written: string[]; reason: string; parent_check?: string; raw_len?: number; raw_tail?: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
   { const refused = decompositionRefusal(parent); if (refused) return { written: [], reason: refused }; }
-  const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
+  let site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
+  // NO EDIT SITE, NO INVENTORY: the prompt said "EDIT SITE (none)" with no excerpt and no test files yet required
+  // each step to change one existing file, and the arming refused every step for naming none. Localize the parent
+  // from its own evidence (as the check supply does, without the LLM) and draft against that file; when nothing
+  // localises to a readable file in the clone, refuse before the LLM, as the scan's supply precondition does.
+  if (!site) {
+    const loc = await localizeGap(parent, { useLlm: false });
+    if (!loc || !existsSync(join(vesselsCloneRoot(), loc.file.replace(/^repos\//, "")))) return { written: [], reason: "needs_information: no readable edit site (no edit_site and nothing localises)" };
+    site = loc.file;
+  }
   const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
   const siteVessel = siteMatch?.[1] ?? "";
   let excerpt = "";
@@ -650,7 +659,13 @@ export async function decomposeGap(
     return { written: [], reason: "llm call failed: " + String(err) };
   }
   let parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown; parent_check?: unknown } = {};
-  try { const a = raw.indexOf("{"), b = raw.lastIndexOf("}"); parsed = JSON.parse(raw.slice(a, b + 1)); } catch { return { written: [], reason: "unparseable decomposition" }; }
+  try { const a = raw.indexOf("{"), b = raw.lastIndexOf("}"); parsed = JSON.parse(raw.slice(a, b + 1)); } catch {
+    // The reason is pinned (judge-split); the reply's length and tail are the only evidence of why it failed (a
+    // truncated reply ends mid-JSON), so they ride the answer, and the route's body, beside it.
+    const rawTail = raw.slice(-300).replace(/[\x00-\x1f\x7f\s]+/g, " ").trim();
+    console.log(`[gap-decompose] ${parentId}: unparseable decomposition (reply ${raw.length} chars, ends: ${rawTail})`);
+    return { written: [], reason: "unparseable decomposition", raw_len: raw.length, raw_tail: rawTail };
+  }
   return armDecomposition(parent, parsed, opts);
 }
 
@@ -1864,7 +1879,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const found = ((read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? []).find((g) => String(g.id) === decomposeId);
     if (!found) return { shape: "gapToFeatureReport", body: { ok: false, stage: "decompose", error: "gap not found: " + decomposeId } };
     const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true });
-    return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason } };
+    return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason, ...(d.raw_len !== undefined ? { raw_len: d.raw_len, raw_tail: d.raw_tail } : {}) } };
   }
   // 0-. AUTO-REVERT CATCH-UP, before the clone-heads fingerprint: a #1 regressed settlement from the attempt
   // sweep moves no HEAD, so behind the fingerprint it would wait for an unrelated landing. Not awaited.

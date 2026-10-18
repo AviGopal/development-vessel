@@ -207,8 +207,14 @@ describe("directed, unparseable, cannot_falsify", () => {
     const id = parent("unparseable");
     proposal("no json here");
     const { result } = await decompose(id);
-    expect(result.body).toEqual({ ok: false, stage: "decompose", gap_id: id, children: [], reason: "unparseable decomposition" });
+    expect(result.body).toEqual({ ok: false, stage: "decompose", gap_id: id, children: [], reason: "unparseable decomposition", raw_len: 12, raw_tail: "no json here" });
     expect(store.writes).toEqual([]);
+  });
+  it("[CONTROL] a parseable proposal's body carries no raw_* keys", async () => {
+    const id = parent("parseable");
+    proposal({ steps: [], cannot_falsify: "the defect is a design choice" });
+    const { result } = await decompose(id);
+    expect(Object.keys(result.body as Row).filter((k) => k.startsWith("raw_"))).toEqual([]);
   });
   it("[PIN] cannot_falsify with no steps: recorded as the reason on the parent", async () => {
     const id = parent("cannot");

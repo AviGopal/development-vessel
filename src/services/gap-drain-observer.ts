@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFi
 import { join } from "path";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ComposeEligibilitySkipReason } from "../judge/gap-eligibility.js";
+import type { CHECK_SUPPLY_FAMILY, checkSupplyNode, dispatchVerdict, outcomeBoundsOf, probeDispatch } from "../resolvers/gap-check-supply.js";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
@@ -64,6 +65,21 @@ const livelockHeldCounts = new Map<string, number>();
 /** Expired livelock holds already logged ("hold expired" once per livelock gap and named gap). */
 const livelockExpiredLogged = new Set<string>();
 
+/** remedy_effectiveness_observer's lookback window when its pointer names none, and the livelock hold's window for a
+ *  livelock gap that carries no window_hours of its own. Defined here, read there: this module is on the evaluator's
+ *  import path (substrate-gap's compose-nudge telemetry), so it imports no lane-editable resolver for a constant. */
+export const DEFAULT_WINDOW_HOURS = 6;
+
+/** gap-check-supply's dispatch-outcome reader, passed in by the caller (index.ts) rather than imported: this module is
+ *  on the evaluator's import path, and gap-check-supply (with what it imports) must not be put on it. */
+export interface DrainOutcomeReader {
+  probeDispatch: typeof probeDispatch;
+  dispatchVerdict: typeof dispatchVerdict;
+  outcomeBoundsOf: typeof outcomeBoundsOf;
+  checkSupplyNode: typeof checkSupplyNode;
+  CHECK_SUPPLY_FAMILY: typeof CHECK_SUPPLY_FAMILY;
+}
+
 /**
  * When a livelock gap's hold ends. Nothing closes a remedy_livelock gap (remedy_effectiveness_observer only opens
  * them), so a hold keyed on "open" alone would never lift. It lasts at most one observer window from detection:
@@ -77,7 +93,6 @@ export async function livelockHoldUntilMs(row: Record<string, unknown>, nowMs: n
   const detected = Date.parse(String(row["detected_at"] ?? row["created_at"] ?? ""));
   if (!Number.isFinite(detected)) return null;
   const stamped = Number(meta["window_hours"]);
-  const { DEFAULT_WINDOW_HOURS } = await import("../resolvers/remedy-effectiveness-observer.js");
   const windowMs = (Number.isFinite(stamped) && stamped > 0 ? stamped : DEFAULT_WINDOW_HOURS) * 3_600_000;
   if (detected > nowMs + windowMs) return null;
   const review = Date.parse(String(meta["review_by"] ?? row["review_by"] ?? ""));
@@ -166,6 +181,8 @@ export function __flushComposeNudgeSkipSummaryForTests(): void {
 }
 
 export class GapDrainObserver {
+  constructor(private readonly outcome: DrainOutcomeReader) {}
+
   private ws: WebSocket | null = null;
   private shouldRun = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -376,12 +393,12 @@ export class GapDrainObserver {
     let boEntry = gd.__drainBackoff.get(gapId);
     // A goal-host remedy is judged by its dispatch OUTCOME, not by goal-host's 202 ACK: the ACK keeps the backoff with
     // the dispatch id, and once that window has passed the outcome is read (GET /executions/:id, gap-check-supply's
-    // probeDispatch). Reached clears the backoff and the drain proceeds; still running waits another window, but only
-    // within check-supply's dispatch_timeout_hours (dispatchVerdict over the gap-check-supply rhythm, the bound that
-    // reader already applies; an entry with no dispatched_at is past it); anything else (not reached, unreadable, or
-    // running past the bound) grows the backoff and drops the id, so the next window re-dispatches.
+    // probeDispatch, passed in as this.outcome). Reached clears the backoff and the drain proceeds; still running waits
+    // another window, but only within check-supply's dispatch_timeout_hours (dispatchVerdict over the gap-check-supply
+    // rhythm, the bound that reader already applies; an entry with no dispatched_at is past it); anything else (not
+    // reached, unreadable, or running past the bound) grows the backoff and drops the id, so the next window re-dispatches.
     if (boEntry?.dispatch_id && Date.now() >= boEntry.until) {
-      const { probeDispatch, dispatchVerdict, outcomeBoundsOf, checkSupplyNode, CHECK_SUPPLY_FAMILY } = await import("../resolvers/gap-check-supply.js");
+      const { probeDispatch, dispatchVerdict, outcomeBoundsOf, checkSupplyNode, CHECK_SUPPLY_FAMILY } = this.outcome;
       const { readFamilyRhythm } = await import("../resolvers/rhythm-conductor-tick.js");
       const probe = await probeDispatch(String(boEntry.dispatch_id));
       const status = probe.http === 200 ? String(probe.status ?? "").toLowerCase() : "";

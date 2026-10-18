@@ -9,6 +9,7 @@ import { startAutocompleteConceptWriter } from "./observers/autocomplete-concept
 import { startFailureCreditObserver } from "./observers/failure-credit-observer.js";
 import { createTrendExpectationCheck } from "./observers/trend-expectation-check.js";
 import { GapDrainObserver } from "./services/gap-drain-observer.js";
+import * as gapCheckSupply from "./resolvers/gap-check-supply.js";
 import { admitInFlight, releaseInFlight, runInFlight, inFlightOldestMs, inFlightProgressHealth, type InFlightRecord } from "./lib/compose-progress.js";
 import { markerQuiesced } from "./lib/quiesce-marker.js";
 import { landingLeaseRefusalCounts } from "./resolvers/substrate-gap.js";
@@ -405,7 +406,9 @@ startAutocompleteConceptWriter();
 startFailureCreditObserver();
 if (process.env["GAP_DRAIN_OBSERVER"] !== "0") {
   try {
-    const gapDrainObserver = new GapDrainObserver();
+    // The drain observer reads a goal-host remedy's outcome with gap-check-supply's reader, handed in here: the observer
+    // is on the evaluator's import path and must not import that resolver itself (evaluator-grant-scan).
+    const gapDrainObserver = new GapDrainObserver(gapCheckSupply);
     gapDrainObserver.start();
   } catch (err) {
     console.log("[gap-drain-observer] failed to start (non-fatal):", err);

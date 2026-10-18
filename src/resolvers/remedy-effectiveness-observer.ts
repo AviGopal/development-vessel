@@ -3,6 +3,7 @@ import { selfAuthHeaders } from "../lib/self-auth.js";
 import { join } from "path";
 import { WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { DEFAULT_WINDOW_HOURS } from "../services/gap-drain-observer.js";
 
 /**
  * remedy_effectiveness_observer — closes the law-6 blind spot where a gap's
@@ -50,9 +51,6 @@ export interface RemedyEffectivenessObserverPointer {
 }
 
 const DEFAULT_EMIT = "http://127.0.0.1:8090/v2/impulses/resolve";
-/** The lookback window when the pointer names none. Exported for the drain observer's livelock hold, which expires a
- *  livelock gap that carries no window of its own at detected_at plus this. */
-export const DEFAULT_WINDOW_HOURS = 6;
 const DEFAULT_API = "http://127.0.0.1:8080";
 
 interface DrainEntry {

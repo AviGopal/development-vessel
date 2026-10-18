@@ -68,7 +68,9 @@ beforeAll(async () => {
     priorStore = null;
   }
   const { GapDrainObserver } = await import("../../src/services/gap-drain-observer.js");
-  makeObserver = () => new GapDrainObserver() as unknown as Obs;
+  // The outcome reader index.ts hands the observer in production.
+  const gapCheckSupply = await import("../../src/resolvers/gap-check-supply.js");
+  makeObserver = () => new GapDrainObserver(gapCheckSupply) as unknown as Obs;
 });
 
 afterAll(() => {

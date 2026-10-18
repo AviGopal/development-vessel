@@ -338,6 +338,55 @@ export function gapIsBackedOff(
   return elapsed < wait;
 }
 
+/**
+ * THE RECONCILE SKIP: a low-confidence (or high-confidence-miss), not-yet-investigated reconcile gap whose
+ * approach decisions record >= 2 non-landings is skipped rather than re-dispatched. Null when it does not apply.
+ * `pred` is the pick's own predictLand when the caller already has it.
+ */
+export function reconcileSkipOf(gap: Record<string, unknown>, pred?: { p: number }): { failed_decisions: number; predicted_p: number } | null {
+  const predR = pred ?? predictLand(gap);
+  const mR = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+  if (!((predR.p < 0.35 || isHighConfidenceMiss(mR.approach_decisions)) && mR.investigated_at === undefined)) return null;
+  const isReconcileGap = String(gap.category ?? "").includes("reconcile") || String(gap.summary ?? "").includes("reconcile");
+  const failedAttempts = Array.isArray(mR.approach_decisions) ? mR.approach_decisions.filter((d: any) => d.outcome?.landed === false).length : 0;
+  return isReconcileGap && failedAttempts >= 2 ? { failed_decisions: failedAttempts, predicted_p: predR.p } : null;
+}
+
+export type PickRefusalPredicate = "in_flight" | "cooldown" | "site_cooldown" | "backoff" | "reconcile_skip";
+/**
+ * THE PICK BRAKES AS ONE PREDICATE: in-flight hold, per-gap and per-site cooldown, durable backoff and (when asked)
+ * the reconcile skip. The first that refuses, named, with what it read; null when the gap may be picked.
+ *
+ * Every one of these was applied on the AUTO-pick path only, so the targeted path (gap-drain-observer posts
+ * gap_to_feature WITH gap_id on every completion scan) bypassed all of them: one reconcile gap at failed_attempts
+ * 138, whose backoff is the 24 h cap, was dispatched ~10x/h. The auto-pick filter and the targeted entry now both
+ * ask this. The auto-pick filter leaves the reconcile skip to its post-selection step (it routes, not filters).
+ */
+export function gapPickRefusal(
+  g: Record<string, unknown>,
+  nowMs: number,
+  opts: { state?: LineageBackoffState; reconcile?: boolean } = {},
+): { predicate: PickRefusalPredicate; detail: Record<string, unknown> } | null {
+  const id = String(g.id ?? "");
+  if (composeInFlight(id)) return { predicate: "in_flight", detail: {} };
+  const sinceGap = nowMs - (gapComposeLastAttemptAt.get(id) ?? 0);
+  if (sinceGap < GAP_COMPOSE_COOLDOWN_MS) return { predicate: "cooldown", detail: { remaining_ms: GAP_COMPOSE_COOLDOWN_MS - sinceGap } };
+  const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
+  const sinceSite = nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0);
+  if (siteKey && String(g.source ?? "") !== "human_reported" && sinceSite < SITE_COMPOSE_COOLDOWN_MS) {
+    return { predicate: "site_cooldown", detail: { edit_site: siteKey, remaining_ms: SITE_COMPOSE_COOLDOWN_MS - sinceSite } };
+  }
+  const state = opts.state ?? lineageBackoffState(g, new Map([[id, g]]));
+  if (gapIsBackedOff(g, nowMs, state)) {
+    return { predicate: "backoff", detail: { lineage_attempts: state.attempts, depth: state.depth, remaining_ms: gapBackoffMs(state.attempts) - (nowMs - (state.lastFailedAtMs ?? nowMs)) } };
+  }
+  if (opts.reconcile) {
+    const skip = reconcileSkipOf(g);
+    if (skip) return { predicate: "reconcile_skip", detail: skip };
+  }
+  return null;
+}
+
 // ───────────────────────────── LOCALIZATION (2026-06-28, intermediate task #5) ─────────────────────────────
 // THE UNCLOG STEP. feature_compose LANDS FAVORABLE when handed a gap with a CONCRETE
 // edit-site (a named existing file); it free-drafts un-verifiable code otherwise. But
@@ -2102,11 +2151,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const eligible = gaps.filter((g) => {
       const holder = predicateHolds.get(String(g.id ?? ""));
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
-      if (composeInFlight(String(g.id ?? ""))) { inFlightLines.push(String(g.id)); return false; }
       { const why = crossNodeLeaseSkip(g, nowMs, pickNode, GAP_COMPOSE_COOLDOWN_MS); if (why) { crossNodeLines.push(`${String(g.id)}: ${why}`); return false; } }
-      if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
-      const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
-      if (siteKey && String(g.source ?? "") !== "human_reported" && nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0) < SITE_COMPOSE_COOLDOWN_MS) return false;
       const state = lineageBackoffState(g, gapsById);
       if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
         lineageCapped++;
@@ -2117,12 +2162,15 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
         lineageSpendCapped++;
         return false;
       }
-      if (gapIsBackedOff(g, nowMs, state)) {
+      // The shared pick brakes (gapPickRefusal), the same predicate the targeted entry asks below.
+      const refusal = gapPickRefusal(g, nowMs, { state });
+      if (refusal?.predicate === "in_flight") { inFlightLines.push(String(g.id)); return false; }
+      if (refusal?.predicate === "backoff") {
         backoffExcluded++;
         if (state.depth > deepestLineage) deepestLineage = state.depth;
         return false;
       }
-      return true;
+      return refusal === null;
     });
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
@@ -2170,6 +2218,19 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   {
     const refused = targetedComposeExclusion(gap, pointer as Parameters<typeof targetedComposeExclusion>[1]);
     if (refused) return refused;
+  }
+  // THE PICK BRAKES FOR THE TARGETED ENTRY (gapPickRefusal, the auto-pick filter's predicate). A targeted pick
+  // that is not directed (gap-drain-observer sends {gap_id, triggered_by:"gap-drain"}) is refused while the gap is
+  // in flight, cooling down, backed off or reconcile-skipped, before any decision, cooldown stamp or in-flight
+  // mark, with a non-attempt body naming the predicate so the caller keeps its own backoff. A directed pick (the
+  // explicitness marker targetedComposeExclusion also honours) and a dry run bypass, as before.
+  if (pointer.gap_id && pointer.dry_run !== true && (pointer as { directed?: boolean }).directed !== true) {
+    const refusal = gapPickRefusal(gap, Date.now(), { reconcile: true });
+    if (refusal) {
+      const key = `pick_refused_${refusal.predicate}`;
+      console.log(`[gap-to-feature] targeted pick refused: gap ${String(gap.id ?? "")} → ${JSON.stringify({ [refusal.predicate]: 1 })} (${JSON.stringify(refusal.detail)}; triggered_by=${String((pointer as { triggered_by?: string }).triggered_by ?? "-")})`);
+      return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", verdict: "REFUSED", reason: key, refused_by: refusal.predicate, detail: refusal.detail, gap_id: gap.id, gap_category: gap.category, non_attempt: true } };
+    }
   }
 
   // OWNER ROUTING FOR DIRECTED GAP WORK (decentralized-compose-ownership). Auto-picks admit only
@@ -2224,10 +2285,10 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       const alreadyInvestigated = mR.investigated_at !== undefined;
       if ((lowConf || highConfMiss) && !alreadyInvestigated) {
         const reason = highConfMiss ? "high_confidence_miss" : "low_confidence_pick";
-        const isReconcileGap = String(gap.category ?? "").includes("reconcile") || String(gap.summary ?? "").includes("reconcile");
-        const failedAttempts = Array.isArray(mR.approach_decisions) ? mR.approach_decisions.filter((d: any) => d.outcome?.landed === false).length : 0;
-        if (isReconcileGap && failedAttempts >= 2) {
-          await resolveDispatchGoal({ type: "dispatch_goal", goal: "skipping reconcile gap " + String(gap.id) + " after " + failedAttempts + " failed attempts: " + String(gap.summary ?? "").slice(0, 240) } as never);
+        // The reconcile skip is the shared predicate's (reconcileSkipOf, via gapPickRefusal on the targeted entry).
+        const skip = reconcileSkipOf(gap, predR);
+        if (skip) {
+          await resolveDispatchGoal({ type: "dispatch_goal", goal: "skipping reconcile gap " + String(gap.id) + " after " + skip.failed_decisions + " failed attempts: " + String(gap.summary ?? "").slice(0, 240) } as never);
           return { shape: "gapToFeatureReport", body: { ok: true, stage: "route", routed: "skip_reconcile", gap_id: gap.id, reason: "failed_attempts", predicted_p: predR.p } };
         }
         await resolveDispatchGoal({ type: "dispatch_goal", goal: "investigate gap " + String(gap.id) + " before composing (" + reason + ", predicted_p=" + predR.p.toFixed(2) + "): " + String(gap.summary ?? "").slice(0, 240), expected_output_shapes: ["gapDecomposition"], variables: { decompose_gap_id: String(gap.id) } } as never);

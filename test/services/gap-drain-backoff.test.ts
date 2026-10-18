@@ -631,6 +631,27 @@ describe("gap-drain observer: a goal-host remedy honours the drain brakes", () =
     expect((g.__drainBackoff!.get(id) as Record<string, unknown> | undefined)?.["dispatch_id"]).toBe("d-next");
   });
 
+  // A "running" outcome is bounded by check-supply's dispatch_timeout_hours (default 6 h), read the way check-supply
+  // reads it (dispatchVerdict over the gap-check-supply rhythm). Past it, the dispatch is not reached.
+  test("[MUST-FAIL] a dispatch still running past the bound is not reached: the id is dropped and it re-dispatches after the backoff", async () => {
+    const id = `remedy-livelock-stuck-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ dispatchId: "d-stuck", status: "running" }, { status: 202 });
+    executionResponse = () => Response.json({ status: "queued", reached: null });
+    await makeObserver().handleEvent(goalRemedyEvent(id));
+    g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1, dispatched_at: new Date(Date.now() - 7 * 3_600_000).toISOString() } as never);
+    await makeObserver().handleEvent(goalRemedyEvent(id)); // reads the outcome: still queued, 7 h after dispatch
+    expect(runGoals().length).toBe(1);
+    const entry = g.__drainBackoff!.get(id) as { until: number; attempts: number; dispatch_id?: string } | undefined;
+    expect(entry?.attempts).toBe(2);
+    expect(entry?.dispatch_id).toBeUndefined();
+    expect(drainLines().some((l) => l["action"] === "dispatch_outcome" && l["gap_id"] === id && l["timed_out"] === true)).toBe(true);
+    g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1 });
+    runGoalResponse = () => Response.json({ dispatchId: "d-again", status: "running" }, { status: 202 });
+    await makeObserver().handleEvent(goalRemedyEvent(id)); // backoff served: re-dispatched
+    expect(runGoals().length).toBe(2);
+  });
+
   test("[CONTROL] a still-running outcome waits another window without re-POSTing", async () => {
     const id = `remedy-livelock-running-${Math.random().toString(36).slice(2, 8)}`;
     writeGapStore([livelockRow(id, `${id}-failing`)]);
@@ -640,8 +661,9 @@ describe("gap-drain observer: a goal-host remedy honours the drain brakes", () =
     g.__drainBackoff!.set(id, { ...g.__drainBackoff!.get(id)!, until: Date.now() - 1 });
     await makeObserver().handleEvent(goalRemedyEvent(id));
     expect(runGoals().length).toBe(1);
-    const entry = g.__drainBackoff!.get(id) as { attempts: number; dispatch_id?: string } | undefined;
+    const entry = g.__drainBackoff!.get(id) as { attempts: number; dispatch_id?: string; dispatched_at?: string } | undefined;
     expect(entry?.attempts).toBe(1);
     expect(entry?.dispatch_id).toBe("d-run");
+    expect(typeof entry?.dispatched_at).toBe("string"); // within the bound: the dispatch time is carried forward
   });
 });

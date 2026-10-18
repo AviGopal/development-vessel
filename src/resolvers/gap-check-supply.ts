@@ -478,6 +478,16 @@ export type DispatchVerdict =
   | { kind: "lost"; why: LostWhy; reason: string }
   | { kind: "wait"; why: LostWhy; detail: string };
 export interface OutcomeBounds { stale_ms: number; timeout_ms: number; title_grace_ms: number; foreign_stale_ms: number }
+/** The outcome bounds a family's rhythm body sets (this family's defaults where it sets none). Also read by the drain
+ *  observer, which bounds a goal-host remedy's "running" dispatch by the same dispatch_timeout_hours. */
+export function outcomeBoundsOf(body: Record<string, unknown>): OutcomeBounds {
+  return {
+    stale_ms: posNum(body["dispatch_stale_hours"], 24) * 3600_000,
+    timeout_ms: posNum(body["dispatch_timeout_hours"], 6) * 3600_000,
+    title_grace_ms: posNum(body["title_grace_hours"], 2) * 3600_000,
+    foreign_stale_ms: posNum(body["foreign_stale_hours"], 72) * 3600_000,
+  };
+}
 
 /**
  * THE ONE CLASSIFICATION OF A NON-SUCCESS THAT IS NOT A FAILED ATTEMPT (CHANGE-30), read from the receiver's
@@ -690,12 +700,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const cf = Number(rhythm.body["control_fraction"]);
   const controlFraction = Number.isFinite(cf) && cf >= 0 && cf <= 1 ? cf : 0;
   const windowMs = posNum(rhythm.body["measure_window_days"], 7) * 86_400_000;
-  const bounds: OutcomeBounds = {
-    stale_ms: posNum(rhythm.body["dispatch_stale_hours"], 24) * 3600_000,
-    timeout_ms: posNum(rhythm.body["dispatch_timeout_hours"], 6) * 3600_000,
-    title_grace_ms: posNum(rhythm.body["title_grace_hours"], 2) * 3600_000,
-    foreign_stale_ms: posNum(rhythm.body["foreign_stale_hours"], 72) * 3600_000,
-  };
+  const bounds: OutcomeBounds = outcomeBoundsOf(rhythm.body);
   const maxOutcomeReads = Math.floor(posNum(rhythm.body["max_outcome_reads"], 50));
   const localNode = checkSupplyNode();
 

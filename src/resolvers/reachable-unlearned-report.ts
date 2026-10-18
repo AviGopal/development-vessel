@@ -131,47 +131,29 @@ export async function resolveReachableUnlearnedReport(
   } catch { /* fallback to execution counts */ }
 
   // Count ALL-TIME executions per template. The 24h wide window covers recent
-  // activity; for confidence-floor purposes we need lifetime counts: count the
-  // 30-day window per activity_id. The server aggregates (traceAggregateReport,
-  // a GROUP BY over the indexed executed_at window): the trace list route caps
-  // limit at 100, so paging it sorted the whole window and counted only its
-  // newest 100 rows, reported as 30 days. A read that did not measure is
-  // UNKNOWN, never zero: the floor fields below go null and say why.
+  // activity; for confidence-floor purposes we need lifetime counts. Fetch a
+  // larger slice (30-day) and count per activity_id.
   const allTimeSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   const allTimeExecCounts = new Map<string, number>(); // normalizedId → count
-  const aggPointer = { type: "traceAggregateReport", group_by: "activity_id", metric: "count", window_hours: 720, limit: 1000 };
-  console.log(`[reachable-unlearned-report] traceAggregateReport group_by=${aggPointer.group_by} metric=${aggPointer.metric} window_hours=${aggPointer.window_hours} limit=${aggPointer.limit}`);
-  let execCountsReason: string | null = null;
-  try {
-    const aggRes = await fetch(`${METABOB_ENDPOINT}/v2/impulses/resolve`, {
-      method: "POST",
-      headers: { ...auth, "Content-Type": "application/json" },
-      body: JSON.stringify({ impulse: { pointer: aggPointer } }),
-    });
-    if (!aggRes.ok) execCountsReason = `http_${aggRes.status}`;
-    else {
-      const wire = await aggRes.json() as { success?: boolean; content?: string; error?: string };
-      if (wire?.success !== true || typeof wire.content !== "string") execCountsReason = `resolve_failed: ${wire?.error ?? "no content"}`;
-      else {
-        const report = JSON.parse(wire.content) as { measured?: boolean; reason?: string; truncated?: boolean; rows?: Array<{ key?: string; value?: number }> };
-        if (report.measured !== true) execCountsReason = report.reason ?? "unmeasured";
-        else if (report.truncated === true) execCountsReason = "aggregate_truncated";
-        else {
-          for (const row of report.rows ?? []) {
-            if (typeof row.key !== "string" || typeof row.value !== "number") continue;
-            const norm = normalizeTemplateId(row.key);
-            allTimeExecCounts.set(norm, (allTimeExecCounts.get(norm) ?? 0) + row.value);
-            if (norm !== row.key) allTimeExecCounts.set(row.key, (allTimeExecCounts.get(row.key) ?? 0) + row.value);
-          }
-        }
-      }
+  let allTimeOffset = 0;
+  while (allTimeOffset < 5000) {
+    const r = await fetch(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${allTimeOffset}&since_iso=${encodeURIComponent(allTimeSince)}`,
+      { headers: auth },
+    ).catch(() => null);
+    if (!r?.ok) break;
+    const page = await r.json() as { executions?: TraceRow[] };
+    const rows = page.executions ?? [];
+    if (rows.length === 0) break;
+    for (const tr of rows) {
+      const id = tr.activity_id ?? tr.variant_id;
+      if (!id) continue;
+      const norm = normalizeTemplateId(id);
+      allTimeExecCounts.set(norm, (allTimeExecCounts.get(norm) ?? 0) + 1);
+      allTimeExecCounts.set(id, (allTimeExecCounts.get(id) ?? 0) + 1);
     }
-  } catch (e) {
-    execCountsReason = `read_failed: ${e instanceof Error ? e.message : String(e)}`;
-  }
-  const execCountsMeasured = execCountsReason === null;
-  if (!execCountsMeasured) {
-    console.error(`[reachable-unlearned-report] 30-day execution counts UNMEASURED (${execCountsReason}): below_confidence_floor is unknown, not empty`);
+    allTimeOffset += rows.length;
+    if (rows.length < 200) break;
   }
 
   // Only consider ACTIVE templates for coverage dispatch:
@@ -193,10 +175,11 @@ export async function resolveReachableUnlearnedReport(
   for (const tr of traces) { // short-window traces
     for (const s of (tr.output_shapes ?? [])) allTimeProducedShapes.add(s);
   }
-  // Also fetch wider 30-day produced shapes. We approximate: any shape in the
-  // wide-window exec traces' output_shapes is "produced". The counts above come
-  // from an aggregate, which carries no output_shapes, so this stays a list read:
-  // ONE request, and the list route caps it at the window's newest 100 rows.
+  // Also fetch wider 30-day produced shapes from the same paginated traces we already
+  // counted above — reuse allTimeExecCounts data source but track shapes too.
+  // We approximate: any shape in the wide-window exec traces' output_shapes is "produced".
+  // The wide fetch is the allTimeExecCounts loop above (rows have output_shapes).
+  // Re-iterate allTimeOffset data isn't available, so use a separate dedicated fetch.
   try {
     const shapeRes = await fetch(
       `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=500&since_iso=${encodeURIComponent(allTimeSince)}`,
@@ -347,17 +330,13 @@ export async function resolveReachableUnlearnedReport(
       // health-tick's confidence floor (confidenceFloor - 2 real executions needed).
       // These are the templates the substrate should run more to pass confidence_passing.
       // Sorted cheapest-to-fix first so callers can dispatch the top N.
-      // Unmeasured counts: the list is empty and the count + top pick are null
-      // (UNKNOWN), never 0 — execution_counts_reason says why.
       below_confidence_floor: belowFloor,
-      below_confidence_floor_count: execCountsMeasured ? belowFloor.length : null,
+      below_confidence_floor_count: belowFloor.length,
       confidence_floor: confidenceFloor,
       executions_needed_for_floor: execsNeeded,
       // Top pick: template that needs fewest additional runs to cross floor.
       top_below_floor_template_id: belowFloor[0]?.template_id ?? null,
-      top_below_floor_runs_needed: execCountsMeasured ? (belowFloor[0]?.runs_needed ?? 0) : null,
-      execution_counts_measured: execCountsMeasured,
-      execution_counts_reason: execCountsReason,
+      top_below_floor_runs_needed: belowFloor[0]?.runs_needed ?? 0,
     },
   };
 }

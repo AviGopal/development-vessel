@@ -131,6 +131,19 @@ describe("the semantic gate refuses a change that narrows its file's documented 
     const v = await gate(ET_PATH, ET_PRE, edit(ET_PRE, anchor, handler), unified(anchor, "    const limit = Math.min(Math.max(recentParam, 1), 100);"));
     expect(v.addresses).toBe(true);
   });
+  it("MUST-FAIL (P1 side effect): an outgoing `f({ limit: 1 })` is not a read, so dropping the real read is still refused", async () => {
+    const from = "  const limit = clampInt(input.limit, 10, 1, 1000);";
+    const to = "  const limit = 10;\n  const page = await fetchPage({ limit: 1 });";
+    const v = await gate(AGG_PATH, AGG_PRE, edit(AGG_PRE, from, to), unified(from, to));
+    expect(v.addresses).toBe(false);
+    expect(String(v.reason)).toContain("narrows_documented_contract:documented limit no longer handled");
+  });
+  it("MUST-FAIL (P1): a shorthand destructuring (`const { limit } = input`) still handles the parameter", async () => {
+    const from = "  const limit = clampInt(input.limit, 10, 1, 1000);";
+    const to = "  const { limit } = input;";
+    const v = await gate(AGG_PATH, AGG_PRE, edit(AGG_PRE, from, to), unified(from, to));
+    expect(String(v.reason ?? "")).not.toContain("documented limit no longer handled");
+  });
   it("MUST-FAIL (P1): a destructured read (`const { limit: rawLimit } = input`) still handles the parameter", async () => {
     const from = "  const limit = clampInt(input.limit, 10, 1, 1000);";
     const to = "  const { limit: rawLimit } = input;\n  const limit = clampInt(rawLimit, 10, 1, 1000);";
@@ -189,6 +202,16 @@ describe("the documented-contract extract (deterministic, pre-image only)", () =
     const et = fc.documentedContract(ET_PRE) as Array<Record<string, unknown>>;
     expect(et.find((d) => d.name === "limit")).toMatchObject({ max: 500, default: "50" });
     expect(et.some((d) => d.name === "variant_id")).toBe(true);
+  });
+  it("(1) contractFiles is read only by the deterministic floor, before the LLM prompt is built: the judge never sees it", () => {
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/feature-compose.ts"), "utf8");
+    const body = src.slice(src.indexOf("export async function verifyPatchAddressesGap("));
+    const fnBody = body.slice(0, body.indexOf("\n}\n"));
+    const uses = [...fnBody.matchAll(/args\.(contractFiles|checkText)\b/g)].map((m) => m.index!);
+    expect(uses.length).toBe(4);
+    expect(Math.max(...uses)).toBeLessThan(fnBody.indexOf("semanticJudgePrompt("));
+    const prompt = src.slice(src.indexOf("function semanticJudgePrompt("), src.indexOf("function semanticJudgePrompt(") + 600);
+    expect(prompt).not.toMatch(/contractFiles|checkText/);
   });
   it("the evidence is only the test lines a change added: an untouched test file contributes nothing", () => {
     const path = "/vessels/repos/activity-api/src/routes/trace-aggregate-report.failure-class.test.ts";

@@ -2389,10 +2389,17 @@ function contractAccessRe(p: string): RegExp {
   const e = contractEsc(p);
   return new RegExp(`(?:\\.${e}\\b|\\[\\s*['"\`]${e}['"\`]\\s*\\]|\\(\\s*['"\`]${e}['"\`]\\s*[,)])`);
 }
-/** A read including destructuring (`const { p } = input`, `{ p: raw } = …`, `({ p = 10 }) =>`): handling_removed asks this. */
+/**
+ * A read including destructuring — `const { p } = input`, `{ p: raw } = …`, a parameter `({ p = 10 }: T) =>` or
+ * `handle({ p }: T) {` — which handling_removed asks. An object literal ARGUMENT (`f({ p: 1 })`) passes p, it does not
+ * read it, so it is not a read: counting it would hide a dropped read behind any call that sets the key, and would
+ * make a removed outgoing call look like a dropped one.
+ */
 function contractReadRe(p: string): RegExp {
   const e = contractEsc(p);
-  return new RegExp(`(?:${contractAccessRe(p).source}|\\{[^{}]*(?:^|[{,\\s])${e}\\s*(?:[:=,}])[^{}]*\\}\\s*(?:=(?!=)|[:)]))`);
+  const pattern = `\\{[^{}]*(?:^|[{,\\s])${e}\\s*(?=[:=,}])[^{}]*\\}`;
+  const typeAnn = `(?:\\s*:\\s*[\\w$.<>\\[\\]|&\\s]+)?`;
+  return new RegExp(`(?:${contractAccessRe(p).source}|${pattern}\\s*=(?![=>])|${pattern}${typeAnn}\\s*\\)\\s*(?::[^=;{]*)?(?:=>|\\{))`);
 }
 /** Any mention: a read, the bare name, or a local derived from it (limitParam, groupBy). */
 function contractMentionRe(p: string): RegExp {

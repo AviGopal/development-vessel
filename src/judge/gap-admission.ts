@@ -311,9 +311,9 @@ export function typecheckClassOf(gap: Record<string, unknown>): { vessel: string
   return { vessel, tsCode };
 }
 
-export type TypecheckRunner = (vessel: string) => { ran: boolean; clean: boolean };
-/** Default runner: `bun run typecheck` in the vessel's runtime dir. Bounded by a wall timeout. */
-export function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean } {
+export type TypecheckRunner = (vessel: string) => { ran: boolean; clean: boolean } | Promise<{ ran: boolean; clean: boolean }>;
+/** Default runner: `bun run typecheck` in the vessel's runtime dir. Bounded by a wall timeout (the child is killed). */
+export async function defaultTypecheckRunner(vessel: string): Promise<{ ran: boolean; clean: boolean }> {
   try {
     const cwd = join(runtimeRoot(), vessel);
     if (!existsSync(join(cwd, "package.json"))) return { ran: false, clean: false };
@@ -325,9 +325,18 @@ export function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: b
     const startedAt = Date.now();
     // SCRUBBED ENV: `bun run typecheck` runs a lane-authorable package.json script, and this process holds
     // the fleet secrets file. Only the shared allowlist, with a scratch WORKSPACE_ROOT (test-child-env.ts).
-    const res = withTestChildEnv((env) => Bun.spawnSync(["bun", "run", "typecheck"], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: 120_000 }));
-    console.log(`[gap-admission] typecheck vessel=${vessel} exit=${String(res.exitCode)} ms=${Date.now() - startedAt}`);
-    return { ran: true, clean: res.exitCode === 0 };
+    // ASYNC SPAWN. Bun.spawnSync held this process's event loop for the whole typecheck (serial 59-76 s batches were
+    // measured), so /health went unanswered past the self-recovery probe's window and the vessel was restarted. The
+    // child is awaited instead and killed at the same 120 s wall timeout, which reads as a non-zero exit as spawnSync's
+    // timeout did. Only the exit code was ever read, so the output is discarded rather than piped (an unread pipe can
+    // fill and stall the child).
+    const exitCode = await withTestChildEnv(async (env) => {
+      const child = Bun.spawn(["bun", "run", "typecheck"], { cwd, env, stdout: "ignore", stderr: "ignore" });
+      const timer = setTimeout(() => child.kill(), 120_000);
+      try { return await child.exited; } finally { clearTimeout(timer); }
+    });
+    console.log(`[gap-admission] typecheck vessel=${vessel} exit=${String(exitCode)} ms=${Date.now() - startedAt}`);
+    return { ran: true, clean: exitCode === 0 };
   } catch {
     return { ran: false, clean: false };
   }
@@ -385,14 +394,14 @@ export async function admitActionableGaps(
   const childGapsByEditSite = new Map<string, number>();
   let tscRuns = 0;
   const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
-  const vesselTypecheckClean = (vessel: string): boolean | null => {
+  const vesselTypecheckClean = async (vessel: string): Promise<boolean | null> => {
     if (passCache.has(vessel)) return passCache.get(vessel) ?? null;
     const now = Date.now();
     const cached = typecheckCleanCache.get(vessel);
     if (cached && now - cached.at < TYPECHECK_CACHE_TTL_MS) { passCache.set(vessel, cached.clean); return cached.clean; }
     if (tscRuns >= TYPECHECK_MAX_RUNS_PER_PASS) { passCache.set(vessel, null); return null; } // budget spent → unknown
     tscRuns++;
-    const r = runner(vessel);
+    const r = await runner(vessel);
     if (!r.ran) { passCache.set(vessel, null); return null; }
     typecheckCleanCache.set(vessel, { clean: r.clean, at: now });
     passCache.set(vessel, r.clean);
@@ -548,7 +557,7 @@ export async function admitActionableGaps(
       // a TS code carried into a summary by a failed attempt's lesson otherwise admitted the
       // fs-edit gap (local-tools typechecks clean) and redrafted it four times.
       const typecheckClass = typecheckClassOf(g);
-      const typecheckFailingNow = typecheckClass ? vesselTypecheckClean(typecheckClass.vessel) === false : false;
+      const typecheckFailingNow = typecheckClass ? (await vesselTypecheckClean(typecheckClass.vessel)) === false : false;
       if (requiredClasses && requiredClasses.length > 0 && !typecheckFailingNow) {
         const rawFalsifier = meta.falsifier as unknown;
         const gapFalsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
@@ -634,7 +643,7 @@ export async function admitActionableGaps(
     // (E2) PHANTOM TYPECHECK — retire when the referenced error is already gone.
     const tc = typecheckClassOf(g);
     if (tc) {
-      const clean = vesselTypecheckClean(tc.vessel);
+      const clean = await vesselTypecheckClean(tc.vessel);
       if (clean === true) {
         excluded.push({ id, reason: `typecheck_clean_phantom(${tc.vessel}:${tc.tsCode})` });
         // The write and re-stamp are removed from the pick path to resolve timeout issues.

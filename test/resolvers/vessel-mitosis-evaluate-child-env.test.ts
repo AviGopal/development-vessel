@@ -194,7 +194,7 @@ describe("gap-to-feature admission: the default typecheck runner spawns with the
       driver,
       `const g = (await import(${JSON.stringify(join(SRC, "judge", "gap-admission.ts"))})) as Record<string, unknown>;\n` +
         `const run = g["defaultTypecheckRunner"] as ((v: string) => unknown) | undefined;\n` +
-        `console.log("RUNNER=" + (typeof run === "function" ? JSON.stringify(run(${JSON.stringify(vessel)})) : "absent"));\n` +
+        `console.log("RUNNER=" + (typeof run === "function" ? JSON.stringify(await run(${JSON.stringify(vessel)})) : "absent"));\n` +
         `process.exit(0);\n`,
     );
     const home = join(root, "home");

@@ -738,6 +738,41 @@ export type LandingLeaseRefusalKind = keyof typeof landingLeaseRefusals;
 export function countLandingLeaseRefusal(kind: LandingLeaseRefusalKind): void { landingLeaseRefusals[kind]++; }
 export function landingLeaseRefusalCounts(): Record<LandingLeaseRefusalKind, number> { return { ...landingLeaseRefusals }; }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A DETECTOR ROW NOTHING CAN ARM IS NOT WRITTEN (2026-10-19, class row detector-files-unarmed-rows; qa ruling (a)).
+// Measured on one node: 1,614 of 1,879 open substrate_detected gaps are unarmed, and 1,039 of the open unarmed
+// detector rows carry no falsifier, no edit site and no file in their summary. Admission cannot take an unarmed gap,
+// and gap-check-supply (the system's own arming path) can localize one only from a site or a file its summary names,
+// so those rows are born dead: detected, never actionable. goal_deficiency_recognition never files one, because it
+// arms every row it writes with the check it measured (goal-deficiency.ts goalReachCheck). That is the write-time
+// contract for a detector: carry the check you measured (evidence_resolve), or the site (edit_site), or name the file.
+// A NEW row from a detector source (exactly `substrate_detected`, or `<name>_detector` / `<name>_scan`) with none of
+// them is REFUSED with error "detector_row_unarmable". Every other row is written as before: a re-emission onto an
+// existing row (the rows already stored are not touched retroactively), a row with a predicate of any class, a human
+// or operator row, goal_deficiency_recognition. A refusal is COUNTED per source, served on /health
+// (unarmable_detector_refusals) and logged, because most detectors fire and forget: the count is the demand signal for
+// which detector must learn to localize what it finds.
+// ─────────────────────────────────────────────────────────────────────────────
+const unarmableDetectorRefusals: Record<string, number> = {};
+/** Refused unarmable detector writes since process start, by source (served on development-vessel /health). */
+export function unarmableDetectorRefusalCounts(): Record<string, number> { return { ...unarmableDetectorRefusals }; }
+/** A detector source: the shared `substrate_detected`, or a detector's own `<name>_detector` / `<name>_scan`. */
+export function isDetectorSource(source: unknown): boolean {
+  const s = typeof source === "string" ? source.trim() : "";
+  return s === "substrate_detected" || /^[a-z0-9]+(?:_[a-z0-9]+)*_(?:detector|scan)$/.test(s);
+}
+// A file path a summary names: a token with a directory and an extension, or a bare file name with a code extension.
+const SUMMARY_FILE_RE = /(?:^|[\s`'"(\[])(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b|(?:^|[\s`'"(\[])[\w-]+(?:\.[\w-]+)*\.(?:ts|tsx|js|mjs|cjs|sh|py|json|md|yml|yaml|toml|service)\b/;
+/** Why a NEW gap row from a detector source cannot be armed by anything, or null when it can (see the rule above). */
+export function unarmableDetectorRow(gap: Record<string, unknown>, falsifier: string): string | null {
+  if (!isDetectorSource(gap["source"]) || String(gap["status"] ?? "open") !== "open" || falsifier !== "none") return null;
+  const meta = (gap["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const has = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+  if (["edit_site", "file_path", "change_site", "suspected_real_location"].some((f) => has(meta[f])) || has(gap["file_path"])) return null;
+  if (SUMMARY_FILE_RE.test(String(gap["summary"] ?? ""))) return null;
+  return `a ${String(gap["source"])} row with no falsifier, no edit_site and no file named in its summary can never be armed (admission needs a falsifier, gap-check-supply a site or a named file); carry the check the detector measured as classification_metadata.evidence_resolve (as goal_deficiency_recognition does: goal-deficiency.ts goalReachCheck), or the edit_site, or name the file`;
+}
+
 export async function resolveSubstrateGapLease(pointer: SubstrateGapLeasePointer | Record<string, unknown>): Promise<ResolverResult> {
   const p = pointer as SubstrateGapLeasePointer;
   const action = p.action;
@@ -2702,6 +2737,19 @@ async function resolveSubstrateGapWriteInner(
     // recorded faithfully and nothing ever reads them back to ask what changed.
   } catch (err) {
     console.error(`[gap-falsifier] classification threw for ${gap.id} (non-fatal, gap still written):`, err);
+  }
+
+  // A DETECTOR ROW NOTHING CAN ARM (see the rule above): new rows only, read from the stamp (a classification that
+  // threw stamped nothing, and a row it did not stamp is never refused here).
+  if (action === "created") {
+    const m = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const why = typeof m["falsifier"] === "string" ? unarmableDetectorRow(gap as unknown as Record<string, unknown>, String(m["falsifier"])) : null;
+    if (why) {
+      const src = String(gap.source);
+      unarmableDetectorRefusals[src] = (unarmableDetectorRefusals[src] ?? 0) + 1;
+      console.log(`[gap-falsifier] refused ${gap.id}: detector_row_unarmable source=${src} (refusals from this source since start: ${unarmableDetectorRefusals[src]})`);
+      return { early: { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "validation_rejected", error: "detector_row_unarmable", id: gap.id, source: src, detail: `gap ${gap.id}: ${why}` } } as ResolverResult };
+    }
   }
 
   // ARM-TIME REGION GATE: after the stamp (arming is decided there), before the save. Outside the fail-open

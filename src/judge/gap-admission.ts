@@ -15,14 +15,14 @@
 import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "../resolvers/types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, type MintedBirthVerdict } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, DETECTOR_ROW_UNARMABLE_REASON, type MintedBirthVerdict } from "../resolvers/substrate-gap.js";
 import { isDissentChild, dissentChildCheckRefusal } from "../resolvers/feature-compose.js";
 import { testTitleInSource } from "../resolvers/retry-evidence.js";
 import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
@@ -548,6 +548,10 @@ export async function admitActionableGaps(
     // 'present' when it was written has never seen the defect: a landing "verified" by it verifies nothing.
     // The write seam stamps the birth verdict; rows that predate it carry none and are unaffected.
     { const suspect = predicateSuspect(meta); if (suspect) { excluded.push({ id, reason: `predicate_suspect(${suspect})` }); continue; } }
+    // A DETECTOR ROW NOTHING CAN ARM (substrate-gap.ts): marked beside its "none" label, keyed on the reason's prefix,
+    // never on the label. The write seam does not mark a row another route acts on, so this excludes nothing an
+    // exemption above admits on purpose; it holds the mark wherever a marked row reaches admission.
+    if (String(meta.falsifier_unresolvable_reason ?? "").startsWith(DETECTOR_ROW_UNARMABLE_REASON)) { excluded.push({ id, reason: "detector_row_unarmable" }); continue; }
     // FALSIFIER REQUIRED (contained-self-development). When the autonomyScope record names
     // require_falsifier_classes, an autonomous gap is admitted only if its falsifier is one of them;
     // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own
@@ -791,10 +795,9 @@ export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: C
   return { skip, reason };
 }
 
-/** Categories resolveGapToFeature routes to a resolver other than feature_compose (trace-store reconcile seed,
- *  doc_drift_fix, author_producer). The compose gate does not judge them. A test pins that every category branch in
- *  resolveGapToFeatureOnce is listed here. */
-export const NON_COMPOSE_ROUTE_CATEGORIES: ReadonlySet<string> = new Set(["trace_store_reconciliation", "documentation_drift", "unreachable_producer", "orphaned_capability"]);
+// NON_COMPOSE_ROUTE_CATEGORIES lives in gap-eligibility (a leaf module the write seam already reads, so its detector
+// rule shares the list without importing this one); re-exported here, where the route tests read it.
+export { NON_COMPOSE_ROUTE_CATEGORIES };
 
 /**
  * THE TARGETED ENTRY'S ADMISSION (gap-lane livelock, 2026-10-10). A pointer.gap_id dispatch bypassed admitActionableGaps.

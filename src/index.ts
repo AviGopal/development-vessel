@@ -12,7 +12,7 @@ import { GapDrainObserver } from "./services/gap-drain-observer.js";
 import * as gapCheckSupply from "./resolvers/gap-check-supply.js";
 import { admitInFlight, releaseInFlight, runInFlight, inFlightOldestMs, inFlightProgressHealth, type InFlightRecord } from "./lib/compose-progress.js";
 import { markerQuiesced } from "./lib/quiesce-marker.js";
-import { landingLeaseRefusalCounts, unarmableDetectorRefusalCounts } from "./resolvers/substrate-gap.js";
+import { landingLeaseRefusalCounts, unarmableDetectorRowCounts } from "./resolvers/substrate-gap.js";
 
 const app = new Hono();
 
@@ -63,9 +63,9 @@ app.get("/health", (c) => {
     // another node holds the gap's lease (compose_held) or its state was unknown (compose_unknown), and
     // cutovers refused landing_lease_not_held (cutover_not_held / cutover_unknown).
     landing_lease_refusals: landingLeaseRefusalCounts(),
-    // New detector rows refused because nothing could ever arm them, by source (substrate-gap.ts A DETECTOR ROW
-    // NOTHING CAN ARM): which detector must learn to carry its check or its site.
-    unarmable_detector_refusals: unarmableDetectorRefusalCounts(),
+    // New detector rows written marked unarmable (falsifier none, the detector_row_unarmable reason beside it), by
+    // source (substrate-gap.ts A DETECTOR ROW NOTHING CAN ARM): which detector must learn to carry its check or its site.
+    unarmable_detector_rows: unarmableDetectorRowCounts(),
     discovery: { registered: isRegistered() },
   });
 });

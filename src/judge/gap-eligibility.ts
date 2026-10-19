@@ -120,6 +120,21 @@ export function isParkingDisposition(d: unknown): boolean {
   return typeof d === "string" && PARKING_DISPOSITIONS.includes(d);
 }
 
+/** Categories resolveGapToFeature routes to a resolver other than feature_compose (trace-store reconcile seed,
+ *  doc_drift_fix, author_producer). The compose gate does not judge them. A test pins that every category branch in
+ *  resolveGapToFeatureOnce is listed here (read through gap-admission, which re-exports it). */
+export const NON_COMPOSE_ROUTE_CATEGORIES: ReadonlySet<string> = new Set(["trace_store_reconciliation", "documentation_drift", "unreachable_producer", "orphaned_capability"]);
+
+/** Whether a route other than feature_compose acts on `row` with no check and no site: a NON_COMPOSE_ROUTE_CATEGORIES
+ *  category, an orphan producer named by its id (gap-admission composeAdmissionExclusion's orphan route), or a
+ *  goal-walk capability gap (targetedComposeExclusion's exemption). Read by the write seam's detector rule
+ *  (substrate-gap.ts A DETECTOR ROW NOTHING CAN ARM), which marks no such row. */
+export function routedOffCompose(row: Record<string, unknown>): boolean {
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  return NON_COMPOSE_ROUTE_CATEGORIES.has(String(row["category"] ?? "")) || /orphaned[_-]capability/i.test(String(row["id"] ?? "")) || String(meta["kind"] ?? "") === "capability_gap";
+}
+
 /** A gap with no check of its own whose failing test the substrate is writing (gap-check-supply): written on the
  *  row when the tick dispatches that test's edit goal, and cleared ("") by the write that arms the gap from it.
  *  Not a parking disposition: no human is waited on, the supply tick is. The eligibility predicate holds it. */

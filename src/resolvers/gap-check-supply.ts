@@ -59,7 +59,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
+import { DETECTOR_ROW_UNARMABLE_REASON, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -155,13 +155,15 @@ const runtimeRoot = (): string => process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessel
 /**
  * NEEDS-LOCALIZATION: an open gap the lane cannot take only because it has no check of its own (or no edit site),
  * and that nothing else holds. null for every gap that is compose work already, held by a human or a landing,
- * closed, carrying a literal predicate of its own (a different repair), or routed elsewhere (orphan producers).
+ * closed, carrying a literal predicate of its own (a different repair), routed elsewhere (orphan producers), or a
+ * detector row nothing can arm (substrate-gap.ts A DETECTOR ROW NOTHING CAN ARM: no site and no file to localize from).
  */
 export function checkSupplyDisposition(row: Row): typeof CHECK_SUPPLY_DISPOSITION | null {
   if (String(row["status"] ?? "open") !== "open") return null;
   const meta = metaOf(row);
   if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return null;
   if (nonEmpty(meta["expected_literal"]) || nonEmpty(meta["hardcoded_url"])) return null;
+  if (String(meta["falsifier_unresolvable_reason"] ?? "").startsWith(DETECTOR_ROW_UNARMABLE_REASON)) return null;
   const cat = String(row["category"] ?? "");
   if (cat === "orphaned_capability" || cat === "unreachable_producer") return null;
   const skip = composeEligibilitySkipReason(row);

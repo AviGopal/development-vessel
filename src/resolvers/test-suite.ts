@@ -51,9 +51,11 @@ const METABOB_API_KEY = process.env.METABOB_API_KEY ?? process.env.API_KEY ?? ""
 const VESSEL_CLONES_ROOT = process.env.MITOSIS_VESSEL_CLONES ?? "/workspace/git/vessels";
 const SUPER_REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo";
 /** The tree a test_suite check of `vessel` runs against: "super-repo" is the super-repo clone (a shell check's home, see
- *  A SHELL CHECK), any other name its vessel clone. Read by the gap seam's birth tree (substrate-gap.ts birthCheckRepo). */
+ *  A SHELL CHECK), any other name its vessel clone. Read by the gap seam's birth tree (substrate-gap.ts birthCheckRepo).
+ *  The super-repo root is read at call time, as birthCheckRepo reads VESSELS_CLONE_ROOT: a load-time copy is whatever
+ *  the first importer of this module saw, so in one process it can name another tree than the caller's. */
 export function testSuiteCheckRoot(vessel: string): string {
-  return vessel === "super-repo" ? SUPER_REPO_ROOT : `${VESSEL_CLONES_ROOT}/${vessel}`;
+  return vessel === "super-repo" ? (process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo") : `${VESSEL_CLONES_ROOT}/${vessel}`;
 }
 const DEFAULT_TIMEOUT_MS = 240_000;
 

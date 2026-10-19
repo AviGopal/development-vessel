@@ -15,7 +15,9 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const BASE = realpathSync(mkdtempSync(join(tmpdir(), "shell-check-")));
 const SUPER = join(BASE, "git", "super-repo");
-process.env["MITOSIS_REPO_ROOT"] = SUPER; // test_suite's super-repo root (read at its module load)
+// Restored after the file: both point under BASE, which afterAll removes, and later files in the same process read them.
+const savedRoots = { MITOSIS_REPO_ROOT: process.env["MITOSIS_REPO_ROOT"], WORKSPACE_ROOT: process.env["WORKSPACE_ROOT"] };
+process.env["MITOSIS_REPO_ROOT"] = SUPER; // test_suite's super-repo root (testSuiteCheckRoot reads it at call time)
 process.env["WORKSPACE_ROOT"] = join(BASE, "ws");
 const testSuite = await import("../../src/resolvers/test-suite.js");
 const { evaluateGapCheck } = await import("../../src/judge/gap-check-judge.js");
@@ -73,6 +75,7 @@ beforeAll(() => {
 afterAll(() => {
   globalThis.fetch = realFetch;
   if (savedStore === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedStore;
+  for (const [k, v] of Object.entries(savedRoots)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   __resetPolicyReadsForTests();
   try { rmSync(BASE, { recursive: true, force: true }); } catch { /* noop */ }
 });

@@ -46,6 +46,7 @@ import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { linkedGoalHashes, mergeDemandGoal, type GoalReachOrigin, type GoalReachDemandEntry } from "../lib/demand-goals.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 export { mergeDemandGoal, type GoalReachDemandEntry };
 
@@ -1783,7 +1784,6 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
               return res.shape === "substrateGapWriteResult" && !b["skip_reason"] ? { ok: true } : { ok: false, why: String(b["skip_reason"] ?? b["detail"] ?? res.shape).slice(0, 200) };
             },
             dispatch: async (gapId, tag) => {
-              const { selfAuthHeaders } = await import("../lib/self-auth.js");
               const url = process.env["SELF_RESOLVE_ENDPOINT"] ?? `http://localhost:${process.env["PORT"] ?? "8090"}/v2/impulses/resolve`;
               // fire-and-forget: the author compose runs for minutes; its outcome is graded on the gap row by the route itself
               void fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...selfAuthHeaders(url, url) }, body: JSON.stringify({ impulse: { pointer: { type: "gap_to_feature", gap_id: gapId, triggered_by: "goal-reach-producer-dispatch", flow: "capability-author", attribution: tag } } }), signal: AbortSignal.timeout(900_000) })

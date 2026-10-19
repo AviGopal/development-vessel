@@ -85,7 +85,7 @@ afterAll(() => {
   else process.env["WORKSPACE_ROOT"] = priorWorkspaceRoot;
 });
 
-type Call = { url: string; impulse: Record<string, unknown> };
+type Call = { url: string; impulse: Record<string, unknown>; authorization: string | null };
 let calls: Call[] = [];
 let dispatchResponse: () => Response = () => new Response("{}", { status: 200 });
 /** goal-host /run-goal, for a goal-host remedy ({goal}, no impulse_type). */
@@ -112,7 +112,7 @@ beforeEach(() => {
       /* not JSON */
     }
     const impulse = (parsed.impulse ?? {}) as Record<string, unknown>;
-    calls.push({ url, impulse });
+    calls.push({ url, impulse, authorization: new Headers(init?.headers as HeadersInit | undefined).get("authorization") });
     if (impulse["type"] === "maintenanceLease") {
       return new Response(JSON.stringify({ success: true, shape: "maintenanceLease", body: { held: false } }), { status: 200 });
     }
@@ -624,6 +624,22 @@ describe("gap-drain observer: a goal-host remedy honours the drain brakes", () =
     await makeObserver().handleEvent(goalRemedyEvent(id));
     expect(runGoals().length).toBe(0);
     expect(drainLines().some((l) => l["action"] === "held_livelock" && l["gap_id"] === id)).toBe(true);
+  });
+
+  // goal-host's /run-goal authenticates its callers (goal-host src/inbound-auth.ts); a keyless remedy is refused 401.
+  test("[MUST-FAIL] the goal-host remedy dispatch carries this vessel's key", async () => {
+    const id = `remedy-livelock-key-${Math.random().toString(36).slice(2, 8)}`;
+    writeGapStore([livelockRow(id, `${id}-failing`)]);
+    runGoalResponse = () => Response.json({ dispatchId: "d-key", status: "running" }, { status: 202 });
+    const prior = process.env["METABOB_API_KEY"];
+    process.env["METABOB_API_KEY"] = "gap-drain-backoff-key-fixture";
+    try {
+      await makeObserver().handleEvent(goalRemedyEvent(id));
+    } finally {
+      if (prior === undefined) delete process.env["METABOB_API_KEY"]; else process.env["METABOB_API_KEY"] = prior;
+    }
+    expect(runGoals().length).toBe(1);
+    expect(runGoals()[0]!.authorization).toBe("ApiKey gap-drain-backoff-key-fixture");
   });
 
   test("[CONTROL] a first goal-host dispatch still goes out; its ACK keeps a backoff carrying the dispatch id", async () => {

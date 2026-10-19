@@ -461,7 +461,9 @@ export class GapDrainObserver {
       const resp = extRemedy
         ? await fetch((process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210") + "/run-goal", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            // goal-host's /run-goal authenticates its callers (goal-host src/inbound-auth.ts): send this vessel's key,
+            // read at use time like lib/self-auth.ts reads it.
+            headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) },
             body: JSON.stringify(extTemplateId !== "" ? { targetTemplateId: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } } : { goal: extGoal }),
             signal: AbortSignal.timeout(120000),
           })

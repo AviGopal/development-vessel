@@ -282,7 +282,7 @@ export function parseShellCheck(raw: string): { ok: string[]; fail: string[] } {
   }
   return { ok, fail };
 }
-async function resolveShellCheck(a: { name: string; rel: string; testFile: string; onlyTests: string[]; baseRef: string; timeoutMs: number; budgetSec: number; shellEndpoint: string; pointer: Record<string, unknown> }): Promise<ResolverResult> {
+async function runShellCheck(a: { name: string; rel: string; testFile: string; onlyTests: string[]; baseRef: string; timeoutMs: number; budgetSec: number; shellEndpoint: string; pointer: Record<string, unknown> }): Promise<ResolverResult> {
   const root = testSuiteCheckRoot(a.name);
   // bun on the check's PATH: the checks run bun themselves (and refuse without it), and the scrubbed PATH need not hold
   // it, so the directory of the bun running this vessel goes first.
@@ -457,7 +457,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   if (/\.sh$/.test(testFile)) {
     if (mutate || edit) return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: mutate ? "mutate_revert" : "mutate_edit", detail: "a mutation runs only on a bun test file, not a shell check" } };
     const baseRefSh = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim()) ? pointer.base_ref.trim() : "";
-    return resolveShellCheck({ name, rel, testFile, onlyTests, baseRef: baseRefSh, timeoutMs, budgetSec, shellEndpoint, pointer });
+    return runShellCheck({ name, rel, testFile, onlyTests, baseRef: baseRefSh, timeoutMs, budgetSec, shellEndpoint, pointer });
   }
   // See onlyTestsPattern / NAMES ARE DATA above: the pattern reaches bun as one argv element decoded by
   // the shell, never as shell text.

@@ -16,7 +16,7 @@ import { classifyFalsifier, class2PredicateKey } from "../../src/resolvers/subst
 
 const PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "falsifier-grammar-golden.json");
 const RAW = readFileSync(PATH, "utf8");
-export const GOLDEN_SHA256 = "568db1833e7950addded9282657fc373e7e02b7b224cb3535901a9cedecb1b11";
+export const GOLDEN_SHA256 = "11ec73d9fca8cb1539ad53041005ec3e1af9a7d1e8502baced84c1adf10addf4";
 const golden = JSON.parse(RAW) as { vocabulary: string[]; cases: Array<{ name: string; meta: Record<string, unknown>; expect: Record<string, unknown> }> };
 // A judgeable vocabulary (vocabularyIsJudgeable: >= 5 configs, >= 50 names): the table's names plus filler.
 const vocab = { shapes: new Set<string>([...golden.vocabulary, ...Array.from({ length: 60 }, (_, i) => `filler_shape_${i}`)]), configs_read: 10 };

@@ -4,7 +4,8 @@
     "trace_store_report",
     "gate_self_probe",
     "goal_reach_verdict",
-    "test_suite"
+    "test_suite",
+    "git_log"
   ],
   "cases": [
     {
@@ -105,6 +106,11 @@
       "meta": {
         "evidence_resolve": {
           "shape": "test_suite",
+          "input": {
+            "only_tests": [
+              "the must-fail"
+            ]
+          },
           "zero_field": "requested_not_passing"
         },
         "verify_shape": "trace_store_report"
@@ -115,7 +121,7 @@
         "predicate_shape": "test_suite",
         "predicate_mode": null,
         "unadvertised_shape": null,
-        "key": "{\"evidence_resolve\":{\"shape\":\"test_suite\",\"zero_field\":\"requested_not_passing\"},\"verify_shape\":\"trace_store_report\"}"
+        "key": "{\"evidence_resolve\":{\"input\":{\"only_tests\":[\"the must-fail\"]},\"shape\":\"test_suite\",\"zero_field\":\"requested_not_passing\"},\"verify_shape\":\"trace_store_report\"}"
       }
     },
     {
@@ -228,6 +234,152 @@
         "predicate_mode": null,
         "unadvertised_shape": null,
         "key": "{\"evidence_resolve\":{\"error\":\"no_unique_anchor at x\",\"shape\":\"gate_self_probe\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: a field the instrument never returns is unresolvable",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "git_log",
+          "zero_field": "count"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.zero_field",
+        "predicate_shape": "git_log",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"git_log\",\"zero_field\":\"count\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: a field the instrument returns is class2",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "git_log",
+          "nonzero_field": "exitCode"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "git_log",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"nonzero_field\":\"exitCode\",\"shape\":\"git_log\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: a field that needs an input the arming omits is unresolvable",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "test_suite",
+          "zero_field": "requested_not_passing"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.zero_field",
+        "predicate_shape": "test_suite",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"test_suite\",\"zero_field\":\"requested_not_passing\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: the same field with its input given is class2",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "goal_reach_verdict",
+          "input": {
+            "goal_hash": "abcd1234"
+          },
+          "zero_field": "unreached_since_last_reach"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "goal_reach_verdict",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"input\":{\"goal_hash\":\"abcd1234\"},\"shape\":\"goal_reach_verdict\",\"zero_field\":\"unreached_since_last_reach\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: goal_reach_verdict's count without its goal_hash is unresolvable",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "goal_reach_verdict",
+          "zero_field": "unreached_since_last_reach"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.zero_field",
+        "predicate_shape": "goal_reach_verdict",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"goal_reach_verdict\",\"zero_field\":\"unreached_since_last_reach\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: a test_file that is not a bun test module is unresolvable",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "test_suite",
+          "input": {
+            "test_file": "scripts/check-thing.sh"
+          },
+          "zero_field": "fail"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.input.test_file",
+        "predicate_shape": "test_suite",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"input\":{\"test_file\":\"scripts/check-thing.sh\"},\"shape\":\"test_suite\",\"zero_field\":\"fail\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: a bun test module is class2",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "test_suite",
+          "input": {
+            "test_file": "test/a.test.ts"
+          },
+          "zero_field": "fail"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "test_suite",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"input\":{\"test_file\":\"test/a.test.ts\"},\"shape\":\"test_suite\",\"zero_field\":\"fail\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "response contract: producer_contract mode is not judged by the contract",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "test_suite",
+          "mode": "producer_contract",
+          "zero_field": "no_such_field"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "test_suite",
+        "predicate_mode": "producer_contract",
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"mode\":\"producer_contract\",\"shape\":\"test_suite\",\"zero_field\":\"no_such_field\"},\"verify_shape\":null}"
       }
     }
   ]

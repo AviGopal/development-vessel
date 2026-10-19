@@ -146,8 +146,13 @@ export const GOAL_SHAPE_PRE_CHECK_TEMPLATE: ActivityTemplate = {
  * family's shapeContractCheckResult, with `expected` = the recorded completion shapes.
  *
  * The prompt is goal-host's (goal-spec.ts buildGoalSpecPrompt), handed in as one variable, so the question has ONE
- * text. goal-host runs this variant's compile in process and records each run's trace under this id, with no reach tag:
- * the variant is graded only by an independent verdict on the dispatch, never by the verdict it shapes.
+ * text, and goal-host asks it through THIS row's task prompt: goal-host picks the compile variant from this family by
+ * Thompson over the family's graded α/β (any variant whose prompt takes {{goal_spec_prompt}}), so a better variant
+ * replaces this one with no code change. goal-host records each run's trace under the chosen id with no reach tag; a
+ * compile that did not complete is persisted failed with no tasks and therefore carries the β withhold
+ * (beta_withheld:true), since activity-api's insert would otherwise blame it. NO WRITER GRADES THIS VARIANT YET from
+ * an independent verdict on the dispatch: until one exists the variant is ungraded (filed with D3b-1), never graded by
+ * the verdict it shapes.
  *
  * LAW 4 TENSION, NAMED: this row is DECLARED, not earned. A check on the judge cannot be extracted from the judge's own
  * reached executions before it exists (the same reason verdict-corpus-runner is seeded). Its replacement is planned by

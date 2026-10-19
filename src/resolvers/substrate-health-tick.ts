@@ -4,9 +4,10 @@ import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fetchWithRetry } from "./http-retry.js";
 import { isMetaTemplate } from "../lib/meta-templates.js";
-import { resolveDiscoveryVesselRegistryObserver } from "./discovery-vessel-registry-observer.js";
-import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { registryRowMatch, resolveDiscoveryVesselRegistryObserver } from "./discovery-vessel-registry-observer.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { readTuningNumber } from "../judge/gap-policy.js";
+import { countLiteralOnEvaluatorTree } from "../lib/evaluator-tree.js";
 
 export interface SubstrateHealthTickPointer {
   type: "substrate_health_tick";
@@ -76,8 +77,9 @@ export interface DaemonVessel {
   name: string;
   repo: string;
   /**
-   * Expected to hold a discovery record. False for the registry itself (role "registry") and for a row that
-   * declares `"registers": false`: a vessel that serves no shape has nothing to advertise and does not register.
+   * Expected to hold a discovery record: the inventory row's `registers` flag, true unless the row says false. It is
+   * the ONLY exemption, read from data, never a list or a role rule. False is honest for a vessel that serves no shape
+   * (it has nothing to advertise) and for discovery itself (the registry does not register with itself).
    */
   registers: boolean;
 }
@@ -91,7 +93,7 @@ export function daemonVesselsFromInventory(raw: unknown): DaemonVessel[] | null 
     const unit = typeof r?.unit === "string" ? r.unit : "";
     if (!unit.endsWith(".service") || typeof r.repo !== "string" || r.repo.length === 0) continue;
     if (typeof r.health_port !== "number" || r.retired === true) continue;
-    out.push({ name: unit.slice(0, -".service".length), repo: r.repo, registers: r.registers !== false && r.role !== "registry" });
+    out.push({ name: unit.slice(0, -".service".length), repo: r.repo, registers: r.registers !== false });
   }
   return out.length > 0 ? out : null;
 }
@@ -139,11 +141,12 @@ async function checkVesselLiveness(vessels: readonly string[], unitState: (unit:
 // the ribosome logged a refused /register every minute for days while every liveness view read it as healthy. This
 // tick already knows which vessels run here, so it compares that set against discovery's registry (read through
 // discovery_vessel_registry_observer) and files ONE gap per vessel once it has been absent for N consecutive ticks.
+// The gap is ARMED with the registry observer's vessel_ids reading (unregisteredGapWrite): a detector-filed gap carries
+// the check the detector measured, or it is born unadmittable.
 //
-// MATCH RULE. Registry ids are not unit names (concept-db registers as concept-db-local, identity as
-// identity-vessel-<host>), so a row matches a vessel when its id, before any "@<peer>" suffix, equals the vessel's
-// repo or unit name or extends one with "-". A match only through "@"-suffixed rows is remote_only: a federated copy
-// may be standing in for this node's own record, so it is reported and never alarmed on. The streak survives a dv
+// MATCH RULE: the observer's registryRowMatch, applied to the vessel's repo and unit name. A match only through
+// "@"-suffixed rows is remote_only: a federated copy may be standing in for this node's own record, so it is reported
+// and never alarmed on. The streak survives a dv
 // restart in the heartbeat file this tick already writes.
 export interface RegistrationJoin {
   registered: Record<string, string>;
@@ -157,11 +160,8 @@ export function registrationJoin(running: readonly DaemonVessel[], registryIds: 
   for (const v of running) {
     if (!v.registers) { out.not_expected.push(v.name); continue; }
     const names = [...new Set([v.repo, v.name])];
-    const hits = registryIds.filter((id) => {
-      const base = id.split("@")[0] ?? "";
-      return names.some((n) => base === n || base.startsWith(`${n}-`));
-    });
-    const local = hits.find((id) => !id.includes("@"));
+    const hits = registryIds.filter((id) => names.some((n) => registryRowMatch(n, id) !== null));
+    const local = hits.find((id) => names.some((n) => registryRowMatch(n, id) === "local"));
     if (local) out.registered[v.name] = local;
     else if (hits.length > 0) out.remote_only[v.name] = hits[0]!;
     else out.unregistered.push(v.name);
@@ -214,6 +214,27 @@ interface TickDeps {
   alarmTicks: () => Promise<number | null>;
   writeGap: (pointer: Record<string, unknown>) => Promise<unknown>;
   heartbeatPath: () => string;
+  readGap: (id: string) => Promise<Record<string, unknown> | null>;
+  editSiteFor: (repo: string) => string | null;
+  /** The arming instrument read live: the observer's missing_count for [vessel], null when it is not a number. */
+  armRead: (vessel: string) => Promise<number | null>;
+}
+async function armReadLive(vessel: string): Promise<number | null> {
+  const r = await resolveDiscoveryVesselRegistryObserver({ type: "discovery_vessel_registry_observer", vessel_ids: [vessel] });
+  const n = (r.body as { missing_count?: unknown } | undefined)?.missing_count;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+async function readGapLive(id: string): Promise<Record<string, unknown> | null> {
+  const r = await resolveSubstrateGap({ type: "substrateGap", id } as Parameters<typeof resolveSubstrateGap>[0]);
+  const rows = (r.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps ?? [];
+  return rows.find((g) => g["id"] === id) ?? null;
+}
+// The file that builds the registration a vessel sends, where that is derivable: the vessel's src/index.ts when it
+// constructs the shared DiscoveryRegistrationLoop there, read on the tree the gap evaluator reads. Otherwise none.
+function registrationEditSite(repo: string): string | null {
+  const site = `repos/${repo}/src/index.ts`;
+  const r = countLiteralOnEvaluatorTree(site, "new DiscoveryRegistrationLoop(");
+  return r.ok && r.count > 0 ? site : null;
 }
 const liveDeps: TickDeps = {
   unitState: systemctlUnitState,
@@ -222,14 +243,55 @@ const liveDeps: TickDeps = {
   alarmTicks: () => readTuningNumber("substrate_health.unregistered_alarm_ticks"),
   writeGap: (pointer) => resolveSubstrateGapWrite(pointer),
   heartbeatPath: () => join(WORKSPACE_ROOT, "substrate-heartbeat.json"),
+  readGap: readGapLive,
+  editSiteFor: registrationEditSite,
+  armRead: armReadLive,
 };
 let tickDeps: TickDeps = liveDeps;
-/** Tests only: replace the systemctl, registry, journal, tuning, gap-write and heartbeat-file edges (null restores them). */
+/** Tests only: replace the systemctl, registry, journal, tuning, gap read/write, edit-site, arming-read and heartbeat-file edges (null restores them). */
 export function __setSubstrateHealthTickDepsForTests(d: Partial<TickDeps> | null): void {
   tickDeps = d ? { ...liveDeps, ...d } : liveDeps;
 }
 
 export const UNREGISTERED_GAP_PREFIX = "vessel-runs-but-is-not-registered-in-discovery-";
+
+/**
+ * The substrateGap_write for a vessel that crossed the alarm. ARMED (`armed`) with a class-2 evidence_resolve over the
+ * instrument both registration detectors share: discovery_vessel_registry_observer with vessel_ids [vessel], whose
+ * top-level missing_count the judge reads as a zero_field (it reads only top-level fields), re-measured live on every
+ * read. The caller arms only when that live read just returned a number > 0, so the check is born PRESENT; otherwise
+ * the row is filed unarmed and says why. An existing row keeps what it says: the write then carries no summary or
+ * category, so the store keeps the stored text and merges the metadata. Pure.
+ */
+export function unregisteredGapWrite(a: {
+  name: string; repo: string | null; ticks: number; alarmTicks: { value: number; source: string };
+  reason: string | null; editSite: string | null; exists: boolean; armed: boolean; armRead: number | null;
+}): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    vessel: a.name,
+    repo: a.repo,
+    consecutive_ticks: a.ticks,
+    alarm_ticks: a.alarmTicks,
+    register_failure: a.reason,
+    match_rule: "registry id (before @peer) equals the repo or unit name, or extends one with '-'",
+    detector: "substrate_health_tick",
+    ...(a.armed
+      ? { evidence_resolve: { shape: "discovery_vessel_registry_observer", input: { vessel_ids: [a.name] }, zero_field: "missing_count" } }
+      : { arming_skipped: `the live discovery_vessel_registry_observer read for ${a.name} returned missing_count ${a.armRead === null ? "unmeasured" : a.armRead}, not > 0, so the check would not be born present` }),
+    ...(a.editSite ? { edit_site: a.editSite } : {}),
+  };
+  const text = a.exists ? {} : {
+    category: "systematic_failure",
+    summary:
+      `${a.name} is running (unit active) but has no discovery record for ${a.ticks} consecutive substrate_health_tick runs, ` +
+      `so no shape it serves is reachable by routing. ${a.reason ? `Its last refusal: ${a.reason}.` : "Its journal names no refused /register in the last 30 min."} ` +
+      `If it serves no shape it should not register: declare "registers": false on its inventory row. Otherwise repair the registration it sends.`,
+  };
+  return {
+    type: "substrateGap_write",
+    gap: { id: `${UNREGISTERED_GAP_PREFIX}${a.name}`, source: "substrate_detected", status: "open", detected_at: new Date().toISOString(), ...text, classification_metadata: meta },
+  };
+}
 
 async function readMostRecentHarnessReport(workspace: string): Promise<HarnessReport | null> {
   const resultsDir = join(workspace, "validation", "results");
@@ -276,29 +338,12 @@ async function checkVesselRegistration(
     const reason = await tickDeps.lastRegisterFailure(`${name}.service`).catch(() => null);
     const id = `${UNREGISTERED_GAP_PREFIX}${name}`;
     try {
-      await tickDeps.writeGap({
-        type: "substrateGap_write",
-        gap: {
-          id,
-          category: "systematic_failure",
-          source: "substrate_detected",
-          status: "open",
-          detected_at: new Date().toISOString(),
-          summary:
-            `${name} is running (unit active) but has no discovery record for ${ticks[name]} consecutive substrate_health_tick runs, ` +
-            `so no shape it serves is reachable by routing. ${reason ? `Its last refusal: ${reason}.` : "Its journal names no refused /register in the last 30 min."} ` +
-            `If it serves no shape it should not register: declare "registers": false on its inventory row. Otherwise repair the registration it sends.`,
-          classification_metadata: {
-            vessel: name,
-            repo: v?.repo ?? null,
-            consecutive_ticks: ticks[name],
-            alarm_ticks: alarmTicks,
-            register_failure: reason,
-            match_rule: "registry id (before @peer) equals the repo or unit name, or extends one with '-'",
-            detector: "substrate_health_tick",
-          },
-        },
-      });
+      const exists = (await tickDeps.readGap(id).catch(() => null)) !== null;
+      const editSite = v ? tickDeps.editSiteFor(v.repo) : null;
+      // FAIL CLOSED: arm only on a live read of the arming instrument that says the vessel is missing right now.
+      const armRead = await tickDeps.armRead(name).catch(() => null);
+      const armed = typeof armRead === "number" && armRead > 0;
+      await tickDeps.writeGap(unregisteredGapWrite({ name, repo: v?.repo ?? null, ticks: ticks[name] ?? alarmTicks.value, alarmTicks, reason, editSite, exists, armed, armRead }));
       filed.push(id);
     } catch (err) {
       console.warn(`[substrate-health-tick] gap write FAILED for ${id}: ${err instanceof Error ? err.message : String(err)}`);

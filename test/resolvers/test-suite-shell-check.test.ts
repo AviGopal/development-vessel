@@ -12,6 +12,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const BASE = realpathSync(mkdtempSync(join(tmpdir(), "shell-check-")));
 const SUPER = join(BASE, "git", "super-repo");
@@ -19,6 +20,9 @@ const SUPER = join(BASE, "git", "super-repo");
 const savedRoots = { MITOSIS_REPO_ROOT: process.env["MITOSIS_REPO_ROOT"], WORKSPACE_ROOT: process.env["WORKSPACE_ROOT"] };
 process.env["MITOSIS_REPO_ROOT"] = SUPER; // test_suite's super-repo root (testSuiteCheckRoot reads it at call time)
 process.env["WORKSPACE_ROOT"] = join(BASE, "ws");
+// substrate-gap.ts and gap-policy.ts (below) are learned-state writers: isolate every path they read before the first
+// src import, as test/resolvers/learned-state-isolation-sites.test.ts requires of a WORKSPACE_ROOT-setting file.
+isolateLearnedStateInProcess(join(BASE, "ws"));
 const testSuite = await import("../../src/resolvers/test-suite.js");
 const { evaluateGapCheck } = await import("../../src/judge/gap-check-judge.js");
 const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");

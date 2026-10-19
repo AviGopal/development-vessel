@@ -27,6 +27,7 @@ import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, sco
 import { verifyGapCondition, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
+import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 
 // The evaluator's tree (lib/evaluator-tree.ts), the same alias gap-to-feature uses.
 const runtimeRoot = evaluatorTreeRoot;
@@ -1243,7 +1244,10 @@ export async function armDecomposition(
   // CHANGE-37a: whether a step of this parent is DIRECTED is decided ONCE, as the child write below records it
   // (a step of a directed gap is directed too). The scope refusal used opts.directed alone, so a directed parent
   // decomposed by escalation or the lifecycle scan had its in-scope steps refused although they would be directed.
-  const childDirected = meta.directed === true || opts.directed === true;
+  // A gap row's direction is honoured only with its provenance (lib/operator-direct.ts gapDirected): a legacy
+  // directed:true without directed_by is undirected. opts.directed comes from a door that already required an operator.
+  const childDirected = gapDirected(meta) || opts.directed === true;
+  const childGrant = childDirected ? (inheritedDirectedGrant(meta) ?? "door:gap_to_feature") : null;
   let k = 0;
   for (const st of (parsed.steps ?? []).slice(0, 3)) {
     k++;
@@ -1325,7 +1329,7 @@ export async function armDecomposition(
     const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(childDirected ? { directed: true } : {}), ...cleared, ...childPredicate };
     if (opts.observe) { wouldArm.set(k, childPredicate); continue; } // OBSERVE: validated and judged, never written
     await resolveSubstrateGapWrite(
-      { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
+      { type: "substrateGap_write", ...(childGrant ? { _directed_grant: childGrant } : {}), gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
       childVerdict ? { birthVerdict: childVerdict } : undefined,
     );
     written.push(childId);

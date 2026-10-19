@@ -727,7 +727,8 @@ export async function decomposeGap(
   // exist or one the autonomy scope excludes, and the drafter was shown neither. The scope test is the arming's own
   // (armDecomposition's step loop: no scope for directed work, a hold exempts the repair of its own regression), over
   // the same cached read, so the list is what the arming will accept.
-  const childDirected = meta.directed === true || opts.directed === true;
+  // Honoured only with its provenance (lib/operator-direct.ts gapDirected), as the decomposer's own check.
+  const childDirected = gapDirected(meta) || opts.directed === true;
   const scope = childDirected ? null : await autonomyScope();
   const scopeHit = (rel: string): string | null => {
     if (!scope) return null;
@@ -1849,7 +1850,8 @@ async function routeCapabilityGapToNewResolver(
     gap: {
       id: String(gap.id ?? ""),
       summary: String(gap.summary ?? gap.title ?? ""),
-      classification_metadata: { ...meta, directed: isDirected },
+      // The compose's gap carries the door-derived direction and, when directed, its provenance (a recommit child inherits it).
+      classification_metadata: { ...meta, directed: isDirected, ...(isDirected ? { directed_by: inheritedDirectedGrant(meta) ?? "door:gap_to_feature" } : {}) },
       category: String(gap.category ?? ""),
     },
     land: !(pointer.dry_run ?? false),
@@ -1902,6 +1904,7 @@ async function routeCapabilityGapToNewResolver(
 }
 
 import { sweepAttempts } from "./attempt-register.js";
+import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 
 let attemptSweepInFlight = false;
 let scopeApplyInFlight = false;

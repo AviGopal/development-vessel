@@ -135,6 +135,7 @@ import { createHash as parkHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { posix as floorPosix } from "node:path";
 import { stampComposeProgress } from "../lib/compose-progress.js";
+import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 import { bindDraftedAnchor, lineMatchesDrafted, renderControlBytes, renderWindowForDrafter } from "../control-bytes.js";
 
 // COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
@@ -5354,8 +5355,10 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
             status: "open",
             // The recommit is the same defect on the same edit site: it carries its source gap's trusted
             // test_suite check (inheritableParentCheck) and the operator's hand-off, or it is born unclosable.
-            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), root_gap_id: rootGapId, failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(meta.directed === true ? { directed: true } : {}) },
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), root_gap_id: rootGapId, failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(gapDirected(meta) ? { directed: true } : {}) },
           },
+          // An honoured direction propagates with its provenance (lib/operator-direct.ts); a legacy one does not.
+          ...(gapDirected(meta) ? { _directed_grant: inheritedDirectedGrant(meta) } : {}),
         } as never);
       }
       }

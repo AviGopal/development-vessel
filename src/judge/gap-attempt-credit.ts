@@ -23,6 +23,7 @@ import { isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligib
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { creditLearning, isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
+import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 
 // LANDABILITY-RANKED SELECTION (2026-06-28). gap_to_feature historically picked gaps[0]
 // (arbitrary order), so the autonomous loop kept selecting hard META/ARCHITECTURAL gaps
@@ -541,7 +542,8 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
           summaryTail: "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + (lessonsForChild as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above.",
           extra: {},
         });
-        await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
+        // An honoured direction propagates with its provenance (lib/operator-direct.ts); a legacy one does not.
+        await resolveSubstrateGapWrite({ type: "substrateGap_write", ...(gapDirected(meta) ? { _directed_grant: inheritedDirectedGrant(meta) ?? undefined } : {}), gap: childRecord as never } as never);
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
         }
@@ -716,7 +718,7 @@ export function recordPickIntent(attemptId: string, gap: Record<string, unknown>
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     appendRecord("attemptIntent", attemptId, {
       attempt_id: attemptId, route: "gap_to_feature", repo: null, touched_files: [], gap_id: String(gap.id ?? ""), proposal_id: null,
-      authoring_execution_id: null, dispatch_id: null, directed: typeof meta.directed === "boolean" ? meta.directed : null,
+      authoring_execution_id: null, dispatch_id: null, directed: gapDirected(meta) ? true : typeof meta.directed === "boolean" ? false : null,
       node: decisionNode(), prediction: { expect_pass: [], expect_change: [] }, pre_snapshot_id: null, stage: "pick", registered_at: new Date().toISOString(),
     });
   } catch (err) { console.warn(`[gap-to-feature] attempt ledger intent for ${attemptId} not written: ${String(err).slice(0, 200)}`); }

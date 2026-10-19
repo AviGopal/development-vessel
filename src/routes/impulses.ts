@@ -47,7 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
-import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, type OperatorDirectGrant } from "../lib/operator-direct.js";
+import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
@@ -1159,6 +1159,28 @@ export async function stripUnauthorizedDirectedClaim(
   return why;
 }
 
+/**
+ * A GAP WRITE'S DIRECTION IS GRANTED HERE, OR NOT AT ALL (lib/operator-direct.ts). Deletes any inbound
+ * DIRECTED_GRANT_FIELD (a caller cannot send one); when the write's metadata claims directed:true and the
+ * Authorization key is, asked fresh, an operator:direct (or admin) credential, sets the grant to that principal's
+ * label (key id, else scopes; never anything derived from the key). The store's gate does the rest.
+ */
+export async function grantGapWriteDirection(pointerType: string, pointer: unknown, authorization: string | undefined): Promise<string | null> {
+  if (pointerType !== "substrateGap_write" || !pointer || typeof pointer !== "object") return null;
+  const p = pointer as Record<string, unknown>;
+  delete p[DIRECTED_GRANT_FIELD];
+  const env = p["gap"];
+  const holder = env !== undefined && env !== null && typeof env === "object" ? (env as Record<string, unknown>) : p;
+  delete holder[DIRECTED_GRANT_FIELD];
+  const cm = holder["classification_metadata"];
+  if (!cm || typeof cm !== "object" || Array.isArray(cm) || !("directed" in (cm as Record<string, unknown>))) return null;
+  const cred = await identityCredential(authorization, { cache: false });
+  if (!isOperatorDirectCredential(cred)) return null;
+  const label = `operator:${cred.keyId ? `key:${cred.keyId}` : `scopes=${cred.scopes.join("+") || "none"}`}`;
+  p[DIRECTED_GRANT_FIELD] = label;
+  return label;
+}
+
 async function refuseUnauthenticatedWrite(c: Context, pointerType: string, pointer?: unknown): Promise<{ refused: Response | null; cred: CallerCredential | null }> {
   if (!isWritePointerType(pointerType)) return { refused: null, cred: null };
   const cred = await identityCredential(c.req.header("Authorization"), { xApiKeyPresented: c.req.header("x-api-key") !== undefined });
@@ -1200,6 +1222,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
+    await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
     const content = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
     const impulse = {
@@ -1305,6 +1328,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     }
   }
   await stripUnauthorizedDirectedClaim(pointerType, pointer, { operatorGrant, authorization: c.req.header("Authorization") });
+  await grantGapWriteDirection(pointerType, pointer, c.req.header("Authorization"));
 
   try {
     const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType }, { signal: c.req.raw.signal });

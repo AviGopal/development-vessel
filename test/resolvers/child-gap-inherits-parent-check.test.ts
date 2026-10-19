@@ -81,7 +81,8 @@ async function storeRow(id: string): Promise<Row | undefined> {
 const metaOf = (r: Row | undefined): Row => ((r?.["classification_metadata"] ?? {}) as Row);
 async function seedParent(id: string, meta: Row): Promise<Row> {
   const gap = { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary: `child-check fixture ${id}: the report reads a dead table`, classification_metadata: { edit_site: SITE, failed_attempts: 2, failure_lessons: [{ at: "2026-10-02T12:00:00.000Z", class: "verify_failed", reason: "THE GAP'S OWN CHECK IS STILL RED on this draft" }], ...meta } };
-  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap } as never);
+  // A directed parent is written as an operator's write is: under the grant the route sets (lib/operator-direct.ts).
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", ...(meta["directed"] === true ? { _directed_grant: "operator:key:fixture" } : {}), gap } as never);
   if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
   await sg.__settleBirthEvaluationsForTests();
   return JSON.parse(JSON.stringify((await storeRow(id))!)) as Row;

@@ -54,7 +54,8 @@ describe("the step scope refusal agrees with the child it would write", () => {
   it("[MUST-FAIL] a directed parent called undirected: its in-scope step is written, directed", async () => {
     const site = stepFile();
     scope([site]);
-    const id = parent("directed", { directed: true });
+    // An operator-directed row carries its provenance (lib/operator-direct.ts gapDirected); a bare directed:true is legacy.
+    const id = parent("directed", { directed: true, directed_by: "operator:key:pin-fixture" });
     proposal({ steps: [literalStep(site)] });
     await decompose(id);
     expect(stored(`${id}-step-1`)).toBeDefined();
@@ -76,7 +77,7 @@ describe("the step scope refusal agrees with the child it would write", () => {
     const dir = a.slice(0, a.lastIndexOf("/") + 1);
     expect(b.startsWith(dir)).toBe(true);
     scope([dir]);
-    const id = parent("dirscope", { directed: true });
+    const id = parent("dirscope", { directed: true, directed_by: "operator:key:pin-fixture" });
     proposal({ steps: [literalStep(a), literalStep(b)] });
     await decompose(id);
     for (const k of [1, 2]) expect(metaOf(`${id}-step-${k}`).directed).toBe(true);

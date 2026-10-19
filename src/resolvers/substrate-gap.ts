@@ -35,6 +35,7 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType } from "../lib/caller-credential.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
+import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem } from "./test-suite.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
@@ -397,6 +398,9 @@ export interface SubstrateGapWritePointer {
    *  it is never stored, so a later writer that re-sends a row's stored fields cannot inherit it. It is an
    *  explicitness marker, not authentication (see operatorMarkerOf). */
   operator?: string;
+  /** In-process only (lib/operator-direct.ts): the operator grant for a directed:true write. The route sets it
+   *  from a validated operator:direct credential and deletes any inbound copy; it is never stored. */
+  _directed_grant?: string;
 }
 
 const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
@@ -2109,6 +2113,9 @@ async function resolveSubstrateGapWriteInner(
       };
     }
   }
+  // DIRECTED IS AN OPERATOR'S FIELD (lib/operator-direct.ts): honoured and stamped (directed_by) only under the
+  // route's grant or an in-process propagation of an honoured direction; otherwise stripped from this write and logged.
+  gateGapDirected(pointer as Record<string, unknown>);
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
   if (flat) (pointer as Record<string, unknown>)["gap"] = flat;
   if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {

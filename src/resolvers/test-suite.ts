@@ -188,6 +188,32 @@ export function mutationRevertScript(sha: string, file: string): string {
     `then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi; rm -f ${d}`;
 }
 
+/**
+ * THE RESPONSE CONTRACT (2026-10-19): every key the `test_suite` body below can carry, some only on some runs. A gap's
+ * class-2 check names one of them as its zero_field / nonzero_field / defect_field, and the judge reads that key and
+ * nothing else; a name not in this list can never be read, so the check is born unknown and held forever. The write
+ * seam validates an arming against this list (substrate-gap.ts RESPONSE CONTRACTS, checkArmingProblem). Kept here,
+ * beside the body it describes; test/resolvers/check-response-contract.test.ts runs this resolver and fails on a body
+ * key missing from it. structuredError answers are not listed: an error body is not a measurement.
+ */
+export const TEST_SUITE_RESPONSE_FIELDS = [
+  "vessel", "verified_root", "verified_head", "landed_sha", "gap_id", "proposal_id", "ran", "gate_refused", "total", "pass", "fail",
+  "test_file", "base_ref", "requested_not_passing", "filter_matched_none", "mutation", "skip", "failingTests", "red_reason", "timestamp",
+] as const;
+/**
+ * Why `test_file` is not a file this resolver can measure, or null when it is. It runs `bun test ./<test_file>`, so only
+ * a bun test module can report counts: a shell script (*.sh) or a source file that is not a test reads ran:false on
+ * every run. The test-module names are the conventions the store's armings use (*.test.*, *.spec.*, *.check.*).
+ */
+export function testSuiteFileProblem(testFile: unknown): string | null {
+  if (typeof testFile !== "string" || testFile.trim() === "") return null; // no file: the whole suite runs
+  const f = testFile.trim();
+  if (/\.(test|spec|check)\.[cm]?[jt]sx?$/.test(f)) return null;
+  return /\.sh$/.test(f)
+    ? `test_file ${f} is a shell script; test_suite runs \`bun test ./<test_file>\`, which cannot run it`
+    : `test_file ${f} is not a bun test module (*.test.*, *.spec.* or *.check.* with a js/ts extension); test_suite runs \`bun test ./<test_file>\``;
+}
+
 export async function resolveTestSuite(pointer: Record<string, unknown>): Promise<ResolverResult> {
   const rawVessel = typeof pointer.vessel === "string" ? pointer.vessel.trim() : "";
   if (!rawVessel) {

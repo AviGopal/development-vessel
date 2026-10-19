@@ -1,5 +1,7 @@
 import type { ResolverResult } from "./types.js";
 import { GIT_LOG_CONTRACT } from "./git-log.js";
+import { responseFields, RESPONSE_CONTRACT_SHAPES } from "./substrate-gap.js";
+export { responseFields, RESPONSE_CONTRACT_SHAPES };
 
 /**
  * Resolver for the `resolver_schema` shape — this vessel's answer to "what pointer args does
@@ -41,6 +43,8 @@ export interface ResolverSchemaResult {
   fields?: Array<ContractField>;
   required?: string[];
   invocation?: string;
+  /** The keys the shape's answer can carry (RESPONSE CONTRACTS), when declared. */
+  response_fields?: string[];
 }
 
 /**
@@ -122,6 +126,9 @@ const CONTRACTS: Record<string, Contract> = {
 /** The shapes this vessel publishes a contract for. Exported for the conformance test. */
 export const CONTRACT_SHAPES = Object.keys(CONTRACTS);
 
+// RESPONSE CONTRACTS (what a shape ANSWERS) are declared at the gap write seam, which enforces them
+// (substrate-gap.ts RESPONSE CONTRACTS); served here as response_fields so a check's filer can read them.
+
 export function resolveResolverSchema(pointer: Record<string, unknown>): ResolverResult {
   const shape = typeof pointer.shape === "string" ? pointer.shape : "";
   if (!shape) {
@@ -133,7 +140,9 @@ export function resolveResolverSchema(pointer: Record<string, unknown>): Resolve
   const c = CONTRACTS[shape];
   // known:false is a real answer, not a failure — it tells the synthesizer to fall back to
   // goal-text extraction rather than trust a contract that does not exist.
-  if (!c) return { shape: "resolver_schema", body: { shape, known: false } };
+  // response_fields: what the shape ANSWERS (RESPONSE CONTRACTS), so a check's filer can name a field it returns.
+  const response = responseFields(shape);
+  if (!c) return { shape: "resolver_schema", body: { shape, known: false, ...(response ? { response_fields: [...response] } : {}) } };
 
   const required = c.fields.filter((f) => f.required).map((f) => f.name);
   const result: ResolverSchemaResult = {
@@ -148,6 +157,7 @@ export function resolveResolverSchema(pointer: Record<string, unknown>): Resolve
         ? `pointer:{type:"${shape}", ${required.join(", ")}}`
         : `pointer:{type:"${shape}"}`,
     ...(c.notes ? { notes: c.notes } : {}),
+    ...(response ? { response_fields: [...response] } : {}),
   } as ResolverSchemaResult;
   return { shape: "resolver_schema", body: result as unknown as Record<string, unknown> };
 }

@@ -35,7 +35,8 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType } from "../lib/caller-credential.js";
 import type { ResolverResult } from "./types.js";
-import { onlyTestsProblem } from "./test-suite.js";
+import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem } from "./test-suite.js";
+import type { GoalReachVerdict } from "./goal-deficiency.js";
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as resolvePath, sep } from "node:path";
@@ -890,6 +891,123 @@ function cachedFleetVocabulary(): ShapeVocabulary | null {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RESPONSE CONTRACTS: WHAT AN INSTRUMENT ANSWERS (2026-10-19). A class-2 check names one field of its shape's answer
+// (zero_field / nonzero_field / defect_field) and the judge (gap-check-judge.ts) reads exactly that key, answering
+// unknown when the body has no such key. Measured on one node over 24 h: 78 of 95 birth evaluations were unknown, and
+// most could never have been anything else: git_log armed with zero_field "count" (its body is a commandResult: no
+// count), test_report (not served by this vessel's resolve route, the only one the judge asks), test_suite pointed at
+// a shell script or at a source file that is not a test, or at a field it never emits.
+//
+// WHY HERE, AND NOT BESIDE EACH RESOLVER. This file is on the evaluator's guarded path (outside the lane's autonomy
+// scope), and a guarded file must not import a module the lane can edit (test/resolvers/evaluator-grant-scan.test.ts):
+// a lane landing in git-log.ts could otherwise change what the seam admits. So the lists of lane-editable resolvers
+// (git_log, goal_reach_verdict, reach_rate_scan) live here; test_suite's lives in test-suite.ts, itself an evaluator
+// file. Drift is caught by test/resolvers/check-response-contract.test.ts, which runs those resolvers and fails on any
+// body key a list omits; goal_reach_verdict's list is a Record over keyof GoalReachVerdict (a type-only import, erased
+// at runtime), so the interface and the list cannot differ without a compile error. A list is the UNION of every key
+// any return path can carry: too wide only misses a bad arming, too narrow would condemn a good one. A shape with no
+// list is not judged (no claim either way). resolver_schema serves them as response_fields.
+//
+// THE VERDICT IS THE EXISTING CLASSIFICATION, NOT A NEW FIELD. A check that can never be measured is the same thing
+// as a predicate naming an unadvertised shape: supplied, and inert. So classifyFalsifier labels it "unresolvable",
+// with falsifier_position naming the fault and falsifier_unresolvable_reason the why (prefixed RESPONSE_CONTRACT_REASON),
+// instead of class2. An unresolvable row is never birth-evaluated (birth runs only for class2), is not admissible
+// where class2 is required, and is a check-supply candidate, so the system re-arms it. The rows born class2 before
+// this existed are re-classified by the birth sweep (reevaluateBirthVerdicts), the same way.
+// ─────────────────────────────────────────────────────────────────────────────
+export interface ResponseContract {
+  /** Every key the resolver's body can carry, some only on some answers. */
+  fields: readonly string[];
+  /** A field that is only ever a number when the named pointer input is given and non-empty. */
+  needs_input?: Readonly<Record<string, string>>;
+  /** Further, shape-specific reasons an arming can never measure (null when none). */
+  inputProblem?: (input: Record<string, unknown>) => { field: string; reason: string } | null;
+}
+const GOAL_REACH_VERDICT_KEYS: Record<keyof GoalReachVerdict, true> = {
+  measured: true, goal_hash: true, why: true, runs: true, unreached_since_last_reach: true, last_reached_at: true,
+  last_reach_judge: true, reached_lenient: true, lenient_reaches: true, newest_run_at: true,
+};
+const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
+  test_suite: {
+    fields: TEST_SUITE_RESPONSE_FIELDS,
+    // requested_not_passing counts the named tests that did not pass; with no only_tests it is null on every run.
+    needs_input: { requested_not_passing: "only_tests" },
+    inputProblem: (input) => { const why = testSuiteFileProblem(input["test_file"]); return why ? { field: "test_file", reason: why } : null; },
+  },
+  // git-log.ts: the commandResult body (`refused` and `error` only on a refusal, `repo` only when one was given).
+  git_log: { fields: ["exitCode", "stdout", "stderr", "cwd", "repo", "refused", "error"] },
+  // goal-deficiency.ts GoalReachVerdict: every field but measured / goal_hash / why only on a measured answer.
+  goal_reach_verdict: { fields: Object.keys(GOAL_REACH_VERDICT_KEYS), needs_input: { unreached_since_last_reach: "goal_hash" } },
+  // self-fact-reconcile.ts: the selfFactReconcileReport body, its only return.
+  self_fact_reconcile: { fields: [
+    "detector", "ran_at", "facts_checked", "divergence_count", "divergences", "findings", "findings_count", "finding_hashes", "gaps_emitted",
+    "gaps_closed", "canary_planted", "canary_found", "profile", "node", "trust_completion", "rows_checked", "blind_rows", "unobserved_rows",
+    "unregistered_rows", "observed", "gaps_filed", "self_gap_filed", "read_errors", "claim",
+  ] },
+  // reach-rate-scan.ts: the union of both reachRateReport bodies, the scoped re-read (activity_id) and the scan.
+  reach_rate_scan: { fields: [
+    "activity_id", "window_hours", "min_reach_rate", "contract_reach_rate", "count", "reached_count", "graded_count", "ungraded_count",
+    "success_rate", "reach_rate", "measured", "generated_at", "fetch_error", "reach_below_floor",
+    "families_evaluated", "families_skipped_insufficient_grading", "finding_count", "findings", "fleet_reached_count", "fleet_graded_count",
+    "fleet_reach_rate", "min_graded_volume", "dry_run", "completed_at",
+  ] },
+};
+/** The shapes with a declared response contract. */
+export const RESPONSE_CONTRACT_SHAPES = Object.keys(RESPONSE_CONTRACTS);
+/** The declared response fields of `shape`, or null when none are declared. */
+export function responseFields(shape: string): readonly string[] | null {
+  return RESPONSE_CONTRACTS[shape]?.fields ?? null;
+}
+const nonEmptyInput = (v: unknown): boolean => (Array.isArray(v) ? v.some((x) => typeof x === "string" ? x.trim() !== "" : x != null) : typeof v === "string" ? v.trim() !== "" : v !== undefined && v !== null);
+
+/** Prefix of a falsifier_unresolvable_reason set by a response contract: the re-classification the birth sweep owns. */
+export const RESPONSE_CONTRACT_REASON = "response_contract: ";
+/** Why an arming can never be measured: where the fault sits (a falsifier_position), the shape, and the reason. */
+export type ArmingProblem = { position: string; shape: string; reason: string };
+
+/**
+ * Why an evidence_resolve arming of a shape with a declared response contract can never be measured by the judge, or
+ * null when nothing here says so: a named field the body never carries, a field that needs an input the arming omits,
+ * or a shape-specific input problem. A shape with no contract, and the producer_contract mode (it reads discovery,
+ * not a body), are not judged here.
+ */
+export function checkArmingProblem(evidenceResolve: unknown): ArmingProblem | null {
+  if (!evidenceResolve || typeof evidenceResolve !== "object" || Array.isArray(evidenceResolve)) return null;
+  const er = evidenceResolve as Record<string, unknown>;
+  const shape = typeof er["shape"] === "string" ? er["shape"].trim() : "";
+  if (!shape || er["mode"] === "producer_contract") return null;
+  const contract = RESPONSE_CONTRACTS[shape];
+  if (!contract) return null;
+  const input = (er["input"] && typeof er["input"] === "object" ? er["input"] : {}) as Record<string, unknown>;
+  for (const k of ["zero_field", "nonzero_field", "defect_field"]) {
+    const f = typeof er[k] === "string" ? (er[k] as string).trim() : "";
+    if (!f) continue;
+    if (!contract.fields.includes(f)) return { position: `evidence_resolve.${k}`, shape, reason: `${k} "${f}" is not a field ${shape} returns (it returns: ${contract.fields.join(", ")})` };
+    const need = contract.needs_input?.[f];
+    if (need && !nonEmptyInput(input[need])) return { position: `evidence_resolve.${k}`, shape, reason: `${k} "${f}" is only measured when input.${need} is given; this arming has none` };
+  }
+  const extra = contract.inputProblem?.(input);
+  return extra ? { position: `evidence_resolve.input.${extra.field}`, shape, reason: extra.reason } : null;
+}
+
+
+/** Write a classification onto a row's metadata: the write seam's stamp, and the birth sweep's re-classification. */
+function stampFalsifierClassification(merged: Record<string, unknown>, c: FalsifierClassification): void {
+  merged["falsifier"] = c.falsifier;
+  if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
+  else delete merged["falsifier_position"];
+  if (c.predicate_mode) merged["falsifier_mode"] = c.predicate_mode;
+  else delete merged["falsifier_mode"];
+  if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
+  else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
+  // WHY it is unresolvable travels with the label: the classifier returned it and the row dropped it, so a census
+  // of unresolvable rows could not tell an inert predicate from a mis-addressed read.
+  if (c.unresolvable_reason) merged["falsifier_unresolvable_reason"] = c.unresolvable_reason;
+  else delete merged["falsifier_unresolvable_reason"];
+  merged["falsifier_classified_at"] = c.classified_at;
+}
+
 /**
  * THE CLASSIFICATION RULE, stated once and in precedence order:
  *
@@ -1059,6 +1177,10 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
   }
 
   const vocab = vocabulary === undefined ? cachedFleetVocabulary() : vocabulary;
+  // A check its shape's response contract says can never be measured is inert however the shape is advertised (RESPONSE
+  // CONTRACTS). Read from this vessel's own code, so it needs no fleet vocabulary.
+  const bad = position === "evidence_resolve.shape" ? checkArmingProblem(evidenceObj) : null;
+  if (bad) return { falsifier: "unresolvable", predicate_position: bad.position, predicate_shape: shapeName, unresolvable_reason: RESPONSE_CONTRACT_REASON + bad.reason, classified_at: at };
   if (!vocabularyIsJudgeable(vocab)) {
     // Cannot see → cannot accuse. Credit the predicate.
     return { falsifier: "class2", predicate_position: position, predicate_shape: shapeName, classified_at: at };
@@ -1447,6 +1569,63 @@ function applyBirthStamp(
 }
 
 /**
+ * RE-CLASSIFICATION BY THE RESPONSE CONTRACTS (see RESPONSE CONTRACTS), run by the birth sweep before its picks and
+ * outside its per-tick limit (it runs no check). Two directions, in one lock pass:
+ *   - an open class2 row born 'unknown' (tree not moved) whose check its contract says can never be measured is
+ *     re-classified "unresolvable" exactly as a write would classify it now, so it is no longer re-taken for nothing
+ *     and becomes a check-supply candidate;
+ *   - an open row "unresolvable" by a response contract that the current contracts no longer condemn (a new instrument
+ *     can now run it) is re-classified as a write would, and when that is class2 it is stamped an unknown birth of
+ *     this check, so the picks below re-take it in this same call.
+ * Every other classification is left as the write stamped it. Mutates the sweep's rows to match what it saved.
+ */
+async function reclassifyByResponseContract(gaps: Array<Record<string, unknown>>): Promise<void> {
+  const metaOf = (g: Record<string, unknown>): Record<string, unknown> => (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const byContract = (m: Record<string, unknown>): boolean => m["falsifier"] === "unresolvable" && String(m["falsifier_unresolvable_reason"] ?? "").startsWith(RESPONSE_CONTRACT_REASON);
+  const wanted = (g: Record<string, unknown>): FalsifierClassification | null => {
+    const m = metaOf(g);
+    if (String(g["status"] ?? "open") !== "open") return null;
+    if (m["falsifier"] === "class2") {
+      if (m["predicate_birth_verdict"] !== "unknown" || birthTreeMoved(m) || m["predicate_birth_key"] !== class2PredicateKey(m)) return null;
+      const c = classifyFalsifier(m);
+      return c.falsifier === "unresolvable" && String(c.unresolvable_reason ?? "").startsWith(RESPONSE_CONTRACT_REASON) ? c : null;
+    }
+    if (!byContract(m) || checkArmingProblem(m["evidence_resolve"])) return null;
+    return classifyFalsifier(m);
+  };
+  const ids = gaps.filter((g) => wanted(g) !== null).map((g) => String(g["id"] ?? ""));
+  if (ids.length === 0) return;
+  const done = await withGapLock(async () => {
+    const rows = await loadGaps();
+    const changed: Array<{ id: string; meta: Record<string, unknown>; c: FalsifierClassification }> = [];
+    for (const id of ids) {
+      const row = rows.find((r) => r.id === id);
+      const c = row ? wanted(row as unknown as Record<string, unknown>) : null; // re-decided on the row as stored now
+      if (!row || !c) continue;
+      const meta = (row.classification_metadata ?? {}) as Record<string, unknown>;
+      stampFalsifierClassification(meta, c);
+      if (c.falsifier === "class2") {
+        meta["predicate_birth_key"] = class2PredicateKey(meta);
+        meta["predicate_birth_verdict"] = "unknown";
+        meta["predicate_birth_at"] = new Date().toISOString();
+        for (const f of ["predicate_birth_tree_moved", "predicate_birth_tree_reason"]) delete meta[f];
+      }
+      row.classification_metadata = meta as SubstrateGap["classification_metadata"];
+      changed.push({ id, meta: JSON.parse(JSON.stringify(meta)) as Record<string, unknown>, c });
+    }
+    if (changed.length > 0) await saveGaps(rows);
+    return changed;
+  });
+  for (const d of done) {
+    const g = gaps.find((x) => String(x["id"] ?? "") === d.id);
+    if (g) g["classification_metadata"] = d.meta;
+    console.log(d.c.falsifier === "unresolvable"
+      ? `[gap-birth] ${d.id}: class2 check ${d.c.predicate_shape ?? "?"} re-classified unresolvable by the sweep at ${d.c.predicate_position ?? "?"} (${String(d.c.unresolvable_reason).slice(0, 240)}); not re-taken`
+      : `[gap-birth] ${d.id}: response-contract unresolvable lifted by the sweep (falsifier=${d.c.falsifier}); ${d.c.falsifier === "class2" ? "its birth is re-taken" : "not a class-2 check"}`);
+  }
+}
+
+/**
  * SCHEDULED RE-EVALUATION (qa R1), run from the pending-land sweep's tick over the open gaps it already read.
  * Re-takes, oldest predicate_birth_at first and at most `limit` per call: an 'unknown' (an outage or timeout
  * at birth), or a 'pending' older than BIRTH_PENDING_STALE_MS (its evaluation died with the process). A
@@ -1459,6 +1638,7 @@ export async function reevaluateBirthVerdicts(gaps: Array<Record<string, unknown
   if (process.env["GAP_STORE_ENDPOINT"] || limit <= 0) return [];
   const nowMs = Date.now();
   const at = (m: Record<string, unknown>): number => { const t = Date.parse(String(m["predicate_birth_at"] ?? "")); return Number.isFinite(t) ? t : 0; };
+  await reclassifyByResponseContract(gaps);
   const due = (g: Record<string, unknown>): boolean => {
     const m = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
     if (String(g["status"] ?? "open") !== "open" || m["predicate_birth_key"] !== class2PredicateKey(m)) return false;
@@ -2483,18 +2663,7 @@ async function resolveSubstrateGapWriteInner(
     // verdict is a label on the data, not a correction of it; silently mutating a
     // caller's metadata is how the field-name mismatches in this store became
     // invisible in the first place.
-    merged["falsifier"] = c.falsifier;
-    if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
-    else delete merged["falsifier_position"];
-    if (c.predicate_mode) merged["falsifier_mode"] = c.predicate_mode;
-    else delete merged["falsifier_mode"];
-    if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
-    else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
-    // WHY it is unresolvable travels with the label: the classifier returned it and the row dropped it, so a census
-    // of unresolvable rows could not tell an inert predicate from a mis-addressed read.
-    if (c.unresolvable_reason) merged["falsifier_unresolvable_reason"] = c.unresolvable_reason;
-    else delete merged["falsifier_unresolvable_reason"];
-    merged["falsifier_classified_at"] = c.classified_at;
+    stampFalsifierClassification(merged, c);
     // BIRTH EVALUATION: decided here, run after the save (see applyBirthStamp).
     birthJob = applyBirthStamp(gap.id, String(gap.status ?? "open"), c.falsifier, merged, priorMetaForBirth, opts?.birthVerdict, now, opts?.detectedSha);
     gap.classification_metadata = merged;
@@ -2560,6 +2729,10 @@ async function resolveSubstrateGapWriteInner(
     (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : "") +
     (unresolvableReason ? ` reason="${unresolvableReason.slice(0, 200)}"` : ""),
   );
+  // A check its response contract condemns is not birth-evaluated: say so where births are read (RESPONSE CONTRACTS).
+  if (falsifier === "unresolvable" && (unresolvableReason ?? "").startsWith(RESPONSE_CONTRACT_REASON)) {
+    console.log(`[gap-birth] ${gap.id}: class2 check not evaluated: falsifier unresolvable (${unresolvableReason!.slice(0, 240)}); held until it is re-armed`);
+  }
   // This whole block has a REAL production side effect: it shells out to `systemctl
   // start gap-compose.service` against whatever systemd this process can reach, and
   // separately fetches this vessel's own HTTP surface to nudge an in-process compose.

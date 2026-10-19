@@ -303,10 +303,11 @@ export async function resolveGapToScenarioBridge(
     }
     if (isVesselAuthoring && capabilityShape) {
       try {
-        const { GOAL_HOST_VESSEL_ENDPOINT } = await import("../config.js");
+        const { GOAL_HOST_VESSEL_ENDPOINT, METABOB_API_KEY } = await import("../config.js");
+        // goal-host's /run-goal authenticates its callers (goal-host src/inbound-auth.ts): send this vessel's key.
         await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
           body: JSON.stringify({
             targetTemplateId: "development-vessel:scaffold-and-publish-vessel",
             variables: {

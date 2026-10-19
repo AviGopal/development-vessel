@@ -209,14 +209,16 @@ export async function identityCredential(authHeader: string | undefined, opts: {
 // interactor records) and the primitives that change files, git, GitHub, units, the database or
 // the running tree. http_fetch is here because it attaches this vessel's own fleet key to loopback
 // targets: left open, an unauthenticated caller could have it re-post any gated write to this
-// route with the vessel's credential.
+// route with the vessel's credential. dispatch_goal is here for the same reason: it forwards the goal
+// to goal-host /run-goal with this vessel's fleet key, so left open, an unauthenticated caller starts
+// a walk (an edit-intent goal included) as this vessel.
 export const MUTATING_PRIMITIVES: ReadonlySet<string> = new Set([
   "fs_write", "fs_edit",
   "git_add", "git_commit", "git_push", "git_branch_create",
   "gh_pr_create", "gh_pr_merge", "gh_repo_create",
   "patch_with_tools", "apply_proposal_as_patch",
   "systemd_restart", "pull_cutover", "surrealdb_import", "activate_substrate_script", "vessel_mitosis_cutover",
-  "http_fetch",
+  "http_fetch", "dispatch_goal",
 ]);
 
 /** Whether a pointer of this type writes, and so must carry an authenticated credential. */

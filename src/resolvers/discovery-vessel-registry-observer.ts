@@ -23,6 +23,31 @@ export interface DiscoveryVesselRegistryObserverPointer {
   apiKey?: string;
   staleThresholdMs?: number;
   timeoutMs?: number;
+  /**
+   * A LOCAL-REGISTRATION CHECK. Only when given, the answer also carries top-level `missing_count` and
+   * `missing_vessels`: the named vessels with no LOCAL row in the live registry (see registryRowMatch). Absent, the
+   * response is exactly what it was. It is re-measured on every read, so a gap armed with it has no TTL to race.
+   */
+  vessel_ids?: string[];
+}
+
+/**
+ * Whether a registry row is the record of the vessel named `name`. Registry ids are not unit names (concept-db
+ * registers as concept-db-local, identity as identity-vessel-<host>), so a row matches when its id, before any
+ * "@<peer>" suffix, equals the name or extends it with "-". A row with an "@" suffix is a federated copy from a peer,
+ * which can stand in for a record this node lacks: it is "remote", never "local". Pure.
+ */
+export function registryRowMatch(name: string, rowId: string): "local" | "remote" | null {
+  const base = rowId.split("@")[0] ?? "";
+  if (!(base === name || base.startsWith(`${name}-`))) return null;
+  return rowId.includes("@") ? "remote" : "local";
+}
+
+/** The named vessels with no local row among `rowIds` (an "@peer"-only match is missing for a local check). Pure. */
+export function missingLocalVessels(names: readonly string[], rowIds: readonly string[]): string[] {
+  return [...new Set(names.map((n) => n.trim()).filter((n) => n.length > 0))]
+    .filter((n) => !rowIds.some((id) => registryRowMatch(n, id) === "local"))
+    .sort();
 }
 
 interface VesselEntry {
@@ -43,12 +68,21 @@ interface PerVessel {
   shape_count: number;
 }
 
+/** Default stale threshold: under discovery's 5-min prune TTL, above its advised 2-min heartbeat interval. */
+export const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
+
 export async function resolveDiscoveryVesselRegistryObserver(
   pointer: DiscoveryVesselRegistryObserverPointer,
 ): Promise<ResolverResult> {
   const endpoint = (pointer.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
   const apiKey = pointer.apiKey ?? API_KEY;
-  const staleMs = pointer.staleThresholdMs ?? 5 * 60 * 1000;
+  // BELOW THE PRUNE TTL, OR THE DETECTOR CANNOT FIRE. Discovery deletes a row once its last heartbeat is older than
+  // its 5-min registration TTL (discovery-vessel registry.ts DEFAULT_TTL_MS, pruned every 60 s), so with a 5-min
+  // threshold here a stale row was already gone before it could be counted and stale_count read ~0 by construction.
+  // 3 min is above discovery's advised 2-min heartbeat interval (HEARTBEAT_INTERVAL_MS) and the shared loop's 60 s, so a
+  // healthy row never reads stale, and below the TTL, so a row that missed its heartbeats is counted for ~2 min before
+  // it is pruned. A pointer may still set its own.
+  const staleMs = pointer.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
   const timeoutMs = pointer.timeoutMs ?? 5_000;
 
   if (!apiKey) {
@@ -166,6 +200,11 @@ export async function resolveDiscoveryVesselRegistryObserver(
   });
   const staleCount = perVessel.filter((p) => p.stale).length;
   const healthyCount = perVessel.length - staleCount;
+  // Only on a successful read: an unreachable or unparsed registry carries no missing_count, which a zero_field
+  // check reads as unmeasured, never as "nothing missing".
+  const missing = Array.isArray(pointer.vessel_ids)
+    ? missingLocalVessels(pointer.vessel_ids.filter((v): v is string => typeof v === "string"), perVessel.map((p) => String(p.vessel_id ?? "")))
+    : null;
 
   return {
     shape: "discoveryRegistryState",
@@ -179,6 +218,7 @@ export async function resolveDiscoveryVesselRegistryObserver(
       stale_threshold_ms: staleMs,
       per_vessel: perVessel,
       generated_at: new Date().toISOString(),
+      ...(missing ? { missing_count: missing.length, missing_vessels: missing } : {}),
     },
   };
 }

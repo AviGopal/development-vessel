@@ -1,7 +1,10 @@
 // THE GAP FALSIFIER GRAMMAR'S GOLDEN TABLE, on this side: classifyFalsifier and class2PredicateKey (substrate-gap.ts)
 // over test/fixtures/falsifier-grammar-golden.json. goal-host mirrors the grammar in its closed judge core
 // (goal-host-vessel src/judge/falsifier-grammar.ts) to write a user goal's frozen predicate in it, and runs the
-// byte-identical table through its mirror. Both sides pin the table's sha256: a change to the table on one side reddens
+// byte-identical table through its mirror — a COPY of this grammar, named debt; its replacement is one implementation
+// in a shared package both repos import (ias-executor-ts, or a super-repo packages/ module), after which this table and
+// its two-sided pin are deleted. This file runs in this vessel's normal `bun test`, so a grammar change here reddens
+// this side at its next gate. Both sides pin the table's sha256: a change to the table on one side reddens
 // that side until the other changes with it, and a change to either implementation reddens its own side. Rows carry no
 // edit site, since class-1 site reads are this vessel's alone.
 import { describe, expect, test } from "bun:test";

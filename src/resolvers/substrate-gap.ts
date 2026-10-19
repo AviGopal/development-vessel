@@ -37,7 +37,7 @@ import { isWritePointerType } from "../lib/caller-credential.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
-import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem } from "./test-suite.js";
+import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
@@ -1285,6 +1285,8 @@ export function birthCheckRepo(meta: Record<string, unknown>): { dir: string; fi
   const site = inRepo(meta["edit_site"]);
   if (site) add(site);
   if (Array.isArray(meta["check_inputs"])) for (const p of meta["check_inputs"]) { const f = inRepo(p); if (f) add(f); }
+  // A super-repo check (a shell check, test-suite.ts A SHELL CHECK) runs on the super-repo clone's tree.
+  if (er?.shape === "test_suite" && vessel === "super-repo") return { dir: testSuiteCheckRoot(vessel), files: [...files] };
   return { dir: join(process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels", vessel), files: [...files] };
 }
 /** HEAD of the repo a class-2 check runs in (see WHICH TREE), or null when it cannot be read. */

@@ -52,7 +52,6 @@ const validTestSuite = (name: string) => ({ shape: "test_suite", input: { vessel
 // Shaped like the store's real unknown rows (field names and inputs as armed).
 const gitLogCount = { shape: "git_log", input: { repo: "analysis-vessel", grep: "index.ts" }, zero_field: "count" };
 const testReportNonField = { shape: "test_report", input: {}, zero_field: "number_of_queued_write_attempts" };
-const testSuiteShellCheck = { shape: "test_suite", input: { vessel: "super-repo", test_file: "validation/scripts/substrate-status-keyless-spoke-fails-fast.check.sh" } };
 const testSuiteShellCheckArmed = { shape: "test_suite", input: { vessel: "super-repo", test_file: "validation/scripts/gen-env-sibling-derivation-foreign-fleet.check.sh", only_tests: ["the sibling is not derived"] }, zero_field: "requested_not_passing" };
 const testSuiteSourceNonField = { shape: "test_suite", input: { vessel: "development-vessel", test_file: "src/resolvers/test-suite.ts" }, zero_field: "test_suite_produced_no_countable_pass_fail_summary" };
 const goalReachValid = { shape: "goal_reach_verdict", input: { goal_hash: "8202213c" }, zero_field: "unreached_since_last_reach" };
@@ -119,15 +118,14 @@ describe("an arming is classified at the write seam against what its instrument 
     expect(metaOf(g)).toMatchObject({ falsifier: "unresolvable", falsifier_position: "evidence_resolve.zero_field" });
   });
 
-  it("(b) a test_suite arming at a super-repo .check.sh is classified unresolvable at input.test_file", async () => {
-    for (const [n, er] of [["bare", testSuiteShellCheck], ["armed", testSuiteShellCheckArmed]] as const) {
-      const id = `arm-checksh-${n}-${RUN}`;
-      const before = judged.length;
-      const { g } = await bornLogged(id, er);
-      expect(metaOf(g)).toMatchObject({ falsifier: "unresolvable", falsifier_position: "evidence_resolve.input.test_file" });
-      expect(contractReason(metaOf(g))).toContain("shell script");
-      expect(judged.slice(before)).not.toContain(id);
-    }
+  // Until test_suite could run a shell check, a super-repo .check.sh was classified unresolvable at input.test_file; it
+  // runs one now (test-suite-shell-check.test.ts), so the arming is class2 and is run.
+  it("(b) a test_suite arming at a super-repo .check.sh is class2 and run, now that test_suite runs shell checks", async () => {
+    const id = `arm-checksh-armed-${RUN}`;
+    const before = judged.length;
+    const { g } = await bornLogged(id, testSuiteShellCheckArmed);
+    expect(metaOf(g).falsifier).toBe("class2");
+    expect(judged.slice(before)).toContain(id);
   });
 
   it("control: a valid arming (zero_field requested_not_passing + only_tests) is class2, run, and born present exactly as before", async () => {
@@ -159,8 +157,6 @@ describe("(c) the birth re-take sweep re-classifies the rows born before it", ()
   };
   const fixtures: Record<string, [Record<string, unknown>, string]> = {
     [`sw-gitlog-${RUN}`]: [gitLogCount, "evidence_resolve.zero_field"],
-    [`sw-checksh-${RUN}`]: [testSuiteShellCheck, "evidence_resolve.input.test_file"],
-    [`sw-checksh-armed-${RUN}`]: [testSuiteShellCheckArmed, "evidence_resolve.input.test_file"],
     [`sw-source-${RUN}`]: [testSuiteSourceNonField, "evidence_resolve.zero_field"],
   };
   const validIds = { ts: `sw-valid-ts-${RUN}`, grv: `sw-valid-grv-${RUN}`, lifted: `sw-lifted-${RUN}` };
@@ -169,9 +165,10 @@ describe("(c) the birth re-take sweep re-classifies the rows born before it", ()
     await __settleBirthEvaluationsForTests();
     const path = join(gapStoreRootForTest(), "gaps", "gaps.json");
     const stored = JSON.parse(readFileSync(path, "utf-8")) as Array<Record<string, unknown>>;
-    const lifted = legacy(validIds.lifted, validTestSuite("widget counts rejected frames"));
-    // Classified unresolvable by an earlier contract, its check now measurable: lifted, then re-taken.
-    Object.assign(lifted.classification_metadata, { falsifier: "unresolvable", falsifier_position: "evidence_resolve.input.test_file", falsifier_unresolvable_reason: `${RESPONSE_CONTRACT_REASON}an earlier contract` });
+    // A super-repo .check.sh row the earlier contract classified unresolvable (test_suite could not run it); the shell
+    // check runs it now, so it is lifted and re-taken: how the store's .check.sh rows are released.
+    const lifted = legacy(validIds.lifted, testSuiteShellCheckArmed);
+    Object.assign(lifted.classification_metadata, { falsifier: "unresolvable", falsifier_position: "evidence_resolve.input.test_file", falsifier_unresolvable_reason: `${RESPONSE_CONTRACT_REASON}test_file validation/scripts/gen-env-sibling-derivation-foreign-fleet.check.sh is a shell script; test_suite runs \`bun test ./<test_file>\`, which cannot run it` });
     const rows = [
       ...Object.entries(fixtures).map(([id, [er]]) => legacy(id, er)),
       legacy(validIds.ts, validTestSuite("widget counts rejected frames")),

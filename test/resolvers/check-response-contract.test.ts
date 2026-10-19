@@ -52,6 +52,16 @@ describe("each declared response contract covers its resolver's body", () => {
     const r = await resolveTestSuite({ vessel: "repos/fixture-vessel", test_file: "test/widget.test.ts", only_tests: ["widget breaks"] });
     expect((r.body as Record<string, unknown>).requested_not_passing).toBe(1);
     expect(undeclared("test_suite", keysOf(r))).toEqual([]);
+    // A shell check's answers too (test-suite.ts A SHELL CHECK): one that ran, one refused, one that measured nothing.
+    for (const stdout of ["VERIFIED_ROOT=/x\nVERIFIED_HEAD=abc1234\nok   - a case\nFAIL - b case\nCHECK_EXIT=1\n", "VERIFIED_ROOT=/x\nREFUSED: bun not found\nCHECK_EXIT=2\n", "VERIFIED_ROOT=/x\nCHECK_FILE_MISSING=1\n"]) {
+      globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+        const b = init?.body ? JSON.parse(String(init.body)) : {};
+        if (b?.pointer?.type === "vesselCapability") return Response.json({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/v2/impulses/resolve" }] } });
+        return Response.json({ stdout });
+      }) as unknown as typeof fetch;
+      const sh = await resolveTestSuite({ vessel: "super-repo", test_file: "validation/scripts/x.check.sh", only_tests: ["b case"] });
+      expect(undeclared("test_suite", keysOf(sh))).toEqual([]);
+    }
     globalThis.fetch = originalFetch;
   });
 

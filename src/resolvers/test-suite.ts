@@ -2,6 +2,7 @@ import { classifyCheckRun } from "./retry-evidence.js";
 import type { ResolverResult } from "./types.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { testChildEnvShellPrefix } from "../test-child-env.js";
 
 /**
@@ -49,6 +50,11 @@ const METABOB_API_KEY = process.env.METABOB_API_KEY ?? process.env.API_KEY ?? ""
 // did not cause it. Prefer the per-vessel clone; fall back to the submodule only if absent.
 const VESSEL_CLONES_ROOT = process.env.MITOSIS_VESSEL_CLONES ?? "/workspace/git/vessels";
 const SUPER_REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo";
+/** The tree a test_suite check of `vessel` runs against: "super-repo" is the super-repo clone (a shell check's home, see
+ *  A SHELL CHECK), any other name its vessel clone. Read by the gap seam's birth tree (substrate-gap.ts birthCheckRepo). */
+export function testSuiteCheckRoot(vessel: string): string {
+  return vessel === "super-repo" ? SUPER_REPO_ROOT : `${VESSEL_CLONES_ROOT}/${vessel}`;
+}
 const DEFAULT_TIMEOUT_MS = 240_000;
 
 async function discoverShellEndpoint(): Promise<string | null> {
@@ -199,19 +205,141 @@ export function mutationRevertScript(sha: string, file: string): string {
 export const TEST_SUITE_RESPONSE_FIELDS = [
   "vessel", "verified_root", "verified_head", "landed_sha", "gap_id", "proposal_id", "ran", "gate_refused", "total", "pass", "fail",
   "test_file", "base_ref", "requested_not_passing", "filter_matched_none", "mutation", "skip", "failingTests", "red_reason", "timestamp",
+  // a shell check's answer (A SHELL CHECK, below)
+  "measured", "why", "check_exit",
 ] as const;
 /**
  * Why `test_file` is not a file this resolver can measure, or null when it is. It runs `bun test ./<test_file>`, so only
- * a bun test module can report counts: a shell script (*.sh) or a source file that is not a test reads ran:false on
- * every run. The test-module names are the conventions the store's armings use (*.test.*, *.spec.*, *.check.*).
+ * a bun test module can report counts: a source file that is not a test reads ran:false on every run. The test-module
+ * names are the conventions the store's armings use (*.test.*, *.spec.*, *.check.*). A shell script (*.sh) is run as a
+ * shell check (A SHELL CHECK, below).
  */
 export function testSuiteFileProblem(testFile: unknown): string | null {
   if (typeof testFile !== "string" || testFile.trim() === "") return null; // no file: the whole suite runs
   const f = testFile.trim();
-  if (/\.(test|spec|check)\.[cm]?[jt]sx?$/.test(f)) return null;
-  return /\.sh$/.test(f)
-    ? `test_file ${f} is a shell script; test_suite runs \`bun test ./<test_file>\`, which cannot run it`
-    : `test_file ${f} is not a bun test module (*.test.*, *.spec.* or *.check.* with a js/ts extension); test_suite runs \`bun test ./<test_file>\``;
+  if (/\.(test|spec|check)\.[cm]?[jt]sx?$/.test(f) || /\.sh$/.test(f)) return null;
+  return `test_file ${f} is not a bun test module (*.test.*, *.spec.* or *.check.* with a js/ts extension) or a shell check (*.sh); test_suite runs \`bun test ./<test_file>\` or \`bash ./<test_file>\``;
+}
+
+/** One command through the shell producer: its stdout, and the containment gate's refusal when it refused. Throws on transport failure. */
+async function runInShell(shellEndpoint: string, command: string, budgetSec: number, timeoutMs: number): Promise<{ raw: string; gateRefused: string | null }> {
+  const res = await fetch(shellEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+    // cwd is only the shell's starting directory; the command cd's to the resolved ROOT itself.
+    // timeout_sec: without it the shell kills the process group at 30s, before a suite longer than that prints its summary.
+    body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: SUPER_REPO_ROOT, timeout_sec: Math.min(budgetSec + 30, 900) } } }),
+    signal: AbortSignal.timeout(timeoutMs + 30_000),
+  });
+  const j = (await res.json().catch(() => ({}))) as { stdout?: unknown; body?: { stdout?: unknown } };
+  // The shell producer returns stdout at the TOP level of the response — that is what
+  // feature_compose (the proven caller of this same tool) reads. Accept the nested form
+  // too so a producer that wraps its payload does not silently yield an empty string,
+  // which would surface as ran:false and read as "the suite is missing" rather than
+  // "I called it wrong". Observed exactly that on first live probe.
+  const raw = String(j?.stdout ?? j?.body?.stdout ?? "");
+  // A shell-gate refusal answers {error} with no stdout. Name it: without this it reads as ran:false and, for a
+  // mutant, as "not applied", which hides that the GATE refused the evaluator's run (2026-10-06).
+  const err = (j as { error?: unknown; body?: { error?: unknown } })?.error ?? (j as { body?: { error?: unknown } })?.body?.error;
+  return { raw, gateRefused: typeof err === "string" && /refused by containment/i.test(err) ? err.slice(0, 300) : null };
+}
+
+/**
+ * A SHELL CHECK (2026-10-19): a `test_file` ending in .sh is run as the super-repo's glue checks are
+ * (validation/scripts/run-glue-tests.sh), not by bun. Those checks print one line per case, `ok   - <label>` or
+ * `FAIL - <label>`, and exit non-zero on any FAIL; a gap that tracks one names its labels in only_tests, with vessel
+ * "super-repo" (the convention scripts/substrate/lib/gap-tracked-red.sh reads). Until this, test_suite ran such a file
+ * through `bun test`, which cannot, so every such check was born unknown and held.
+ *
+ * HERMETIC. The check never runs in a live checkout's working state: the COMMITTED tree (HEAD, or base_ref) of the
+ * repo is exported with `git archive` into a fresh temp dir and the check runs there, under the same scrubbed
+ * environment as a bun child (testChildEnvShellPrefix: env -i, learned state under a temp WORKSPACE_ROOT), with its
+ * own TMPDIR, a fixed git identity like the glue runner's, and this vessel's bun first on PATH (the checks run bun and
+ * refuse without it). vessel "super-repo" is the super-repo clone (testSuiteCheckRoot), so the check's cwd and its
+ * default [repo-root] are the root of that clone's committed tree; any other vessel its own clone. Submodule
+ * worktrees are not in the export (git archive writes none).
+ *
+ * THE SAME CONTRACT AS A BUN RUN: requested_not_passing counts the only_tests labels with no `ok   - <label>` line
+ * (a label also printed as FAIL, or never printed, counts), so zero_field "requested_not_passing" reads it alike;
+ * ran is true when the check exited green (0) or red (1), printed at least one case line and no REFUSED line; total /
+ * pass / fail count the case lines. Anything else (no such file in the tree, an export that failed, exit 2 / REFUSED,
+ * a timeout, no case line) answers measured:false with why, which the judge reads as unknown: never present or absent.
+ */
+/** A label passed: an ok line names it and no FAIL line does. A line names it exactly, or with a measured value after it in
+ *  parentheses (`<label> (got: 3)`), the form these checks print; never by substring. */
+export function shellCheckLabelPassed(lines: { ok: string[]; fail: string[] }, label: string): boolean {
+  const is = (l: string): boolean => l === label || l.startsWith(label + " (");
+  return lines.ok.some(is) && !lines.fail.some(is);
+}
+export function parseShellCheck(raw: string): { ok: string[]; fail: string[] } {
+  const ok: string[] = []; const fail: string[] = [];
+  for (const line of raw.split("\n")) {
+    // `ok   - <label>` (ok, three spaces) or `FAIL - <label>`: both put the label at column 7.
+    const m = /^(ok {3}|FAIL )- (.*)$/.exec(line.replace(/\r$/, ""));
+    if (m) (m[1] === "FAIL " ? fail : ok).push(m[2]!.trim());
+  }
+  return { ok, fail };
+}
+async function resolveShellCheck(a: { name: string; rel: string; testFile: string; onlyTests: string[]; baseRef: string; timeoutMs: number; budgetSec: number; shellEndpoint: string; pointer: Record<string, unknown> }): Promise<ResolverResult> {
+  const root = testSuiteCheckRoot(a.name);
+  // bun on the check's PATH: the checks run bun themselves (and refuse without it), and the scrubbed PATH need not hold
+  // it, so the directory of the bun running this vessel goes first.
+  const bunDir = dirname(process.execPath);
+  const ref = a.baseRef || "HEAD";
+  const command =
+    `ROOT=${shq(root)}; CW="$(mktemp -d /tmp/test-suite-check-XXXXXX)"; CT="$(mktemp -d /tmp/test-suite-check-tmp-XXXXXX)"; ` +
+    `if git -C "$ROOT" archive --format=tar ${ref} 2>/dev/null | tar -x -C "$CW" 2>/dev/null; then ` +
+    `echo "VERIFIED_ROOT=$CW"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short ${ref} 2>/dev/null || echo unknown)"; ` +
+    `if [ -f "$CW"/${shq(a.testFile)} ]; then (cd "$CW" && timeout ${a.budgetSec} ${testChildEnvShellPrefix()} PATH=${shq(bunDir)}:"$PATH" TMPDIR="$CT" LANG=C.UTF-8 ` +
+    `GIT_AUTHOR_NAME=test-suite GIT_AUTHOR_EMAIL=test-suite@localhost GIT_COMMITTER_NAME=test-suite GIT_COMMITTER_EMAIL=test-suite@localhost ` +
+    `bash ${shq("./" + a.testFile)} 2>&1 </dev/null; echo "CHECK_EXIT=$?"); else echo "CHECK_FILE_MISSING=1"; fi; ` +
+    `else echo "CHECK_EXPORT_FAILED=1"; fi; rm -rf "$CW" "$CT"; true`;
+  let raw = "";
+  let gateRefused: string | null = null;
+  try {
+    ({ raw, gateRefused } = await runInShell(a.shellEndpoint, command, a.budgetSec, a.timeoutMs));
+  } catch (err) {
+    return { shape: "structuredError", body: { resolver: "test_suite", vessel: a.rel, detail: `shell dispatch failed: ${(err as Error).message}` } };
+  }
+  const lines = parseShellCheck(raw);
+  const exit = /^CHECK_EXIT=(\d+)$/m.exec(raw)?.[1];
+  // A check MEASURED only when it finished green (0) or red (1) and printed a case line. Exit 2 is the checks' REFUSED
+  // (a precondition missing: no bun, an unreadable input), 124 a timeout, anything else a crash: none of them is a
+  // reading of the cases, whatever lines came before it, so the answer is measured:false, never present or absent.
+  const refused = /^REFUSED\b.*$/m.exec(raw)?.[0];
+  const ran = (exit === "0" || exit === "1") && !refused && lines.ok.length + lines.fail.length > 0;
+  const why = ran ? null
+    : gateRefused ? `the shell gate refused the run: ${gateRefused}`
+    : refused ? `${a.testFile} refused (exit ${exit ?? "?"}): ${refused.slice(0, 200)}`
+    : exit !== undefined && exit !== "0" && exit !== "1" ? `${a.testFile} exited ${exit}${exit === "124" ? " (timed out)" : ""}: not a green or red reading`
+    : /^CHECK_FILE_MISSING=1$/m.test(raw) ? `${a.testFile} is not in ${a.rel}'s committed tree (${ref})`
+    : /^CHECK_EXPORT_FAILED=1$/m.test(raw) ? `the committed tree (${ref}) of ${a.rel} could not be exported`
+    : exit !== undefined ? `${a.testFile} exited ${exit} without printing an ok/FAIL case line`
+    : "the check produced no output";
+  return {
+    shape: "test_suite",
+    body: {
+      vessel: a.rel,
+      verified_root: raw.match(/^VERIFIED_ROOT=(.+)$/m)?.[1]?.trim() ?? null,
+      verified_head: raw.match(/^VERIFIED_HEAD=(.+)$/m)?.[1]?.trim() ?? null,
+      landed_sha: typeof a.pointer.landed_sha === "string" ? a.pointer.landed_sha : null,
+      gap_id: typeof a.pointer.gap_id === "string" ? a.pointer.gap_id : null,
+      proposal_id: typeof a.pointer.proposal_id === "string" ? a.pointer.proposal_id : null,
+      ran,
+      ...(gateRefused ? { gate_refused: gateRefused } : {}),
+      ...(ran ? {} : { measured: false, why }),
+      total: lines.ok.length + lines.fail.length,
+      pass: lines.ok.length,
+      fail: lines.fail.length,
+      test_file: a.testFile,
+      base_ref: a.baseRef || null,
+      check_exit: exit !== undefined ? Number(exit) : null,
+      requested_not_passing: ran && a.onlyTests.length > 0 ? a.onlyTests.filter((t) => !shellCheckLabelPassed(lines, t)).length : null,
+      skip: 0,
+      failingTests: lines.fail.slice(0, 25),
+      timestamp: new Date().toISOString(),
+    },
+  };
 }
 
 export async function resolveTestSuite(pointer: Record<string, unknown>): Promise<ResolverResult> {
@@ -323,6 +451,12 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     }
     testFile = rel;
   }
+  // A shell check (*.sh) is run as the glue runner runs one, in an exported committed tree (see A SHELL CHECK).
+  if (/\.sh$/.test(testFile)) {
+    if (mutate || edit) return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: mutate ? "mutate_revert" : "mutate_edit", detail: "a mutation runs only on a bun test file, not a shell check" } };
+    const baseRefSh = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim()) ? pointer.base_ref.trim() : "";
+    return resolveShellCheck({ name, rel, testFile, onlyTests, baseRef: baseRefSh, timeoutMs, budgetSec, shellEndpoint, pointer });
+  }
   // See onlyTestsPattern / NAMES ARE DATA above: the pattern reaches bun as one argv element decoded by
   // the shell, never as shell text.
   const testFilter = onlyTests.length > 0
@@ -355,25 +489,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   let raw = "";
   let gateRefused: string | null = null;
   try {
-    const res = await fetch(shellEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      // cwd is only the shell's starting directory; the command cd's to the resolved ROOT itself.
-      // timeout_sec: without it the shell kills the process group at 30s, before a suite longer than that prints its summary.
-      body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: SUPER_REPO_ROOT, timeout_sec: Math.min(budgetSec + 30, 900) } } }),
-      signal: AbortSignal.timeout(timeoutMs + 30_000),
-    });
-    const j = (await res.json().catch(() => ({}))) as { stdout?: unknown; body?: { stdout?: unknown } };
-    // The shell producer returns stdout at the TOP level of the response — that is what
-    // feature_compose (the proven caller of this same tool) reads. Accept the nested form
-    // too so a producer that wraps its payload does not silently yield an empty string,
-    // which would surface as ran:false and read as "the suite is missing" rather than
-    // "I called it wrong". Observed exactly that on first live probe.
-    raw = String(j?.stdout ?? j?.body?.stdout ?? "");
-    // A shell-gate refusal answers {error} with no stdout. Name it: without this it reads as ran:false and, for a
-    // mutant, as "not applied", which hides that the GATE refused the evaluator's run (2026-10-06).
-    const err = (j as { error?: unknown; body?: { error?: unknown } })?.error ?? (j as { body?: { error?: unknown } })?.body?.error;
-    if (typeof err === "string" && /refused by containment/i.test(err)) gateRefused = err.slice(0, 300);
+    ({ raw, gateRefused } = await runInShell(shellEndpoint, command, budgetSec, timeoutMs));
   } catch (err) {
     return { shape: "structuredError", body: { resolver: "test_suite", vessel: rel, detail: `shell dispatch failed: ${(err as Error).message}` } };
   }

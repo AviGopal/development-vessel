@@ -134,3 +134,57 @@ export const GOAL_SHAPE_PRE_CHECK_TEMPLATE: ActivityTemplate = {
     },
   ],
 };
+
+/**
+ * goal-shape-pre-check, VARIANT V6 (reach conditions 1+2: the right predicate, recorded before acting).
+ *
+ * The same pre-run activity, asked a wider question: not only "does the chosen template's output intersect the expected
+ * shapes" but "what will count as this goal being reached" — the reach judge's own completion-state question
+ * (goal-host reach-grounding.ts COMPLETION_STATE_QUESTION) asked BEFORE anything runs, with no output in front of it.
+ * Its answer (completion shapes, a checkable criterion, kind, subject, and optionally a check in this vessel's gap
+ * falsifier grammar) is frozen on the dispatch and every verdict of that dispatch is graded against it. It emits the
+ * family's shapeContractCheckResult, with `expected` = the recorded completion shapes.
+ *
+ * The prompt is goal-host's (goal-spec.ts buildGoalSpecPrompt), handed in as one variable, so the question has ONE
+ * text. goal-host runs this variant's compile in process and records each run's trace under this id, with no reach tag:
+ * the variant is graded only by an independent verdict on the dispatch, never by the verdict it shapes.
+ *
+ * LAW 4 TENSION, NAMED: this row is DECLARED, not earned. A check on the judge cannot be extracted from the judge's own
+ * reached executions before it exists (the same reason verdict-corpus-runner is seeded). Its replacement is planned by
+ * extraction: once independent verdicts grade this variant, a ribosome-extracted variant of goal-shape-pre-check that
+ * reaches more often replaces it, and this declared row is retired.
+ */
+export const GOAL_SHAPE_PRE_CHECK_V6_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:goal-shape-pre-check:v6-completion-state",
+  name: "goal-shape-pre-check (V6: completion state recorded before the run)",
+  description:
+    "Variant of goal-shape-pre-check. Records a goal's acceptance predicate BEFORE the run: the reach judge's completion-" +
+    "state question asked with no output in front of it. Emits shapeContractCheckResult whose `expected` is the recorded " +
+    "completion shapes, plus the criterion, kind, subject and an optional check in the gap falsifier grammar.",
+  inputShapes: [],
+  outputShapes: ["shapeContractCheckResult"],
+  tags: ["goal-execution", "validation", "pre-check", "reach-condition"],
+  // A variant of the family, not a new activity.
+  variant_of: "development-vessel:goal-shape-pre-check",
+  variables: [
+    {
+      name: "goal_spec_prompt",
+      description: "The completion-state question for one goal, built by goal-host (goal-spec.ts buildGoalSpecPrompt).",
+    },
+  ],
+  tasks: [
+    {
+      id: "compile_spec",
+      description:
+        "Ask the completion-state question before the run. Returns { completion_shapes, criterion, kind, subject, check }.",
+      resolver: "llm_completion_dispatch",
+      config: {
+        type: "llm_completion_dispatch",
+        prompt: "{{goal_spec_prompt}}",
+        model: "auto",
+        max_tokens: 400,
+      },
+      outputShapes: ["shapeContractCheckResult"],
+    },
+  ],
+} as ActivityTemplate;

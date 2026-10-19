@@ -110,7 +110,7 @@ import { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidi
 // Goal recovery activities (2026-06-04): replace autoDraft with explicit,
 // measurable, Thompson-sampled activities for shape pre-check, failure recovery,
 // and orchestrated retry. Composable standalone or together.
-import { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
+import { GOAL_SHAPE_PRE_CHECK_TEMPLATE, GOAL_SHAPE_PRE_CHECK_V6_TEMPLATE } from "./goal-shape-pre-check.js";
 import { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 import { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 // Template-mitosis variant-authoring loop (2026-06-04): detects weak template
@@ -214,7 +214,7 @@ export { DETECT_RECURRING_TRACE_PATTERN_TEMPLATE } from "./detect-recurring-trac
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 export { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
-export { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
+export { GOAL_SHAPE_PRE_CHECK_TEMPLATE, GOAL_SHAPE_PRE_CHECK_V6_TEMPLATE } from "./goal-shape-pre-check.js";
 export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
@@ -542,6 +542,10 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   //     → recover → compile. Thompson Sampling drives template selection; exclude
   //     list accumulates failed templates; autoDraft never fires.
   GOAL_SHAPE_PRE_CHECK_TEMPLATE,
+  //   goal-shape-pre-check V6 (2026-10-19): a VARIANT of the gate above that records the goal's completion state before
+  //     the run (reach conditions 1+2); goal-host runs its compile in process and traces it under this id. Declared,
+  //     not earned (law 4) — named in the template, with its replacement by extraction planned.
+  GOAL_SHAPE_PRE_CHECK_V6_TEMPLATE,
   RECOVER_FROM_GOAL_FAILURE_TEMPLATE,
   GOAL_EXECUTION_WITH_RETRY_TEMPLATE,
   // Template-mitosis variant-authoring loop (2026-06-04). Boredom goal[25]

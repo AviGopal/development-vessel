@@ -1,0 +1,234 @@
+{
+  "comment": "Gap falsifier grammar golden table. Byte-identical in goal-host test/fixtures/ and development-vessel test/fixtures/; each side runs its own implementation over it and pins this file's sha256. Rows never carry an edit site: class-1 site reads are development-vessel's alone.",
+  "vocabulary": [
+    "trace_store_report",
+    "gate_self_probe",
+    "goal_reach_verdict",
+    "test_suite"
+  ],
+  "cases": [
+    {
+      "name": "none: no predicate",
+      "meta": {},
+      "expect": {
+        "falsifier": "none",
+        "predicate_position": null,
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":null,\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "none: evidence_resolve without a shape",
+      "meta": {
+        "evidence_resolve": {
+          "input": {}
+        }
+      },
+      "expect": {
+        "falsifier": "none",
+        "predicate_position": null,
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"input\":{}},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "class2: evidence_resolve.shape advertised",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "gate_self_probe",
+          "zero_field": "failing"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "gate_self_probe",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"gate_self_probe\",\"zero_field\":\"failing\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: evidence_resolve.shape unadvertised",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "failurePatternReport",
+          "zero_field": "n"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": "failurePatternReport",
+        "key": "{\"evidence_resolve\":{\"shape\":\"failurePatternReport\",\"zero_field\":\"n\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "class2: verify_shape advertised",
+      "meta": {
+        "verify_shape": "trace_store_report"
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "verify_shape",
+        "predicate_shape": "trace_store_report",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":null,\"verify_shape\":\"trace_store_report\"}"
+      }
+    },
+    {
+      "name": "class2: sample-body type, no shape",
+      "meta": {
+        "evidence_resolve": {
+          "type": "goal_reach_verdict",
+          "goal_hash": "abcd1234"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.type",
+        "predicate_shape": "goal_reach_verdict",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"goal_hash\":\"abcd1234\",\"type\":\"goal_reach_verdict\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "evidence_resolve.shape wins over verify_shape",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "test_suite",
+          "zero_field": "requested_not_passing"
+        },
+        "verify_shape": "trace_store_report"
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "test_suite",
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"test_suite\",\"zero_field\":\"requested_not_passing\"},\"verify_shape\":\"trace_store_report\"}"
+      }
+    },
+    {
+      "name": "none: an unbound slot measures nothing",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "{{shape}}"
+        }
+      },
+      "expect": {
+        "falsifier": "none",
+        "predicate_position": null,
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"shape\":\"{{shape}}\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "class2: producer_contract for an unadvertised identifier",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "brandNewShape",
+          "mode": "producer_contract"
+        }
+      },
+      "expect": {
+        "falsifier": "class2",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": "brandNewShape",
+        "predicate_mode": "producer_contract",
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"mode\":\"producer_contract\",\"shape\":\"brandNewShape\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: producer_contract on a write shape",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "memoryNote_write",
+          "mode": "producer_contract"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"mode\":\"producer_contract\",\"shape\":\"memoryNote_write\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: producer_contract on a mutating primitive",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "http_fetch",
+          "mode": "producer_contract"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "evidence_resolve.shape",
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"mode\":\"producer_contract\",\"shape\":\"http_fetch\"},\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: hardcoded_url without a site",
+      "meta": {
+        "hardcoded_url": "http://localhost:8080"
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "hardcoded_url",
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":null,\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: expected_literal without a site",
+      "meta": {
+        "expected_literal": "const X = 1;"
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": "expected_literal",
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":null,\"verify_shape\":null}"
+      }
+    },
+    {
+      "name": "unresolvable: a non-unique compose anchor",
+      "meta": {
+        "evidence_resolve": {
+          "shape": "gate_self_probe",
+          "error": "no_unique_anchor at x"
+        }
+      },
+      "expect": {
+        "falsifier": "unresolvable",
+        "predicate_position": null,
+        "predicate_shape": null,
+        "predicate_mode": null,
+        "unadvertised_shape": null,
+        "key": "{\"evidence_resolve\":{\"error\":\"no_unique_anchor at x\",\"shape\":\"gate_self_probe\"},\"verify_shape\":null}"
+      }
+    }
+  ]
+}

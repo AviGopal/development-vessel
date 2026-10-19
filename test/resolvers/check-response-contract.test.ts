@@ -8,9 +8,13 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "check-response-contract-"));
 process.env["WORKSPACE_ROOT"] = ROOT;
+// substrate-gap.ts (checkArmingProblem, below) is a learned-state writer: isolate every path it reads before the first
+// src import, as test/resolvers/learned-state-isolation-sites.test.ts requires of a WORKSPACE_ROOT-setting file.
+isolateLearnedStateInProcess(ROOT);
 const { responseFields, RESPONSE_CONTRACT_SHAPES, resolveResolverSchema } = await import("../../src/resolvers/resolver-schema.js");
 const { resolveGitLog, __setGitLogRootsForTests } = await import("../../src/resolvers/git-log.js");
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");

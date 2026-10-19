@@ -449,7 +449,21 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     }
   }
 
-  const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "VESSEL_CLONE_ROOT", "VESSELS_CLONE_ROOT", "PARKED_LANDINGS_DIR", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "COMPOSE_WS_DIR", "SEMANTIC_CUTOVER_GATE"] as const;
+  // ENVIRONMENT PINS (INTERIM). The corpus was recorded in the test-child shape (env -i … WORKSPACE_ROOT="$(mktemp
+  // -d)"): every learned-state variable unset, WORKSPACE_ROOT a scratch dir under the OS temp dir. The gate runs the
+  // suite under pull-sync's scrubbed_env instead, which ALSO sets the learned-state variables to a fresh root under
+  // /tmp: the compose path then makes its report dir there (feature-compose.ts PROPOSALS_DIR), INSIDE the fs guard's
+  // tmpdir, so the refused `mkdirSync /workspace/proposals` the recording holds never happens. Each run therefore
+  // unsets those again and gives WORKSPACE_ROOT a scratch dir under ROOT (inside the guard, as mktemp was: the
+  // compose's authoring-inflight marker, feature-compose.ts writeAuthoringMarker, lands there unrecorded either way).
+  // Pinning a variable in a test is not the repair: each pinned src read is an env-sweep entry on its own row.
+  // EXPECTATION_CALIB_PATH is read at module load (judge/gap-attempt-credit.ts), so a per-run pin cannot reach it;
+  // nothing in the corpus writes it.
+  const PLAIN_SHELL_UNSET = [
+    "PROPOSALS_DIR", "GAP_CLASS_POSTERIOR_PATH", "EXPECTATION_CALIB_PATH",
+    "CLOSE_ORACLE_CALIB_PATH", "DETECTOR_CLOSURE_LEDGER_PATH",
+  ] as const;
+  const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "VESSEL_CLONE_ROOT", "VESSELS_CLONE_ROOT", "PARKED_LANDINGS_DIR", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "COMPOSE_WS_DIR", "SEMANTIC_CUTOVER_GATE", "WORKSPACE_ROOT", ...PLAIN_SHELL_UNSET] as const;
   const savedEnv: Record<string, string | undefined> = {};
 
   return {
@@ -485,6 +499,8 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       process.env["COMPOSE_SLOT_DIR"] = join(ws, "slots");
       process.env["COMPOSE_WS_DIR"] = join(ws, "compose-ws");
       delete process.env["SEMANTIC_CUTOVER_GATE"];
+      for (const k of PLAIN_SHELL_UNSET) delete process.env[k];
+      process.env["WORKSPACE_ROOT"] = join(ws, "workspace-root");
       originalFetch = globalThis.fetch;
       const sink = (...a: unknown[]) => { rec.console.push(norm(a.map((x) => (typeof x === "string" ? x : (() => { try { return JSON.stringify(x); } catch { return String(x); } })())).join(" "))); };
       console.log = sink; console.warn = sink; console.error = sink;
@@ -493,6 +509,12 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       try {
         const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
         __resetPolicyReadsForTests();
+        // ORDER-INDEPENDENT CAPACITY READ (INTERIM). compose-slots.ts caches the composeCapacity record for 30 s per
+        // process (COMPOSE_CAPACITY_TTL_MS), and __resetPolicyReadsForTests does not clear it: the read showed only
+        // when a fixture was the first compose of a cold process, so the recording depended on what ran before it.
+        // Clearing it per run (the null reader is the module's own) makes every fixture read it, in any order.
+        const { __setComposeCapacityReaderForTests } = await import("../../src/compose-slots.js");
+        __setComposeCapacityReaderForTests(null);
         const r = await fc.resolveFeatureCompose({ type: "feature_compose", ...fixture.pointer });
         const b = (r?.body ?? {}) as Row;
         onBody?.(b);

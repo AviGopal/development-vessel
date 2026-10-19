@@ -5,6 +5,9 @@
 // named debt until a shared package replaces it. This test is the same in both repos except for the
 // constants below, and runs the SAME table (test/fixtures/caller-credential-cases.json, identical in both):
 //   - every case's calls, against THIS repo's module, with identity and DNS stood in for;
+//   - mutating_primitives_include: every name the table lists must be in the module's MUTATING_PRIMITIVES and gated as
+//     a write (dispatch_goal: qa ruling). Red-provable without touching the module: the same row is run against a
+//     planted copy of the module with dispatch_goal removed, and must fail there;
 //   - module_sha256: the table pins the sha256 of the module bytes (after the copy header, in the copy), so
 //     an edit to the module reds this side until the table is re-pinned;
 //   - sibling parity: where both checkouts sit side by side (the fleet's vessels directory, the super-repo's
@@ -14,7 +17,8 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import dns from "node:dns";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -36,7 +40,13 @@ type Case = {
   dns?: Record<string, Array<{ address: string; family: number }> | "fail">;
   calls: Call[]; then_identity?: Mode; then_calls?: Call[]; expect_identity_calls: number;
 };
-const table = JSON.parse(readFileSync(TABLE_FILE, "utf8")) as { module_sha256: string; cases: Case[] };
+const table = JSON.parse(readFileSync(TABLE_FILE, "utf8")) as { module_sha256: string; mutating_primitives_include: string[]; cases: Case[] };
+
+type GateModule = { MUTATING_PRIMITIVES: ReadonlySet<string>; isWritePointerType: (t: string) => boolean };
+/** The table's required primitives a module does NOT gate as a write. */
+function missingPrimitives(mod: GateModule): string[] {
+  return table.mutating_primitives_include.filter((n) => !mod.MUTATING_PRIMITIVES.has(n) || !mod.isWritePointerType(n));
+}
 
 /** The module bytes the table pins: the whole file, or what follows the copy header in the copy. */
 function moduleBody(text: string): string {
@@ -96,6 +106,26 @@ async function runCall(c: Call): Promise<void> {
 describe("caller-credential golden table", () => {
   it("caller-credential-golden the module bytes are the ones the shared table pins", () => {
     expect(sha256(moduleBody(readFileSync(MODULE_FILE, "utf8")))).toBe(table.module_sha256);
+  });
+
+  it("caller-credential-golden every primitive the table names is in MUTATING_PRIMITIVES and gated as a write", () => {
+    expect(table.mutating_primitives_include).toContain("dispatch_goal");
+    expect(missingPrimitives(cc as unknown as GateModule)).toEqual([]);
+  });
+
+  it("caller-credential-golden red control: that row fails against a planted copy of the module without dispatch_goal", async () => {
+    const body = moduleBody(readFileSync(MODULE_FILE, "utf8"));
+    const planted = body.replace('"http_fetch", "dispatch_goal",', '"http_fetch",');
+    expect(planted).not.toBe(body);
+    const dir = mkdtempSync(join(tmpdir(), "caller-credential-planted-"));
+    try {
+      const f = join(dir, "caller-credential-planted.ts");
+      writeFileSync(f, planted);
+      const mod = (await import(f)) as unknown as GateModule;
+      expect(missingPrimitives(mod)).toEqual(["dispatch_goal"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   for (const tc of table.cases) {

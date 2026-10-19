@@ -565,6 +565,7 @@ const CHILD_SPAWN_ALLOWLIST: Record<string, [number, string]> = {
   "src/resolvers/systemd-unit-health-observer.ts#probeUnit#argv:systemctl": [1, UNIT],
   "src/resolvers/test-suite.ts#mutationRevertScript#sh:git": [2, GIT_SH],
   "src/resolvers/test-suite.ts#resolveTestSuite#sh:git": [6, GIT_SH],
+  "src/resolvers/test-suite.ts#runShellCheck#sh:git": [2, GIT_SH],
   'src/resolvers/vessel-mitosis-cutover.ts#resolveVesselMitosisCutover#argv:process.env["GIT_CMD"] ?? "git': [1, GIT],
   "src/resolvers/vessel-mitosis-cutover.ts#runGit#argv:gitCmd": [1, "the cutover git wrapper (git binary, no vessel code); PLAN4 §8 lower risk"],
   "src/resolvers/vessel-mitosis-cutover.ts#runGitAwareCutoverInner#argv:process.execPath": [1, "FLAG (follow-up, not the evaluator path): the post-landing `substrate:deploy` package.json hook runs with { ...process.env, SUBSTRATE_BASE_ROOT }; a deploy script may need more than the test allowlist, so scrubbing it needs its own review"],

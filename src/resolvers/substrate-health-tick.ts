@@ -8,6 +8,7 @@ import { registryRowMatch, resolveDiscoveryVesselRegistryObserver } from "./disc
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { readTuningNumber } from "../judge/gap-policy.js";
 import { countLiteralOnEvaluatorTree } from "../lib/evaluator-tree.js";
+import { testChildEnv } from "../test-child-env.js";
 
 export interface SubstrateHealthTickPointer {
   type: "substrate_health_tick";
@@ -103,8 +104,10 @@ type LivenessStatus = "active" | "inactive" | "not_placed" | "unknown";
 // is-enabled answers for a unit this node does not run: the profile masked or disabled it, or it is not installed.
 const NOT_PLACED = new Set(["disabled", "masked", "masked-runtime", "not-found", ""]);
 
+// Unit-state and journal reads run no vessel code and need nothing from this process's env, so they get the shared
+// scrubbed env (test-child-env.ts: PATH and HOME passed through, NODE_ENV/TZ fixed), as the child-env class check requires.
 async function systemctlOut(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["systemctl", ...args], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["systemctl", ...args], { stdout: "pipe", stderr: "pipe", env: testChildEnv() });
   const out = (await new Response(proc.stdout).text()).trim();
   await proc.exited;
   return out;
@@ -188,7 +191,7 @@ export function advanceUnregisteredTicks(prev: Record<string, number>, unregiste
 
 async function lastRegisterFailure(unit: string): Promise<string | null> {
   try {
-    const proc = Bun.spawn(["journalctl", "--no-pager", "-o", "cat", "-u", unit, "--since", "-30min"], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["journalctl", "--no-pager", "-o", "cat", "-u", unit, "--since", "-30min"], { stdout: "pipe", stderr: "pipe", env: testChildEnv() });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
     const line = out.split("\n").filter((l) => l.includes("register failed")).pop();

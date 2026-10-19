@@ -1,9 +1,12 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fetchWithRetry } from "./http-retry.js";
 import { isMetaTemplate } from "../lib/meta-templates.js";
+import { resolveDiscoveryVesselRegistryObserver } from "./discovery-vessel-registry-observer.js";
+import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { readTuningNumber } from "../judge/gap-policy.js";
 
 export interface SubstrateHealthTickPointer {
   type: "substrate_health_tick";
@@ -14,6 +17,10 @@ export interface SubstrateHealthTickPointer {
   confidence_min_pairs?: number;       // default 8 — below this the ratio is UNMEASURED (null), not false
   stability_rate_ceiling?: number;     // default 1.0 per hour
   optimality_ratio_ceiling?: number;   // default 2.0
+  // Ticks a running vessel may stay absent from discovery before ONE gap is filed. Pointer first,
+  // then the tuning row substrate_health.unregistered_alarm_ticks, else 3.
+  unregistered_alarm_ticks?: number;
+  inventory_path?: string;             // default <WORKSPACE_ROOT>/substrate/fleet/vessels.inventory.json
 }
 
 interface VariantMetrics {
@@ -44,10 +51,15 @@ interface HarnessReport {
 }
 
 // Persistent daemon vessels whose systemd unit must be "active".
-// boredom-vessel is excluded: it is Type=oneshot triggered by a timer and is
-// legitimately "inactive" between runs. Its liveness is captured by the
-// execution traces it produces, not by a persistent service status.
-const SUBSTRATE_VESSELS = [
+//
+// DERIVED FROM THE INVENTORY (vessel set = placement), the way validation/scripts/vessel-secrets-dropin.test.sh
+// derives its universe: every inventory row with a repo, a .service unit and a health port, not retired. The hand
+// list below is only the fallback when the deployed inventory cannot be read, and the report says which was used.
+// A unit that is not active is DOWN only when it is placed here; one this node's profile leaves out (disabled,
+// masked, not installed) is not_placed, since a spoke legitimately runs no copy of what its hub owns.
+// boredom-vessel stays out by construction: Type=oneshot under a timer, no health port. Its liveness is captured
+// by the execution traces it produces, not by a persistent service status.
+const FALLBACK_SUBSTRATE_VESSELS = [
   "activity-api",
   "development-vessel",
   "discovery-vessel",
@@ -59,22 +71,58 @@ const SUBSTRATE_VESSELS = [
   "concept-db",
 ] as const;
 
-async function checkVesselLiveness(): Promise<{
-  statuses: Record<string, "active" | "inactive" | "unknown">;
+export interface DaemonVessel {
+  /** Unit name without ".service"; the key of vessel_liveness.statuses. */
+  name: string;
+  repo: string;
+  /**
+   * Expected to hold a discovery record. False for the registry itself (role "registry") and for a row that
+   * declares `"registers": false`: a vessel that serves no shape has nothing to advertise and does not register.
+   */
+  registers: boolean;
+}
+
+/** The daemon vessel set from a parsed inventory, or null when it names none. Pure. */
+export function daemonVesselsFromInventory(raw: unknown): DaemonVessel[] | null {
+  const rows = (raw as { vessels?: unknown } | null)?.vessels;
+  if (!Array.isArray(rows)) return null;
+  const out: DaemonVessel[] = [];
+  for (const r of rows as Array<Record<string, unknown>>) {
+    const unit = typeof r?.unit === "string" ? r.unit : "";
+    if (!unit.endsWith(".service") || typeof r.repo !== "string" || r.repo.length === 0) continue;
+    if (typeof r.health_port !== "number" || r.retired === true) continue;
+    out.push({ name: unit.slice(0, -".service".length), repo: r.repo, registers: r.registers !== false && r.role !== "registry" });
+  }
+  return out.length > 0 ? out : null;
+}
+
+type UnitState = { active: string; enabled: string };
+type LivenessStatus = "active" | "inactive" | "not_placed" | "unknown";
+// is-enabled answers for a unit this node does not run: the profile masked or disabled it, or it is not installed.
+const NOT_PLACED = new Set(["disabled", "masked", "masked-runtime", "not-found", ""]);
+
+async function systemctlOut(args: string[]): Promise<string> {
+  const proc = Bun.spawn(["systemctl", ...args], { stdout: "pipe", stderr: "pipe" });
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  return out;
+}
+async function systemctlUnitState(unit: string): Promise<UnitState> {
+  const active = await systemctlOut(["is-active", unit]);
+  return { active, enabled: active === "active" ? "" : await systemctlOut(["is-enabled", unit]) };
+}
+
+async function checkVesselLiveness(vessels: readonly string[], unitState: (unit: string) => Promise<UnitState>): Promise<{
+  statuses: Record<string, LivenessStatus>;
   down: string[];
 }> {
-  const statuses: Record<string, "active" | "inactive" | "unknown"> = {};
+  const statuses: Record<string, LivenessStatus> = {};
   const down: string[] = [];
   await Promise.all(
-    SUBSTRATE_VESSELS.map(async (vessel) => {
+    vessels.map(async (vessel) => {
       try {
-        const proc = Bun.spawn(["systemctl", "is-active", `${vessel}.service`], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const out = (await new Response(proc.stdout).text()).trim();
-        await proc.exited;
-        const status = out === "active" ? "active" : "inactive";
+        const st = await unitState(`${vessel}.service`);
+        const status: LivenessStatus = st.active === "active" ? "active" : NOT_PLACED.has(st.enabled) ? "not_placed" : "inactive";
         statuses[vessel] = status;
         if (status === "inactive") down.push(vessel);
       } catch {
@@ -85,6 +133,103 @@ async function checkVesselLiveness(): Promise<{
   );
   return { statuses, down };
 }
+
+// ─── Running but unregistered ──────────────────────────────────────────────────────────────────────────────────────
+// A vessel whose unit is active but which holds no discovery record is unreachable by routing, and nothing said so:
+// the ribosome logged a refused /register every minute for days while every liveness view read it as healthy. This
+// tick already knows which vessels run here, so it compares that set against discovery's registry (read through
+// discovery_vessel_registry_observer) and files ONE gap per vessel once it has been absent for N consecutive ticks.
+//
+// MATCH RULE. Registry ids are not unit names (concept-db registers as concept-db-local, identity as
+// identity-vessel-<host>), so a row matches a vessel when its id, before any "@<peer>" suffix, equals the vessel's
+// repo or unit name or extends one with "-". A match only through "@"-suffixed rows is remote_only: a federated copy
+// may be standing in for this node's own record, so it is reported and never alarmed on. The streak survives a dv
+// restart in the heartbeat file this tick already writes.
+export interface RegistrationJoin {
+  registered: Record<string, string>;
+  remote_only: Record<string, string>;
+  unregistered: string[];
+  not_expected: string[];
+}
+/** Join the running, registration-expected vessels against the registry's ids. Pure. */
+export function registrationJoin(running: readonly DaemonVessel[], registryIds: readonly string[]): RegistrationJoin {
+  const out: RegistrationJoin = { registered: {}, remote_only: {}, unregistered: [], not_expected: [] };
+  for (const v of running) {
+    if (!v.registers) { out.not_expected.push(v.name); continue; }
+    const names = [...new Set([v.repo, v.name])];
+    const hits = registryIds.filter((id) => {
+      const base = id.split("@")[0] ?? "";
+      return names.some((n) => base === n || base.startsWith(`${n}-`));
+    });
+    const local = hits.find((id) => !id.includes("@"));
+    if (local) out.registered[v.name] = local;
+    else if (hits.length > 0) out.remote_only[v.name] = hits[0]!;
+    else out.unregistered.push(v.name);
+  }
+  out.unregistered.sort();
+  out.not_expected.sort();
+  return out;
+}
+/**
+ * Next per-vessel streaks of consecutive unregistered ticks, and the vessels that crossed `alarmTicks` on THIS tick
+ * (exactly once per episode; registering resets it). An unmeasured tick (null) leaves the streaks as they were. Pure.
+ */
+export function advanceUnregisteredTicks(prev: Record<string, number>, unregistered: readonly string[] | null, alarmTicks: number): { ticks: Record<string, number>; alarm: string[] } {
+  if (unregistered === null) return { ticks: { ...prev }, alarm: [] };
+  const ticks: Record<string, number> = {};
+  const alarm: string[] = [];
+  for (const v of unregistered) {
+    const before = typeof prev[v] === "number" && Number.isFinite(prev[v]) ? prev[v]! : 0;
+    ticks[v] = before + 1;
+    if (ticks[v]! >= alarmTicks && before < alarmTicks) alarm.push(v);
+  }
+  return { ticks, alarm };
+}
+
+async function lastRegisterFailure(unit: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["journalctl", "--no-pager", "-o", "cat", "-u", unit, "--since", "-30min"], { stdout: "pipe", stderr: "pipe" });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const line = out.split("\n").filter((l) => l.includes("register failed")).pop();
+    return line ? line.trim().slice(0, 400) : null;
+  } catch { return null; }
+}
+
+async function registryIdsLive(): Promise<string[] | null> {
+  const r = await resolveDiscoveryVesselRegistryObserver({ type: "discovery_vessel_registry_observer" });
+  const b = r.body as { reachable?: boolean; per_vessel?: Array<{ vessel_id?: unknown }> };
+  if (b?.reachable !== true || !Array.isArray(b.per_vessel)) return null;
+  return b.per_vessel.map((v) => String(v.vessel_id ?? "")).filter((id) => id.length > 0);
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+  try { return JSON.parse(await readFile(path, "utf-8")); } catch { return null; }
+}
+
+interface TickDeps {
+  unitState: (unit: string) => Promise<UnitState>;
+  registryIds: () => Promise<string[] | null>;
+  lastRegisterFailure: (unit: string) => Promise<string | null>;
+  alarmTicks: () => Promise<number | null>;
+  writeGap: (pointer: Record<string, unknown>) => Promise<unknown>;
+  heartbeatPath: () => string;
+}
+const liveDeps: TickDeps = {
+  unitState: systemctlUnitState,
+  registryIds: registryIdsLive,
+  lastRegisterFailure,
+  alarmTicks: () => readTuningNumber("substrate_health.unregistered_alarm_ticks"),
+  writeGap: (pointer) => resolveSubstrateGapWrite(pointer),
+  heartbeatPath: () => join(WORKSPACE_ROOT, "substrate-heartbeat.json"),
+};
+let tickDeps: TickDeps = liveDeps;
+/** Tests only: replace the systemctl, registry, journal, tuning, gap-write and heartbeat-file edges (null restores them). */
+export function __setSubstrateHealthTickDepsForTests(d: Partial<TickDeps> | null): void {
+  tickDeps = d ? { ...liveDeps, ...d } : liveDeps;
+}
+
+export const UNREGISTERED_GAP_PREFIX = "vessel-runs-but-is-not-registered-in-discovery-";
 
 async function readMostRecentHarnessReport(workspace: string): Promise<HarnessReport | null> {
   const resultsDir = join(workspace, "validation", "results");
@@ -107,6 +252,69 @@ async function readMostRecentHarnessReport(workspace: string): Promise<HarnessRe
     } catch { /* try next */ }
   }
   return null;
+}
+
+async function checkVesselRegistration(
+  derived: DaemonVessel[] | null,
+  statuses: Record<string, LivenessStatus>,
+  pointer: SubstrateHealthTickPointer,
+  inventoryPath: string,
+) {
+  const prevBeat = (await readJsonFile(tickDeps.heartbeatPath())) as { unregistered_ticks?: Record<string, number> } | null;
+  const prev = prevBeat?.unregistered_ticks && typeof prevBeat.unregistered_ticks === "object" ? prevBeat.unregistered_ticks : {};
+  const tuned = typeof pointer.unregistered_alarm_ticks === "number" ? null : await tickDeps.alarmTicks().catch(() => null);
+  const alarmTicks = typeof pointer.unregistered_alarm_ticks === "number" && pointer.unregistered_alarm_ticks >= 1
+    ? { value: pointer.unregistered_alarm_ticks, source: "pointer" }
+    : typeof tuned === "number" && tuned >= 1 ? { value: tuned, source: "tuning:substrate_health.unregistered_alarm_ticks" } : { value: 3, source: "default" };
+  const ids = derived ? await tickDeps.registryIds().catch(() => null) : null;
+  const running = (derived ?? []).filter((v) => statuses[v.name] === "active");
+  const reg = ids ? registrationJoin(running, ids) : null;
+  const { ticks, alarm } = advanceUnregisteredTicks(prev, reg ? reg.unregistered : null, alarmTicks.value);
+  const filed: string[] = [];
+  for (const name of alarm) {
+    const v = running.find((r) => r.name === name);
+    const reason = await tickDeps.lastRegisterFailure(`${name}.service`).catch(() => null);
+    const id = `${UNREGISTERED_GAP_PREFIX}${name}`;
+    try {
+      await tickDeps.writeGap({
+        type: "substrateGap_write",
+        gap: {
+          id,
+          category: "systematic_failure",
+          source: "substrate_detected",
+          status: "open",
+          detected_at: new Date().toISOString(),
+          summary:
+            `${name} is running (unit active) but has no discovery record for ${ticks[name]} consecutive substrate_health_tick runs, ` +
+            `so no shape it serves is reachable by routing. ${reason ? `Its last refusal: ${reason}.` : "Its journal names no refused /register in the last 30 min."} ` +
+            `If it serves no shape it should not register: declare "registers": false on its inventory row. Otherwise repair the registration it sends.`,
+          classification_metadata: {
+            vessel: name,
+            repo: v?.repo ?? null,
+            consecutive_ticks: ticks[name],
+            alarm_ticks: alarmTicks,
+            register_failure: reason,
+            match_rule: "registry id (before @peer) equals the repo or unit name, or extends one with '-'",
+            detector: "substrate_health_tick",
+          },
+        },
+      });
+      filed.push(id);
+    } catch (err) {
+      console.warn(`[substrate-health-tick] gap write FAILED for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return {
+    measured: reg !== null,
+    ...(reg === null ? { unmeasured_reason: derived ? "discovery registry unreadable" : `inventory unreadable at ${inventoryPath}` } : {}),
+    registered: reg?.registered ?? {},
+    remote_only: reg?.remote_only ?? {},
+    unregistered: reg?.unregistered ?? [],
+    not_expected: reg?.not_expected ?? [],
+    unregistered_ticks: ticks,
+    alarm_ticks: alarmTicks,
+    gaps_filed: filed,
+  };
 }
 
 export async function resolveSubstrateHealthTick(
@@ -350,11 +558,15 @@ export async function resolveSubstrateHealthTick(
     edge_growth_rate_per_hour,       // edges/hr — observational only (governed by spectral-gap governor)
   };
 
-  // — Optimality: read most recent harness report —
+  // — Vessel set (inventory), liveness, registration; optimality: read most recent harness report —
+  const inventoryPath = pointer.inventory_path ?? join(WORKSPACE_ROOT, "substrate", "fleet", "vessels.inventory.json");
+  const derived = daemonVesselsFromInventory(await readJsonFile(inventoryPath));
+  const daemonNames = derived ? derived.map((v) => v.name) : [...FALLBACK_SUBSTRATE_VESSELS];
   const [harnessReport, vesselLiveness] = await Promise.all([
     readMostRecentHarnessReport(WORKSPACE_ROOT),
-    checkVesselLiveness(),
+    checkVesselLiveness(daemonNames, tickDeps.unitState),
   ]);
+  const vesselRegistration = await checkVesselRegistration(derived, vesselLiveness.statuses, pointer, inventoryPath);
   const optimality = {
     most_recent_harness_run_at: harnessReport?.run_at ?? harnessReport?.generated_at ?? null,
     mean_optimality_ratio: harnessReport?.mean_optimality_ratio ?? null,
@@ -409,7 +621,9 @@ export async function resolveSubstrateHealthTick(
       statuses: vesselLiveness.statuses,
       down: vesselLiveness.down,
       all_active: vessels_passing,
+      vessel_set: derived ? { source: "inventory", path: inventoryPath } : { source: "fallback", path: inventoryPath, reason: "inventory unreadable or names no daemon vessel" },
     },
+    vessel_registration: vesselRegistration,
     registry_fetch: {
       corpus_complete,
       templates_fetched: template_count_at_window_end,
@@ -432,7 +646,7 @@ export async function resolveSubstrateHealthTick(
   // rather than polling HTTP — closes gap-008.
   // Atomic write: write to .tmp then rename so readers never see a partial file.
   try {
-    const heartbeatPath = join(WORKSPACE_ROOT, "substrate-heartbeat.json");
+    const heartbeatPath = tickDeps.heartbeatPath();
     const tmpPath = heartbeatPath + ".tmp";
     const heartbeat = JSON.stringify({
       ts: report.generated_at,
@@ -441,8 +655,11 @@ export async function resolveSubstrateHealthTick(
       template_total: report.registry_fetch.templates_total,
       corpus_complete: report.registry_fetch.corpus_complete,
       vessels_down: report.vessel_liveness.down,
+      vessels_unregistered: vesselRegistration.unregistered,
+      // Read back by the next tick (checkVesselRegistration): the streak must survive a dv restart.
+      unregistered_ticks: vesselRegistration.unregistered_ticks,
     });
-    await mkdir(WORKSPACE_ROOT, { recursive: true });
+    await mkdir(dirname(heartbeatPath), { recursive: true });
     await writeFile(tmpPath, heartbeat, "utf-8");
     await rename(tmpPath, heartbeatPath);
   } catch {

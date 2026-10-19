@@ -295,6 +295,24 @@ export function gapCheckTimeoutMs(shape: string, input: Record<string, unknown>)
  */
 export const SINCE_AWARE_CHECK_SHAPES: ReadonlySet<string> = new Set(["goal_reach_verdict"]);
 
+/**
+ * THE WHOLE-FILE DEFAULT (qa ruling (iii), 2026-10-19). A test_suite check that names no field (no zero_field,
+ * nonzero_field or defect_field) used to read unknown on every run: a test_suite body carries no fetch_error and no
+ * generic count key, so it fell through to NO DEFECT SIGNATURE FOUND. Such checks were armed in the store (the
+ * super-repo .check.sh rows among them) and could never be measured, closed or falsified. A check of ONE test_file is
+ * now read as "do this file's cases pass": the named ones when only_tests is given, else all of them. Without a
+ * test_file the check is a whole-suite run, whose unrelated failures say nothing about one gap: still unknown.
+ * Read by the verdict (heuristic 2b) and by admission, so a check the judge can answer is not excluded as unjudgeable.
+ */
+export function testSuiteWholeFileDefault(evidenceResolve: unknown): boolean {
+  if (!evidenceResolve || typeof evidenceResolve !== 'object' || Array.isArray(evidenceResolve)) return false;
+  const er = evidenceResolve as Record<string, unknown>;
+  if (er['shape'] !== 'test_suite' || er['mode'] !== undefined) return false;
+  if (['zero_field', 'nonzero_field', 'defect_field'].some((k) => typeof er[k] === 'string')) return false;
+  const input = (er['input'] && typeof er['input'] === 'object' ? er['input'] : {}) as Record<string, unknown>;
+  return typeof input['test_file'] === 'string' && input['test_file'].trim() !== '';
+}
+
 export async function evaluateGapCheck(gap: Record<string, unknown>, opts: GapCheckOpts = {}): Promise<GapCheckVerdict> {
   return verifyGapConditionAsync(gap, opts);
 }
@@ -517,6 +535,22 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
       const val = inner[nonzeroField];
       if (typeof val === 'number' && Number.isFinite(val)) return val > 0 ? 'absent' : 'present';
       return 'unknown';
+    }
+    // Defect heuristic 2b: THE WHOLE-FILE DEFAULT (testSuiteWholeFileDefault, below). A test_suite check of one file that
+    // names no field asks whether that file's cases pass: with only_tests, the named ones (requested_not_passing, as if it
+    // were the zero_field); without, ALL of them (not passing = total - pass, so a failing, erroring or skipped case
+    // counts). Only a run that printed a summary measures; anything else reads unknown.
+    if (resolveShape === 'test_suite' && testSuiteWholeFileDefault(evidenceResolveRaw)) {
+      const named = Array.isArray(resolveInput['only_tests']) && (resolveInput['only_tests'] as unknown[]).some((t) => typeof t === 'string' && t.trim() !== '');
+      if (named) {
+        const rv = inner['requested_not_passing'];
+        if (typeof rv === 'number' && rv > 0) return 'present';
+        if (rv === 0) return 'absent';
+        return 'unknown';
+      }
+      const total = inner['total'], pass = inner['pass'];
+      if (inner['ran'] !== true || typeof total !== 'number' || typeof pass !== 'number' || total <= 0) return 'unknown';
+      return total - pass > 0 ? 'present' : 'absent';
     }
     // Defect heuristic 3 (generic): presence of a fetch_error field signals defect
     if (typeof inner['fetch_error'] === 'string' && inner['fetch_error'].length > 0) {

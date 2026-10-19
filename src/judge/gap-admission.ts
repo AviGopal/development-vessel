@@ -24,7 +24,7 @@ import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
-import { verifyGapCondition, type GapCheckVerdict } from "./gap-check-judge.js";
+import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
@@ -571,7 +571,8 @@ export async function admitActionableGaps(
         // a restart count to 0, and nothing in the system could say so.
         if (gapFalsifierClass === "class2") {
           const er = meta.evidence_resolve as Record<string, unknown> | null | undefined;
-          const measured = !!er && typeof er === "object" && ["zero_field", "nonzero_field", "defect_field"].some((fk) => typeof er[fk] === "string");
+          // A test_suite check of one file that names no field is answered by the judge's whole-file default.
+          const measured = !!er && typeof er === "object" && (["zero_field", "nonzero_field", "defect_field"].some((fk) => typeof er[fk] === "string") || testSuiteWholeFileDefault(er));
           if (!measured) { excluded.push({ id, reason: "needs_information(class2 check names no zero_field/defect_field, so its landing could never be judged)" }); continue; }
         }
       }
@@ -1169,10 +1170,12 @@ export async function armDecomposition(
     // A DEFECT_FIELD CHECK IS REFUSED (qa C4 ruling iv): the judge reads it 'present' only when the key is in the
     // answer, so a key the shape never returns reads 'absent', i.e. fixed, and closes the gap on silence.
     if (!!childEr && (childEr as Record<string, unknown>)["defect_field"] !== undefined) return { ok: false, why: `${label}: a defect_field check is refused: a missing key reads as fixed` };
-    const measured = !!childEr && ["zero_field", "nonzero_field"].some((fk) => {
+    // A test_suite check of one file naming no field is measured by the judge's whole-file default
+    // (gap-check-judge.ts testSuiteWholeFileDefault): the same rule here, so the arm step and the judge cannot disagree.
+    const measured = !!childEr && (["zero_field", "nonzero_field"].some((fk) => {
       const fv = (childEr as Record<string, unknown>)[fk];
       return typeof fv === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(fv);
-    });
+    }) || (shape === "test_suite" && testSuiteWholeFileDefault(childEr)));
     if (!measured) return { ok: false, why: `${label}: its shape check names no zero_field/nonzero_field, so it could never be judged` };
     // WHETHER THE SHAPE REPORTS THAT FIELD is not decided here (qa C4 ruling iv): descriptions are prose, and a
     // lexical match was vacuous (312 of 312 described shapes passed it). The proof is the judge on the real
@@ -1186,16 +1189,22 @@ export async function armDecomposition(
       const vessel = String(input.vessel ?? "").replace(/^repos\//, "");
       const testFile = typeof input.test_file === "string" ? input.test_file.trim() : "";
       const onlyTests = Array.isArray(input.only_tests) ? (input.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0) : [];
-      if (er.zero_field !== "requested_not_passing") return { ok: false, why: `${label}: a test_suite check is judged by zero_field requested_not_passing` };
+      // No field at all is the judge's whole-file default (the named tests' requested_not_passing, or every case of
+      // the file); any OTHER field is refused as before.
+      const wholeFile = testSuiteWholeFileDefault(er);
+      if (er.zero_field !== "requested_not_passing" && !wholeFile) return { ok: false, why: `${label}: a test_suite check is judged by zero_field requested_not_passing` };
       if (!/^[A-Za-z0-9_-]+$/.test(vessel)) return { ok: false, why: `${label}: test_suite check names no vessel` };
       if (!testFile || !/^[A-Za-z0-9_./-]+$/.test(testFile) || testFile.includes("..")) return { ok: false, why: `${label}: test_suite check names no usable test_file` };
-      if (onlyTests.length === 0) return { ok: false, why: `${label}: test_suite check names no test (only_tests), so it could never be judged` };
+      if (onlyTests.length === 0 && !wholeFile) return { ok: false, why: `${label}: test_suite check names no test (only_tests), so it could never be judged` };
       let testText = "";
       try { testText = readFileSync(join(vesselsCloneRoot(), vessel, testFile), "utf-8"); } catch { return { ok: false, why: `${label}: test file repos/${vessel}/${testFile} does not exist` }; }
       // A title built from a template literal (`[${label}] …`) is matched with its placeholders as wildcards.
       const missing = onlyTests.find((t) => !testTitleInSource(testText, t));
       if (missing !== undefined) return { ok: false, why: `${label}: test "${missing.slice(0, 120)}" is not in repos/${vessel}/${testFile}` };
       const tm = typeof input.timeout_ms === "number" && input.timeout_ms > 0 ? Math.min(input.timeout_ms, PROPOSED_TEST_SUITE_TIMEOUT_MS) : PROPOSED_TEST_SUITE_TIMEOUT_MS;
+      // Named tests are written in the explicit form (the same reading the default gives them); a whole-file check keeps
+      // no field, which the judge reads as every case of the file.
+      if (onlyTests.length === 0) return { ok: true, predicate: { evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${vessel}`, test_file: testFile, timeout_ms: tm } } } };
       return { ok: true, predicate: { evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${vessel}`, test_file: testFile, only_tests: onlyTests, timeout_ms: tm }, zero_field: "requested_not_passing" } } };
     }
     return { ok: true, predicate: typeof f.verify_shape === "string" ? { verify_shape: f.verify_shape } : { evidence_resolve: f.evidence_resolve } };

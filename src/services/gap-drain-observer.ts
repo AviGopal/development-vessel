@@ -320,9 +320,10 @@ export class GapDrainObserver {
     g.__composeDrainLastAt = now;
     const t0 = now;
     try {
-      const resp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
+      // gap_to_feature is gated like a write at this vessel's own route (lib/caller-credential.ts): carry the node key.
+      const resp = await fetch(SELF_RESOLVE_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
         body: JSON.stringify({ impulse: { type: "gap_to_feature", triggered_by: "gap-drain-observer", flow: "gap-compose" } }),
         signal: AbortSignal.timeout(600_000),
       });

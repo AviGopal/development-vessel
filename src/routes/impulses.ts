@@ -47,7 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
-import { operatorDirectGrant, runWithOperatorDirectGrant, OPERATOR_AUTHORIZATION_HEADER, type OperatorDirectGrant } from "../lib/operator-direct.js";
+import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
@@ -1127,6 +1127,38 @@ function routeRemote(c: Context): string {
   return remote || "unknown";
 }
 
+/** The compose shapes whose pointer `directed` flag changes how the compose runs (capacity lane, spend envelope,
+ *  scope checks, verbatim edits, stray-test intent). */
+export const DIRECTED_CLAIM_SHAPES: ReadonlySet<string> = new Set(["feature_compose", "gap_to_feature"]);
+
+/**
+ * `directed` IS DERIVED AT THE DOOR, NEVER TAKEN FROM THE POINTER. A feature_compose or gap_to_feature pointer may say
+ * directed:true; it keeps it only when the request carries an operator credential: the X-Operator-Authorization grant
+ * (operatorGrant, goal-host's forward of the operator's own key) or an Authorization key identity answers, fresh,
+ * with "operator:direct" (or "admin"; lib/operator-direct.ts isOperatorDirectCredential, never node-self). Anything
+ * else is STRIPPED: the field is deleted, so the compose runs undirected, and one named line is logged
+ * (directed_claim_stripped). Mutates `pointer`; returns why it stripped, or null when nothing was stripped.
+ */
+export async function stripUnauthorizedDirectedClaim(
+  pointerType: string,
+  pointer: unknown,
+  opts: { operatorGrant: OperatorDirectGrant | null; authorization: string | undefined },
+): Promise<string | null> {
+  if (!DIRECTED_CLAIM_SHAPES.has(pointerType) || !pointer || typeof pointer !== "object") return null;
+  const p = pointer as Record<string, unknown>;
+  if (!("directed" in p)) return null;
+  if (p["directed"] !== true) { delete p["directed"]; return null; }
+  if (opts.operatorGrant) return null;
+  const cred = await identityCredential(opts.authorization, { cache: false });
+  if (isOperatorDirectCredential(cred)) return null;
+  const why = !cred.authenticated ? (cred.why ?? "not authenticated")
+    : isNodeSelfCredential(cred) ? "the node's own key never directs"
+    : `credential lacks the ${OPERATOR_DIRECT_SCOPE} scope`;
+  delete p["directed"];
+  console.warn(`[resolve] directed_claim_stripped: ${pointerType} claimed directed:true without an operator credential (${why}); runs undirected`);
+  return why;
+}
+
 async function refuseUnauthenticatedWrite(c: Context, pointerType: string, pointer?: unknown): Promise<{ refused: Response | null; cred: CallerCredential | null }> {
   if (!isWritePointerType(pointerType)) return { refused: null, cred: null };
   const cred = await identityCredential(c.req.header("Authorization"), { xApiKeyPresented: c.req.header("x-api-key") !== undefined });
@@ -1167,6 +1199,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
+    await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
     const content = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
     const impulse = {
@@ -1271,6 +1304,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
       console.log(`[operator-direct] feature_compose gap=${typeof gapId === "string" ? gapId : "<none>"}: ${g.grant ? `granted (key_id ${g.grant.key_id ?? "<none>"})` : `not granted (${g.why ?? "refused"}); runs autonomous`}`);
     }
   }
+  await stripUnauthorizedDirectedClaim(pointerType, pointer, { operatorGrant, authorization: c.req.header("Authorization") });
 
   try {
     const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType }, { signal: c.req.raw.signal });

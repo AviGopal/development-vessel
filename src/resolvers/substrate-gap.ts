@@ -34,6 +34,7 @@
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType } from "../lib/caller-credential.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem } from "./test-suite.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
@@ -2909,9 +2910,11 @@ async function resolveSubstrateGapWriteInner(
         gd.__composeDrainLastAt = nowMs;
         const selfUrl = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
         const t0 = Date.now();
-        void fetch(`${selfUrl}/v2/impulses/resolve`, {
+        // gap_to_feature is gated like a write at this vessel's own route (lib/caller-credential.ts): carry the node key.
+        const selfResolve = `${selfUrl}/v2/impulses/resolve`;
+        void fetch(selfResolve, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(selfResolve, selfResolve) },
           body: JSON.stringify({ impulse: { type: "gap_to_feature", triggered_by: "substrate-gap-write", flow: "gap-compose" } }),
           signal: AbortSignal.timeout(600_000),
         })

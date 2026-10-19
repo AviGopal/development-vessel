@@ -16,6 +16,8 @@ const { resolveGitLog, __setGitLogRootsForTests } = await import("../../src/reso
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 const { resolveReachRateScan } = await import("../../src/resolvers/reach-rate-scan.js");
 const { resolveGoalReachVerdict } = await import("../../src/resolvers/goal-deficiency.js");
+const { resolveDiscoveryVesselRegistryObserver } = await import("../../src/resolvers/discovery-vessel-registry-observer.js");
+const { checkArmingProblem } = await import("../../src/resolvers/substrate-gap.js");
 
 const originalFetch = globalThis.fetch;
 afterAll(() => { globalThis.fetch = originalFetch; __setGitLogRootsForTests(null); try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
@@ -66,10 +68,35 @@ describe("each declared response contract covers its resolver's body", () => {
     expect(responseFields("goal_reach_verdict")).toContain("unreached_since_last_reach");
   });
 
+  it("discovery_vessel_registry_observer: a read, with and without vessel_ids, and an unreachable registry carry only declared keys", async () => {
+    globalThis.fetch = (async () => Response.json({ content: { vessels: [{ vesselId: "activity-api-local", lastSeen: new Date().toISOString(), shapes: ["x"] }] } })) as unknown as typeof fetch;
+    const plain = await resolveDiscoveryVesselRegistryObserver({ type: "discovery_vessel_registry_observer", endpoint: "http://registry.test", apiKey: "k" });
+    const checked = await resolveDiscoveryVesselRegistryObserver({ type: "discovery_vessel_registry_observer", endpoint: "http://registry.test", apiKey: "k", vessel_ids: ["ribosome-vessel"] } as never);
+    globalThis.fetch = originalFetch;
+    const down = await resolveDiscoveryVesselRegistryObserver({ type: "discovery_vessel_registry_observer", endpoint: "http://127.0.0.1:1", apiKey: "k", timeoutMs: 300 });
+    for (const r of [plain, checked, down]) expect(undeclared("discovery_vessel_registry_observer", keysOf(r))).toEqual([]);
+    expect(responseFields("discovery_vessel_registry_observer")).toContain("missing_count");
+  });
+
   it("resolver_schema serves each declared list as response_fields", () => {
     for (const shape of RESPONSE_CONTRACT_SHAPES) {
       const b = (resolveResolverSchema({ shape }) as { body: Record<string, unknown> }).body;
       expect({ shape, fields: b.response_fields }).toEqual({ shape, fields: [...(responseFields(shape) ?? [])] });
     }
+  });
+});
+
+// The unregistered-vessel detector (substrate_health_tick) and the registration joint arm with
+// discovery_vessel_registry_observer { vessel_ids } and zero_field missing_count. missing_count is only a number when
+// vessel_ids is given, so an arming without it can never measure.
+describe("discovery_vessel_registry_observer arming", () => {
+  const er = (extra: Record<string, unknown>) => ({ shape: "discovery_vessel_registry_observer", zero_field: "missing_count", ...extra });
+  it("must-fail: the detectors' arming (vessel_ids given) passes the contract check", () => {
+    expect(checkArmingProblem(er({ input: { vessel_ids: ["ribosome-vessel"] } }))).toBeNull();
+  });
+  it("an arming without vessel_ids, or naming a field the observer never returns, is refused", () => {
+    expect(checkArmingProblem(er({ input: {} }))?.position).toBe("evidence_resolve.zero_field");
+    expect(checkArmingProblem(er({ input: { vessel_ids: [] } }))?.position).toBe("evidence_resolve.zero_field");
+    expect(checkArmingProblem({ shape: "discovery_vessel_registry_observer", input: { vessel_ids: ["x"] }, zero_field: "unregistered" })?.position).toBe("evidence_resolve.zero_field");
   });
 });

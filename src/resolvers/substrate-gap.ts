@@ -950,6 +950,16 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     "gaps_closed", "canary_planted", "canary_found", "profile", "node", "trust_completion", "rows_checked", "blind_rows", "unobserved_rows",
     "unregistered_rows", "observed", "gaps_filed", "self_gap_filed", "read_errors", "claim",
   ] },
+  // discovery-vessel-registry-observer.ts: the discoveryRegistryState body (error/http_status/roundtrip_ms only on some
+  // answers); missing_count and missing_vessels only on a successful read with vessel_ids given (the local-registration
+  // check the unregistered-vessel and joint detectors arm with).
+  discovery_vessel_registry_observer: {
+    fields: [
+      "endpoint", "reachable", "error", "http_status", "roundtrip_ms", "total_vessels", "healthy_count", "stale_count",
+      "stale_threshold_ms", "per_vessel", "generated_at", "missing_count", "missing_vessels",
+    ],
+    needs_input: { missing_count: "vessel_ids", missing_vessels: "vessel_ids" },
+  },
   // reach-rate-scan.ts: the union of both reachRateReport bodies, the scoped re-read (activity_id) and the scan.
   reach_rate_scan: { fields: [
     "activity_id", "window_hours", "min_reach_rate", "contract_reach_rate", "count", "reached_count", "graded_count", "ungraded_count",

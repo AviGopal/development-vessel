@@ -11,7 +11,7 @@
 //   - LENIENCY (G6, the frozen loop's known risk): a reach whose judge path matches a shaped lenient rule does NOT zero
 //     unreached_since_last_reach, and is reported reached_lenient; a trusted reach zeroes it;
 //   - the summary is the judge's words and the goal text only: no suggested fix or producer (the answer-key rule).
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -663,6 +663,16 @@ describe("reclassifyStored: the current policy applies to stored entries", () =>
 // never present, so never falsified or reverted. The genuine cases stay: a newer run still unreached → present; a newer
 // trusted reach → absent.
 describe("goal_reach_verdict `since` + the judge's landing bound", () => {
+  // HERMETIC STORE LOCALITY (INTERIM; user ruling "Allow, with evidence (Recommended)", 2026-10-19). The judge cases below
+  // measure as the gap store's holder does. gap-check-judge abstains to 'unknown' whenever GAP_STORE_ENDPOINT is set (the
+  // store is held elsewhere), and the gate's scrubbed env sets it, so under the gate they read the abstain instead of the
+  // bound. Unset it for this describe and restore it after each case, as test/discovery/held-shape-policies.test.ts does.
+  // Scoped to the whole describe: bun hooks cannot target only its judge cases without renaming them, and the non-judge
+  // cases here (goalReachVerdict, resolveGoalReachVerdict) do not read the variable. Removed when
+  // gap-store-holder-abstain-is-pinned-on-an-env-endpoint-instead-of-resolving-the-holder-by-shape closes.
+  let savedGapStoreEndpoint: string | undefined;
+  beforeEach(() => { savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"]; delete process.env["GAP_STORE_ENDPOINT"]; });
+  afterEach(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
   const G = "summarise the stale feature flags per team";
   const hh = grt.goalHashOf(G);
   const T = (h: number) => NOW - h * H;

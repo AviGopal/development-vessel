@@ -123,8 +123,9 @@ export interface DispatchObservation {
   gaps_filed?: unknown[];
 }
 
-/** goal-host's principal record for a dispatch: never the key. */
-export interface DispatchPrincipal { kind: string; label: string; operator: boolean }
+/** The principal goal-host serves for a dispatch: its kind, whether it carried operator authority, and a
+ *  non-reversible tag of the key (never the key or its id). Hands read `operator` only. */
+export interface DispatchPrincipal { kind: string; operator: boolean; tag?: string | null }
 
 export interface ChainEntry {
   dispatchId: string;
@@ -1229,10 +1230,12 @@ async function ownUrls(shape: string): Promise<{ ok: true; urls: string[] } | { 
 
 const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const asStrArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-const asPrincipal = (v: unknown): DispatchPrincipal | null => {
+/** The served principal of an activeDispatches row or a goalWalkState body, or null when it is absent or malformed. */
+export const asPrincipal = (v: unknown): DispatchPrincipal | null => {
   if (!v || typeof v !== "object") return null;
   const p = v as Record<string, unknown>;
-  return typeof p["kind"] === "string" && typeof p["label"] === "string" && typeof p["operator"] === "boolean" ? { kind: p["kind"], label: p["label"], operator: p["operator"] } : null;
+  if (typeof p["kind"] !== "string" || typeof p["operator"] !== "boolean") return null;
+  return { kind: p["kind"], operator: p["operator"], tag: typeof p["tag"] === "string" ? p["tag"] : null };
 };
 
 /** The durable trace of an execution (activity-api), unwrapped, or null when unreadable. */

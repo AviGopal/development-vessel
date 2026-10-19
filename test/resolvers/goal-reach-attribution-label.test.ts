@@ -7,7 +7,8 @@
 // person's reach would have been credited to the system as reached without hands.
 //
 //   [MUST-FAIL] operator null + operator_label "operator:<human id>" on the reaching dispatch → hands.
-//   [MUST-FAIL] the activeDispatches and goalWalkState reads carry operator_label and principal into the observation.
+//   [MUST-FAIL] the activeDispatches and goalWalkState reads carry operator_label and principal into the observation;
+//               the principal is read by kind and authority (goal-host serves a tag, never the key id or a label).
 //   [CONTROL]   neither label nor operator → not hands (r / autonomous_other); an operator:direct dispatch (operator
 //               set, principal.operator) → hands; a record from before the door (operator only) → hands; a machine
 //               dispatcher's label → not hands.
@@ -22,6 +23,7 @@ import {
   originOf,
   handsOperatorId,
   isHumanDispatch,
+  asPrincipal,
   type DispatchObservation,
   type GapView,
   type GoalReachRecord,
@@ -46,7 +48,7 @@ function reached(by: Partial<DispatchObservation>): GoalReachRecord {
   linkGaps(r, gaps);
   return observe({ [H]: r }, [d({ dispatchId: "d2", status: "completed", reached: true, startedAt: min(20), endedAt: min(22), ...by })], min(23))[H]!;
 }
-const keyPrincipal = { kind: "key", label: "key:cockpit", operator: false };
+const keyPrincipal = { kind: "key", operator: false, tag: "0123456789ab" };
 
 describe("hands read the claimed operator label", () => {
   it("[MUST-FAIL] operator null + a human operator_label on the reaching dispatch is hands", () => {
@@ -63,11 +65,11 @@ describe("hands read the claimed operator label", () => {
     expect(r.dispatches[0]!.operator_label).toBe("operator:claude-code");
   });
   it("[CONTROL] neither label nor operator is not hands", () => {
-    expect(attributeReach(reached({ trigger: "boredom", operator: null, operator_label: null, principal: { kind: "node_self", label: "node-self", operator: false } }), gaps, []).attribution).toBe("autonomous_other");
+    expect(attributeReach(reached({ trigger: "boredom", operator: null, operator_label: null, principal: { kind: "node_self", operator: false, tag: null } }), gaps, []).attribution).toBe("autonomous_other");
   });
   it("[CONTROL] an operator:direct dispatch is hands (operator set by authority, principal.operator)", () => {
-    expect(attributeReach(reached({ trigger: "operator", operator: "operator:claude-code", operator_label: "operator:claude-code", principal: { kind: "key", label: "key:op", operator: true } }), gaps, []).attribution).toBe("hands");
-    expect(isHumanDispatch({ trigger: "run-goal", operator: null, operator_label: null, principal: { kind: "key", label: "key:op", operator: true } })).toBe(true);
+    expect(attributeReach(reached({ trigger: "operator", operator: "operator:claude-code", operator_label: "operator:claude-code", principal: { kind: "key", operator: true, tag: "ba9876543210" } }), gaps, []).attribution).toBe("hands");
+    expect(isHumanDispatch({ trigger: "run-goal", operator: null, operator_label: null, principal: { kind: "key", operator: true, tag: "ba9876543210" } })).toBe(true);
   });
   it("[CONTROL] a record from before the door (operator only) is still read, and a machine label is not hands", () => {
     expect(attributeReach(reached({ trigger: "operator", operator: "operator:claude-code" }), gaps, []).attribution).toBe("hands");
@@ -77,6 +79,16 @@ describe("hands read the claimed operator label", () => {
     const r = observe({}, [d({ dispatchId: "d1", operator_label: "operator:claude-code" })], min(5));
     const again = observe(r, [d({ dispatchId: "d1" })], min(6))[H]!;
     expect(again.dispatches[0]!.operator_label).toBe("operator:claude-code");
+  });
+});
+
+describe("the served principal is read by kind and authority (goal-host serves a tag, never the key id)", () => {
+  it("[MUST-FAIL] a principal without a label is read, and its authority marks hands", () => {
+    expect(asPrincipal({ kind: "key", operator: true, tag: "ba9876543210" })).toEqual({ kind: "key", operator: true, tag: "ba9876543210" });
+    expect(asPrincipal({ kind: "node_self", operator: false, tag: null })).toEqual({ kind: "node_self", operator: false, tag: null });
+    expect(asPrincipal({ kind: "key" })).toBeNull();
+    const a = attributeReach(reached({ trigger: "run-goal", operator: null, operator_label: null, principal: { kind: "key", operator: true, tag: "ba9876543210" } }), gaps, []);
+    expect(a.attribution).toBe("hands");
   });
 });
 

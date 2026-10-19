@@ -103,6 +103,11 @@ export interface DispatchObservation {
   status: string;
   reached: boolean | null;
   operator: string | null;
+  /** The operator id the caller CLAIMED (goal-host operator_label). Since goal-host's inbound door, `operator` is set
+   *  only for an operator credential, so a person driving the cockpit with an ordinary key shows here and not there. */
+  operator_label?: string | null;
+  /** Who goal-host ran the dispatch as (goal-host principal record), from the validated credential. */
+  principal?: DispatchPrincipal | null;
   trigger: string | null;
   startedAt: number;
   endedAt?: number | null;
@@ -118,6 +123,9 @@ export interface DispatchObservation {
   gaps_filed?: unknown[];
 }
 
+/** goal-host's principal record for a dispatch: never the key. */
+export interface DispatchPrincipal { kind: string; label: string; operator: boolean }
+
 export interface ChainEntry {
   dispatchId: string;
   startedAt: number;
@@ -126,6 +134,9 @@ export interface ChainEntry {
   reached: boolean | null;
   trigger: string | null;
   operator: string | null;
+  /** Absent on entries recorded before goal-host served it. */
+  operator_label?: string | null;
+  principal?: DispatchPrincipal | null;
   node: string | null;
   cost_usd: number | null;
   signature: string | null;
@@ -335,8 +346,20 @@ export function isHumanOperatorId(op: unknown): boolean {
   return !MACHINE_OPERATOR_IDS.has(o) && !/^learning-loop-selftest/.test(o);
 }
 
-export function originOf(d: Pick<DispatchObservation, "operator" | "trigger">): GoalReachOrigin {
-  const op = typeof d.operator === "string" ? d.operator.trim() : "";
+/**
+ * The operator id a dispatch's HANDS are read from: the label its caller claimed (operator_label), else `operator` (a
+ * record from before goal-host's inbound door, where the two were one field). Since the door, `operator` is AUTHORITY,
+ * set only for an operator credential, so reading it alone made a person's cockpit dispatch with an ordinary key look
+ * autonomous. A label is attribution only: it confers nothing, and a false claim can only take credit away from the
+ * system (it marks hands), never add authority.
+ */
+export function handsOperatorId(d: { operator?: string | null; operator_label?: string | null }): string | null {
+  const label = typeof d.operator_label === "string" && d.operator_label.trim() ? d.operator_label : null;
+  return label ?? (typeof d.operator === "string" ? d.operator : null);
+}
+
+export function originOf(d: Pick<DispatchObservation, "operator" | "operator_label" | "trigger">): GoalReachOrigin {
+  const op = (handsOperatorId(d) ?? "").trim();
   if (d.trigger === "note") return "surface";
   if (!isHumanOperatorId(op)) return "autonomous";
   if (/obsidian|vault|surface|human/i.test(op)) return "surface";
@@ -384,7 +407,7 @@ function toChainEntry(d: DispatchObservation): ChainEntry {
   const shapes = [...(d.poolShapes ?? []), ...(d.completionShapes ?? [])];
   return {
     dispatchId: d.dispatchId, startedAt: d.startedAt, endedAt: d.endedAt ?? null, status: d.status, reached: d.reached,
-    trigger: d.trigger ?? null, operator: d.operator ?? null, node: d.node ?? null,
+    trigger: d.trigger ?? null, operator: d.operator ?? null, operator_label: d.operator_label ?? null, principal: d.principal ?? null, node: d.node ?? null,
     cost_usd: typeof d.cost_usd === "number" && Number.isFinite(d.cost_usd) ? d.cost_usd : null,
     signature: breakSignature(d), write_shapes: [...new Set(shapes.filter(isWriteEffectShape))],
     executionId: d.executionId ?? null, selectedTemplateId: d.selectedTemplateId ?? null, edit_sites: d.edit_sites ?? [],
@@ -438,7 +461,7 @@ export function observe(records: Record<string, GoalReachRecord>, dispatches: Di
     if (!rec) {
       if (!(isTerminal(d.status) && d.reached !== true)) continue;
       rec = out[h] = emptyRecord(String(d.goal), h, originOf(d), now);
-      rec.origin_operator = d.operator ?? null;
+      rec.origin_operator = handsOperatorId(d);
     }
     if (d.goal_full && typeof d.goal === "string" && d.goal.length > rec.goal.length) rec.goal = d.goal;
     const entry = toChainEntry(d);
@@ -454,10 +477,12 @@ export function observe(records: Record<string, GoalReachRecord>, dispatches: Di
         edit_sites: entry.edit_sites.length ? entry.edit_sites : prev.edit_sites,
         executionId: entry.executionId ?? prev.executionId,
         selectedTemplateId: entry.selectedTemplateId ?? prev.selectedTemplateId,
+        operator_label: entry.operator_label ?? prev.operator_label ?? null,
+        principal: entry.principal ?? prev.principal ?? null,
       };
     } else {
       rec.dispatches.push(entry);
-      if (rec.dispatches.length === 1) { rec.origin = originOf(d); rec.origin_operator = d.operator ?? null; }
+      if (rec.dispatches.length === 1) { rec.origin = originOf(d); rec.origin_operator = handsOperatorId(d); }
     }
     touched.add(h);
   }
@@ -575,9 +600,12 @@ export const AUTONOMOUS_CLOSE_REASONS: ReadonlySet<string> = new Set([
   "doc_fix_landed",
 ]);
 const isOperatorRouteSource = (s: unknown): boolean => typeof s === "string" && (s === "human_reported" || /^operator/.test(s));
-/** A dispatch a human made: goal-host trigger "operator" (any operator id) or a surface/note dispatch. */
-const isHumanDispatch = (e: Pick<ChainEntry, "trigger" | "operator">): boolean =>
-  e.trigger === "note" || isHumanOperatorId(e.operator);
+/**
+ * A dispatch a human made: a surface/note dispatch, a human operator id (handsOperatorId: the claimed label, else
+ * `operator` on an old record), or one goal-host ran under an operator credential. HANDS only: none of this is authority.
+ */
+export const isHumanDispatch = (e: Pick<ChainEntry, "trigger" | "operator" | "operator_label" | "principal">): boolean =>
+  e.trigger === "note" || isHumanOperatorId(handsOperatorId(e)) || e.principal?.operator === true;
 
 const normPath = (p: string): string => String(p).replace(/:\d+.*$/, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^repos\//, "").trim();
 const samePath = (a: string, b: string): boolean => {
@@ -1201,6 +1229,11 @@ async function ownUrls(shape: string): Promise<{ ok: true; urls: string[] } | { 
 
 const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const asStrArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+const asPrincipal = (v: unknown): DispatchPrincipal | null => {
+  if (!v || typeof v !== "object") return null;
+  const p = v as Record<string, unknown>;
+  return typeof p["kind"] === "string" && typeof p["label"] === "string" && typeof p["operator"] === "boolean" ? { kind: p["kind"], label: p["label"], operator: p["operator"] } : null;
+};
 
 /** The durable trace of an execution (activity-api), unwrapped, or null when unreadable. */
 async function readTrace(executionId: string | null | undefined): Promise<Record<string, unknown> | null> {
@@ -1420,6 +1453,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
           const obs: DispatchObservation = {
             dispatchId: id, goal: typeof row["goal"] === "string" ? row["goal"] : null, status: String(row["status"] ?? "unknown"),
             reached: typeof row["reached"] === "boolean" ? row["reached"] : null, operator: typeof row["operator"] === "string" ? row["operator"] : null,
+            operator_label: typeof row["operator_label"] === "string" ? row["operator_label"] : null, principal: asPrincipal(row["principal"]),
             trigger: typeof row["trigger"] === "string" ? row["trigger"] : null, startedAt: asNum(row["startedAt"]) ?? 0, node: url,
             executionId: typeof row["executionId"] === "string" ? row["executionId"] : null,
             selectedTemplateId: typeof row["selectedTemplateId"] === "string" ? row["selectedTemplateId"] : null,
@@ -1439,6 +1473,8 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
               obs.poolShapes = asStrArr(b["poolShapes"]);
               obs.completionShapes = asStrArr(b["completionShapes"]);
               if (typeof b["reached"] === "boolean") obs.reached = b["reached"];
+              if (typeof b["operator_label"] === "string") obs.operator_label = b["operator_label"];
+              obs.principal = asPrincipal(b["principal"]) ?? obs.principal ?? null;
               const learning = b["learning"] as { gapsFiled?: unknown } | null | undefined;
               if (learning && Array.isArray(learning.gapsFiled)) obs.gaps_filed = learning.gapsFiled;
             }

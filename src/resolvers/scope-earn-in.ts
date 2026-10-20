@@ -51,7 +51,7 @@ import { join, posix } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { WORKSPACE_ROOT } from "../config.js";
 import { readFamilyRhythm, rhythmDueScore, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
-import { gapCheckKeys } from "../judge/gap-policy.js";
+import { gapCheckKeys, parseScopeExceptions } from "../judge/gap-policy.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, type PoolWriteAuth } from "./pool-impulse.js";
 
 export const SCOPE_EARN_IN_FAMILY = "scope-earn-in";
@@ -329,7 +329,7 @@ const MAX_TTL_HOURS = 720;
 const MAX_APPLY_PER_PASS = 5;
 
 type Row = Record<string, unknown>;
-type Scope = { excluded: string[]; readable: boolean; reason: string };
+type Scope = { excluded: string[]; readable: boolean; reason: string; exceptions?: string[] };
 type Rhythm = { id: string; body: RhythmBody & Row; updated_at?: string };
 
 export type ScopeEarnInDeps = {
@@ -794,11 +794,14 @@ export function scopeEarnInExitMetric(changes: Row[], currentAttestedBy?: string
 
 const posNum = (v: unknown, dflt: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt);
 const idFor = (prefix: string, ...parts: string[]): string => `${prefix}-${createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 16)}`;
+// A directory entry does not cover a file its excluded_path_exceptions name (gap-policy autonomyScopeExcludes): that
+// file is in scope, so a regression on it is proposed as a tightening like any other in-scope file's.
 function excludes(scope: Scope, path: string): boolean {
   const target = canonicalScopePath(path);
+  const excepted = parseScopeExceptions(scope.exceptions).map((x) => canonicalScopePath(x)).includes(target);
   return scope.excluded.some((e) => {
     const s = canonicalScopePath(e);
-    return s.endsWith("/") ? target.startsWith(s) : target === s;
+    return s.endsWith("/") ? target.startsWith(s) && !excepted : target === s;
   });
 }
 

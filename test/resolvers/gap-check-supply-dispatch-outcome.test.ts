@@ -124,6 +124,7 @@ let warnings: string[] = [];
 let rhythms: Row[] = [];
 let executions: Record<string, { status: string; reached: boolean | null; goalReachReason?: string }> = {};
 let excluded: string[] | null = null;
+let exceptions: string[] | undefined;
 let execGuard: ExecGuard | null = null;
 let gapStore: { restore: () => Promise<void> } | null = null;
 
@@ -157,7 +158,7 @@ beforeAll(() => {
     }
     if (imp?.type === "poolImpulse" && imp?.shape === "timeShapedRhythm") return Response.json({ body: { impulses: rhythms, count: rhythms.length } });
     if (imp?.type === "poolImpulse" && imp?.shape === "autonomyScope") {
-      const rows = excluded === null ? [] : [{ id: "autonomy-scope", shape: "autonomyScope", body: { excluded_paths: excluded, require_falsifier_classes: ["class2"] } }];
+      const rows = excluded === null ? [] : [{ id: "autonomy-scope", shape: "autonomyScope", body: { excluded_paths: excluded, require_falsifier_classes: ["class2"], ...(exceptions ? { excluded_path_exceptions: exceptions } : {}) } }];
       return Response.json({ body: { impulses: rows, count: rows.length } });
     }
     if (imp?.type === "poolImpulse" && imp?.shape === "rhythmFamilyGoal") return Response.json({ body: { impulses: [], count: 0 } });
@@ -182,7 +183,7 @@ afterAll(async () => {
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
 beforeEach(() => {
-  goals = []; probes = []; warnings = []; executions = {}; excluded = ["repos/some-other-vessel/"]; rhythms = [dueRhythm()];
+  goals = []; probes = []; warnings = []; executions = {}; excluded = ["repos/some-other-vessel/"]; exceptions = undefined; rhythms = [dueRhythm()];
   execGuard = installCutoverExecGuard();
   g2fPolicy.__resetPolicyReadsForTests();
 });
@@ -314,6 +315,25 @@ describe("the tick records, reads and settles dispatch outcomes", () => {
     expect(l["state"]).toBe("scope_excluded");
     expect(String(l["reason"])).toContain(`target repos/${VESSEL}/src/widget.ts is excluded by the autonomy scope`);
     expect(String(l["reason"])).not.toContain(`repos/${VESSEL}/repos/`);
+  });
+
+  it("MUST-FAIL: a site its directory entry excepts by excluded_path_exceptions is supplied as the lane reads it, not skipped", async () => {
+    excluded = [`repos/${VESSEL}/src/`];
+    exceptions = [`repos/${VESSEL}/src/widget.ts`];
+    const id = T("gcso-scopeexc");
+    await seed(id, "scopeexc");
+    await tick(Date.now() + 2600 * H);
+    expect(ledgerOf(await storeRow(id))["state"]).not.toBe("scope_excluded");
+    expect(goalsFor(id).length).toBe(1);
+  });
+
+  it("CONTROL: the same directory entry with no exception skips the site as scope-excluded", async () => {
+    excluded = [`repos/${VESSEL}/src/`];
+    const id = T("gcso-scopedir");
+    await seed(id, "scopedir");
+    await tick(Date.now() + 2600 * H);
+    expect(goalsFor(id).length).toBe(0);
+    expect(ledgerOf(await storeRow(id))["state"]).toBe("scope_excluded");
   });
 
   it("an absent autonomyScope record skips nothing here and is reported", async () => {

@@ -392,8 +392,16 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // excluded_paths is empty or missing without unrestricted:true, or that sets unrestricted:true AND
 // lists paths, is a misconfiguration and closed too. An unreadable scope excludes everything
 // autonomous (fail closed), including on a fresh process that has not read one yet.
+// DIRECTORY EXCEPTIONS (user rulings 2026-10-20, "(c) Wait for a matcher exception"): the sibling field
+// excluded_path_exceptions lists EXACT file paths (no directory, no glob) that a directory entry does not
+// exclude. An exception counts only for a file under a directory entry it names: an exact entry always wins,
+// and a file added to the directory later is excluded until someone lists it (forward-closed). It is a
+// sibling field, never a marker inside excluded_paths, so a reader that does not know it sees only
+// excluded_paths and stays closed on the excepted file.
 // Directed work never consults it. Cached 30 s.
 export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[]; holds?: ScopeHold[];
+  /** excluded_path_exceptions (parseScopeExceptions): exact files a directory entry does not exclude. */
+  exceptions?: string[];
   /** The live read FAILED in transport (no discovery answer, no producer, a silent producer, a throw): a read that could not
    *  happen, as against an explicit answer (absent, misconfigured), which is never stood in for. */
   transport?: boolean;
@@ -418,6 +426,10 @@ export function parseScopeHolds(raw: unknown): ScopeHold[] {
   if (!Array.isArray(raw)) return [];
   return raw.filter((h): h is Record<string, unknown> => !!h && typeof h === "object" && typeof (h as { path?: unknown }).path === "string")
     .map((h) => ({ path: String(h.path).trim(), ...(typeof h.expires_at === "string" ? { expires_at: h.expires_at } : {}), lineage_roots: strList(h.lineage_roots), lineage_checks: strList(h.lineage_checks) }));
+}
+/** excluded_path_exceptions: exact file paths only; a directory (trailing `/`), a glob or a `..` segment is dropped. */
+export function parseScopeExceptions(raw: unknown): string[] {
+  return strList(raw).filter((e) => !e.endsWith("/") && !/[*?[\]{}!]/.test(e) && !e.split("/").includes(".."));
 }
 /** A gap's own test_suite check, as "<test_file>|<title>" keys (one per named test). */
 export function gapCheckKeys(gap: Record<string, unknown>): string[] {
@@ -558,7 +570,8 @@ async function readAutonomyScopeLive(): Promise<AutonomyScope> {
         const reqRaw = body.require_falsifier_classes;
         const requireFalsifierClasses = Array.isArray(reqRaw) ? reqRaw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim().toLowerCase()) : undefined;
         const holds = parseScopeHolds((body as { tightening_holds?: unknown }).tightening_holds);
-        v = { excluded, readable: true, reason: body.unrestricted === true ? "autonomyScope: explicitly unrestricted" : `autonomyScope: ${excluded.length} excluded path(s)`, ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}), ...(holds.length ? { holds } : {}) };
+        const exceptions = parseScopeExceptions((body as { excluded_path_exceptions?: unknown }).excluded_path_exceptions);
+        v = { excluded, readable: true, reason: body.unrestricted === true ? "autonomyScope: explicitly unrestricted" : `autonomyScope: ${excluded.length} excluded path(s)`, ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}), ...(holds.length ? { holds } : {}), ...(exceptions.length ? { exceptions } : {}) };
         line(body.unrestricted === true ? "open (explicitly unrestricted)" : `contained (${excluded.length} excluded path(s))`, true, excluded.length);
       }
     }
@@ -569,14 +582,18 @@ async function readAutonomyScopeLive(): Promise<AutonomyScope> {
   return v;
 }
 /** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope excludes
- *  everything. Paths may be absolute, repo-relative or carry `:line`. */
+ *  everything. Paths may be absolute, repo-relative or carry `:line`. A directory entry skips a path its
+ *  exceptions name exactly (an exception outside the directory counts for nothing); an exact entry never does. */
 export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
   if (!scope.readable) return `scope ${scope.absent ? "absent" : "unreadable"} (${scope.reason})`;
   const n = String(path).replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
+  const strip = (p: string) => p.replace(/^\.\//, "").replace(/^repos\//, "");
+  const exceptions = parseScopeExceptions(scope.exceptions).map(strip);
   for (const e of scope.excluded) {
-    const s = e.replace(/^\.\//, "").replace(/^repos\//, "");
+    const s = strip(e);
     if (s.endsWith("/")) {
-      if (n.startsWith(s) || n.includes("/" + s)) return e;
+      const excepted = exceptions.some((x) => x.startsWith(s) && (n === x || n.endsWith("/" + x)));
+      if ((n.startsWith(s) || n.includes("/" + s)) && !excepted) return e;
     } else if (n === s || n.endsWith("/" + s)) {
       return e;
     }

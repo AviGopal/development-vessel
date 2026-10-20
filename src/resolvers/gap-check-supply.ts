@@ -67,7 +67,7 @@ import {
   isAwaitingLandVerification,
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
-import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
+import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
@@ -648,7 +648,10 @@ async function readScopeSelf(): Promise<AutonomyScope> {
     if (!body) return { excluded: [], readable: false, absent: true, reason: "no autonomyScope record" };
     const raw = body["excluded_paths"];
     const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
-    return { excluded, readable: true, reason: `autonomyScope: ${excluded.length} excluded path(s)` };
+    // excluded_path_exceptions too, read as the lane reads it: without it a lifted file under an excluded directory
+    // would be skipped here as one "the lane could never land".
+    const exceptions = parseScopeExceptions(body["excluded_path_exceptions"]);
+    return { excluded, readable: true, reason: `autonomyScope: ${excluded.length} excluded path(s)`, ...(exceptions.length ? { exceptions } : {}) };
   } catch (err) {
     return { excluded: [], readable: false, reason: `autonomyScope unreadable: ${String((err as Error)?.message ?? err).slice(0, 120)}` };
   }

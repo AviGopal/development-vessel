@@ -162,6 +162,15 @@ export function checkSupplyDisposition(row: Row): typeof CHECK_SUPPLY_DISPOSITIO
   if (String(row["status"] ?? "open") !== "open") return null;
   const meta = metaOf(row);
   if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return null;
+  // Skip re-commit children: these summarize a discarded draft's failure, not a HEAD defect.
+  // feature_compose files these with summary 'compose for gap X repeated already-recorded failure class <cls>: ...'
+  // and classification_metadata { re_commit:true, source_gap_id, root_gap_id, failure_class, edit_site } (feature-compose.ts:5340-5358).
+  // Fallback: if metadata is absent, use id prefix 'recommit-'.
+  {
+    const id = String(row["id"] ?? "");
+    const isRecommit = id.startsWith("recommit-") || (meta["re_commit"] === true && nonEmpty(meta["failure_class"]));
+    if (isRecommit) return null;
+  }
   if (nonEmpty(meta["expected_literal"]) || nonEmpty(meta["hardcoded_url"])) return null;
   if (String(meta["falsifier_unresolvable_reason"] ?? "").startsWith(DETECTOR_ROW_UNARMABLE_REASON)) return null;
   const cat = String(row["category"] ?? "");

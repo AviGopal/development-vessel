@@ -26,14 +26,13 @@ import { join } from "node:path";
 import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
-import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `gcs-placement-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
 const RUNTIME = join(ROOT, "runtime");
 const SLOTS = join(ROOT, "compose-slots");
-const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR"] as const;
+const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "METABOB_API_KEY"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 isolateLearnedStateInProcess(ROOT);
@@ -42,7 +41,12 @@ process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 process.env["COMPOSE_SLOT_DIR"] = SLOTS;
 delete process.env["GAP_STORE_ENDPOINT"];
+// A synthetic node key, set before any module reads it, so the peer calls can be seen to carry it (or not).
+const NODE_KEY = `synthetic-node-key-${Math.random().toString(36).slice(2, 10)}`;
+process.env["METABOB_API_KEY"] = NODE_KEY;
 
+// config.js after the key is set (a static import is hoisted above it), so its frozen copy of the key is the synthetic one too.
+const { __resetDiscoveryForTests } = await import("../../src/config.js");
 const sg = await import("../../src/resolvers/substrate-gap.js");
 await import("../../src/resolvers/gap-to-feature.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
@@ -56,7 +60,13 @@ const LOCAL = supply.checkSupplyNode();
 
 /** A peer compose producer as discovery lists it and as it answers a placement query. */
 type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500" };
-const peerAt = (name: string, over: Partial<Peer> = {}): Peer => ({ id: `development-vessel@${name}`, url: `http://${name}.peer.test`, node: name, owns: [VESSEL], free: 1, visible: true, excludes: [], ...over });
+// Peers on THIS host (the node key goes to no other: self-auth.ts crossNodeKeyHeaders): loopback, one port per name.
+const peerPorts = new Map<string, number>();
+const loopbackUrl = (name: string): string => {
+  if (!peerPorts.has(name)) peerPorts.set(name, 18_900 + peerPorts.size);
+  return `http://127.0.0.1:${peerPorts.get(name)}`;
+};
+const peerAt = (name: string, over: Partial<Peer> = {}): Peer => ({ id: `development-vessel@${name}`, url: loopbackUrl(name), node: name, owns: [VESSEL], free: 1, visible: true, excludes: [], ...over });
 
 const originalFetch = globalThis.fetch;
 const origLog = console.log;
@@ -64,8 +74,8 @@ const origWarn = console.warn;
 let warned: string[] = [];
 let goals: Array<{ goal: string; variables?: Record<string, unknown> }> = [];
 let peers: Peer[] = [];
-let peerReads: Array<{ node: string; pointer: Row }> = [];
-let peerGoals: Array<{ node: string; goal: string; variables?: Record<string, unknown> }> = [];
+let peerReads: Array<{ node: string; pointer: Row; auth: string | null }> = [];
+let peerGoals: Array<{ node: string; goal: string; variables?: Record<string, unknown>; auth: string | null }> = [];
 let executions: Record<string, { status: string; reached: boolean | null; outcome?: Record<string, unknown> }> = {};
 let rhythms: Row[] = [];
 /** The pool's autonomyScope excluded paths, as this node's own policy read sees them (the producer-side case). */
@@ -91,17 +101,18 @@ beforeAll(() => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     const peer = peers.find((p) => url.startsWith(p.url));
     if (peer) {
+      const auth = new Headers(init?.headers).get("authorization");
       if (peer.fail === "throw") throw new Error("connect ECONNREFUSED (synthetic)");
       if (peer.fail === "http500") return new Response("internal error", { status: 500 });
       const ptr = (body?.impulse?.pointer ?? {}) as Row;
       if (ptr["type"] === "composeOwnership") {
-        peerReads.push({ node: peer.node, pointer: ptr });
+        peerReads.push({ node: peer.node, pointer: ptr, auth });
         return Response.json({ success: true, shape: "composeOwnership", body: { node: peer.node, owned_repos: peer.owns,
           placement: { armed: ptr["armed"] === true, capacity: peer.free === null ? null : { free: peer.free, live: peer.free > 0 ? 0 : 1, cap: 1 }, scope_readable: true,
             scope_excludes: peer.excludes.map((t) => ({ target: t, entry: t })), gap_row_visible: peer.visible } } });
       }
       if (ptr["type"] === "dispatch_goal") {
-        peerGoals.push({ node: peer.node, goal: String(ptr["goal"] ?? ""), variables: ptr["variables"] as Record<string, unknown> | undefined });
+        peerGoals.push({ node: peer.node, goal: String(ptr["goal"] ?? ""), variables: ptr["variables"] as Record<string, unknown> | undefined, auth });
         return Response.json({ success: true, shape: "goalDispatchResult", body: { dispatched: true, dispatch_id: `p-${peer.node}-${peerGoals.length}`, status: "accepted" } });
       }
       return Response.json({ success: false, error: "unexpected" }, { status: 400 });
@@ -323,6 +334,37 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     const l = ledgerOf(await storeRow(id));
     expect(l["dispatch_node"]).toBe(LOCAL);
     expect(l["placed_by"]).toBeUndefined();
+  });
+
+  it("[MUST-FAIL] a producer off this host gets no key and no call: never asked, never placed", async () => {
+    const id = T("gcs-offhost");
+    await seed(id, "off-host producer");
+    setLocalBusy(true);
+    // idle and able in every other respect, but its endpoint is not on this machine (a documentation-range address)
+    peers = [peerAt("node-remote", { url: "http://203.0.113.7:8090" })];
+    await tick(Date.now());
+    expect(peerReads.length).toBe(0);
+    expect(peerGoals.length).toBe(0);
+    expect(warned.some((w) => w.includes("[cross-node-key] refused non-local 203.0.113.7"))).toBe(true);
+    expect(warned.some((w) => w.includes(NODE_KEY))).toBe(false);
+    expect(localGoalsFor(id).length).toBe(1);
+    const l = ledgerOf(await storeRow(id));
+    expect(l["dispatch_node"]).toBe(LOCAL);
+    expect(l["placed_by"]).toBeUndefined();
+  });
+
+  it("[CONTROL] a loopback producer on another port is still asked and placed, with the node key", async () => {
+    const id = T("gcs-loopkey");
+    await seed(id, "loopback producer with key");
+    setLocalBusy(true);
+    process.env["METABOB_API_KEY"] = NODE_KEY;
+    peers = [peerAt("node-b")];
+    await tick(Date.now());
+    const ask = peerReads.find((r) => r.pointer["gap_id"] === id);
+    expect(ask?.auth).toBe(`ApiKey ${NODE_KEY}`);
+    expect(peerGoalsFor(id).length).toBe(1);
+    expect(peerGoalsFor(id)[0]!.auth).toBe(`ApiKey ${NODE_KEY}`);
+    expect(warned.some((w) => w.includes("[cross-node-key]"))).toBe(false);
   });
 
   it("[MUST-FAIL] the producer side answers a placement query from its own capacity per class, scope and store", async () => {

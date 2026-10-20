@@ -27,6 +27,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 const askHuman: Ask = (p) => resolveUiWritePassthrough(p as never);
 
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
+import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
@@ -2310,9 +2311,12 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     if (owner) {
       {
         try {
+          // Same host only (self-auth.ts crossNodeKeyHeaders), checked again at the send: findComposeOwner asks no other.
+          const auth = await crossNodeKeyHeaders(owner.url);
+          if (!auth) throw new Error(`${owner.vesselId} is not on this host: not forwarded`);
           const res = await fetch(owner.url, {
             method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+            headers: { "Content-Type": "application/json", ...auth },
             body: JSON.stringify({ impulse: { pointer: { ...pointer, forwarded_from: process.env["SUBSTRATE_NAME"] ?? "substrate" } } }),
             ...({ timeout: false } as RequestInit),   // a compose outlives Bun's ~300 s default fetch cut
           });

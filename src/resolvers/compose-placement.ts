@@ -30,8 +30,13 @@
  * isOwnSubstrateProducer rejects because it guards POLICY READS (a peer must never set this node's scope or spend
  * envelope). Placement reads no policy from a peer: it hands the peer work that the peer admits through its own gates
  * and the shared store's ledger, and row visibility excludes a peer that does not share the store.
+ *
+ * SAME HOST ONLY (user ruling). Both the placement read and the placed send carry this node's key, so each goes only
+ * to an endpoint on this machine (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no call, and
+ * is no candidate.
  */
-import { lookupShape, describeLookup, METABOB_API_KEY } from "../config.js";
+import { lookupShape, describeLookup } from "../config.js";
+import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity } from "../compose-slots.js";
 import { autonomyScope, autonomyScopeExcludes } from "../judge/gap-policy.js";
 import type { DispatchGoalPointer } from "./dispatch-goal.js";
@@ -118,10 +123,13 @@ export async function placeCompose(q: { gap_id: string; vessel: string; targets:
   const asks = look.producers.filter((p) => p.origin !== "local" && p.resolveEndpoint.length > 0);
   const pointer = { type: "composeOwnership", gap_id: q.gap_id, targets: q.targets, armed: q.armed };
   const answers = await Promise.all(asks.map(async (p) => {
+    // Same host only (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no read, so is no candidate.
+    const auth = await crossNodeKeyHeaders(p.resolveEndpoint);
+    if (!auth) return null;
     try {
       const r = await fetch(p.resolveEndpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+        headers: { "Content-Type": "application/json", ...auth },
         body: JSON.stringify({ impulse: { pointer } }),
         signal: AbortSignal.timeout(READ_TIMEOUT_MS),
       });
@@ -152,10 +160,13 @@ export async function placeCompose(q: { gap_id: string; vessel: string; targets:
 
 /** Send a dispatch_goal through a peer's development-vessel (its goal-host then composes on that peer). Never throws. */
 export async function dispatchGoalOnPeer(via: string, pointer: DispatchGoalPointer): Promise<ResolverResult> {
+  // Checked again at the send (defence in depth): a target off this host gets no key and no call, a non-attempt.
+  const auth = await crossNodeKeyHeaders(via);
+  if (!auth) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `peer ${via} is not on this host: not sent`, goal: pointer.goal } };
   try {
     const r = await fetch(via, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({ impulse: { pointer } }),
       signal: AbortSignal.timeout(PLACED_SEND_TIMEOUT_MS),
     });

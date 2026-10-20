@@ -28,6 +28,7 @@ import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } f
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
+import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 
 // The evaluator's tree (lib/evaluator-tree.ts), the same alias gap-to-feature uses.
 const runtimeRoot = evaluatorTreeRoot;
@@ -837,10 +838,13 @@ export async function findComposeOwner(vessel: string): Promise<{ vesselId: stri
     await Promise.all(rows.map(async (r) => {
       const ep = String(r.resolve_endpoint ?? "/v2/impulses/resolve");
       const url = ep.startsWith("http") ? ep : `${String(r.endpoint ?? "").replace(/\/+$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+      // Same host only (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no read, so claims nothing.
+      const auth = await crossNodeKeyHeaders(url);
+      if (!auth) return;
       try {
         const res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+          headers: { "Content-Type": "application/json", ...auth },
           body: JSON.stringify({ impulse: { pointer: { type: "composeOwnership" } } }),
           signal: AbortSignal.timeout(3_000),
         });

@@ -8,6 +8,8 @@
 // Driven through resolveGapToFeature with a stored row and a fixture clone root (owned set = clones with .git);
 // asserted on the requests made, the forwarded pointer, the report, the store writes and whether compose ran.
 // Written against the tree before the extraction; it must hold after it.
+// The producers sit on loopback ports: findComposeOwner sends the node key, and so asks, only producers on this host
+// (self-auth.ts crossNodeKeyHeaders, "same-host peers only"); an off-host name would be refused before any claim.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -79,15 +81,15 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
     ownClones(OWNED);
     const id = gapAt("one-owner", OTHER);
     routeProducers([
-      { vesselId: "owner-node", endpoint: "http://owner.judge-pin", owns: [OTHER] },
-      { vesselId: "bystander-node", endpoint: "http://bystander.judge-pin", owns: [OWNED] },
+      { vesselId: "owner-node", endpoint: "http://127.0.0.1:18961", owns: [OTHER] },
+      { vesselId: "bystander-node", endpoint: "http://127.0.0.1:18962", owns: [OWNED] },
     ]);
     const { result, lines } = await directed(id, { model: "pin-model" });
     expect(result.shape).toBe("gapToFeatureReport");
     expect(result.body).toEqual({ ok: true, verdict: "FORWARDED_FIXTURE", from: "owner-node", routed_to: "owner-node" });
     const fwd = hitsOf("forward owner-node");
     expect(fwd.length).toBe(1);
-    expect(fwd[0]!.url).toBe("http://owner.judge-pin/v2/impulses/resolve");
+    expect(fwd[0]!.url).toBe("http://127.0.0.1:18961/v2/impulses/resolve");
     expect(fwd[0]!.body).toEqual({ impulse: { pointer: { type: "gap_to_feature", gap_id: id, dry_run: true, model: "pin-model", forwarded_from: "substrate" } } });
     expect(hitsOf("forward bystander-node").length).toBe(0);
     expect(hitsOf("ownership owner-node").length).toBe(1);
@@ -102,7 +104,7 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
     ownClones(OWNED);
     process.env["SUBSTRATE_NAME"] = "pin-node-1";
     const id = gapAt("named", OTHER);
-    routeProducers([{ vesselId: "owner-node", endpoint: "http://owner.judge-pin", owns: [OTHER] }]);
+    routeProducers([{ vesselId: "owner-node", endpoint: "http://127.0.0.1:18961", owns: [OTHER] }]);
     await directed(id);
     expect(hitsOf("forward owner-node")[0]!.body.impulse.pointer.forwarded_from).toBe("pin-node-1");
   });
@@ -110,7 +112,7 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
   it("[PIN] the forward fails: a route-stage error report naming the owner; nothing composed", async () => {
     ownClones(OWNED);
     const id = gapAt("fwd-fails", OTHER);
-    routeProducers([{ vesselId: "owner-node", endpoint: "http://owner.judge-pin", owns: [OTHER], forwardAnswer: "throw" }]);
+    routeProducers([{ vesselId: "owner-node", endpoint: "http://127.0.0.1:18961", owns: [OTHER], forwardAnswer: "throw" }]);
     const { result } = await directed(id);
     expect(result.body).toEqual({ ok: false, stage: "route", gap_id: id, routed_to: "owner-node", error: "forward to owner failed: pin: owner unreachable" });
     expect(calls.compose.length).toBe(0);
@@ -122,8 +124,8 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
       ownClones(OWNED);
       const id = gapAt(tag, OTHER);
       routeProducers(owners === 0
-        ? [{ vesselId: "bystander-node", endpoint: "http://bystander.judge-pin", owns: [OWNED] }]
-        : [{ vesselId: "a-node", endpoint: "http://a.judge-pin", owns: [OTHER] }, { vesselId: "b-node", endpoint: "http://b.judge-pin", owns: [OTHER] }]);
+        ? [{ vesselId: "bystander-node", endpoint: "http://127.0.0.1:18962", owns: [OWNED] }]
+        : [{ vesselId: "a-node", endpoint: "http://127.0.0.1:18963", owns: [OTHER] }, { vesselId: "b-node", endpoint: "http://127.0.0.1:18964", owns: [OTHER] }]);
       const { result, lines } = await directed(id);
       expect(lines).toContain(`[gap-to-feature] directed ${id}: ${OTHER} is not owned here and no single owner was found; composing here`);
       expect(hitsOf("discovery feature_compose").length).toBe(1);
@@ -142,7 +144,7 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
     it(`[PIN] ${tag}: no ownership lookup, no forward; composes here`, async () => {
       (setup as () => void)();
       const id = gapAt(tag, OTHER);
-      routeProducers([{ vesselId: "owner-node", endpoint: "http://owner.judge-pin", owns: [OTHER] }]);
+      routeProducers([{ vesselId: "owner-node", endpoint: "http://127.0.0.1:18961", owns: [OTHER] }]);
       const { result, lines } = await directed(id, extra as Row);
       expect(hitsOf("discovery feature_compose").length).toBe(0);
       expect(net_forwards()).toBe(0);

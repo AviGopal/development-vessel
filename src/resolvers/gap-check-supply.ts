@@ -519,6 +519,22 @@ export function checkSupplySettlementLeg(c: { dispatched: number; armed: number;
   return c.refused > 0 ? "beta" : null;
 }
 
+/**
+ * ONE SETTLEMENT PER ATTEMPT: the key of one dispatch of one row (its dispatch id, or with none recorded, its send
+ * instant). A failed or lost outcome whose key the rhythm already holds was settled before, and is never debited again.
+ * Measured: a dispatch_failed write that the next tick undid left the row at goal_dispatched, so the same failure
+ * was read back and debited on nearly every tick (one row 434 times), and the family's posterior fell to 16 against 1296.
+ */
+export function settledAttemptKey(rowId: string, l: { dispatch_id?: unknown; last_dispatch_at?: unknown }): string {
+  const attempt = nonEmpty(l.dispatch_id) ? String(l.dispatch_id) : `@${String(l.last_dispatch_at ?? "")}`;
+  return createHash("sha256").update(`${rowId}\n${attempt}`).digest("hex").slice(0, 16);
+}
+/** The attempt keys a rhythm body holds as settled, newest last (settled_attempts; anything else reads as none). */
+export function settledAttemptsOf(body: Record<string, unknown>): string[] {
+  const raw = body["settled_attempts"];
+  return Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : [];
+}
+
 // ─── the dispatch's outcome, read back ──────────────────────────────────────
 
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
@@ -691,16 +707,21 @@ export async function probeDispatch(dispatchId: string): Promise<DispatchProbe> 
 }
 
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
-export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick"): Promise<void> {
+export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick", extra: Row = {}): Promise<void> {
+  // `extra` lands in the SAME write as the leg (the settled attempt keys): a debit and its key are stored together or not at all.
   try {
-    await fetch(SELF_RESOLVE_URL, {
+    const res = await fetch(SELF_RESOLVE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
       body: JSON.stringify({ impulse: { type: "poolImpulse_write", id: rhythm.id, shape: "timeShapedRhythm", source,
-        body: { ...rhythm.body, ...rhythmSettlementOverlay(leg, d.alpha, d.beta, d.staleness) } } }),
+        body: { ...rhythm.body, ...rhythmSettlementOverlay(leg, d.alpha, d.beta, d.staleness), ...extra } } }),
       signal: AbortSignal.timeout(5_000),
     });
-  } catch { /* the next tick re-derives due-ness from whatever the registry holds */ }
+    if (!res.ok) console.warn(`[gap-check-supply] rhythm ${rhythm.id} ${leg} settlement not written: HTTP ${res.status}`);
+  } catch (err) {
+    // The next tick re-derives due-ness from whatever the registry holds; this tick's leg (and its keys) are lost.
+    console.warn(`[gap-check-supply] rhythm ${rhythm.id} ${leg} settlement lost: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+  }
 }
 
 const posNum = (v: unknown, dflt: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt);
@@ -785,6 +806,10 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const localized: Array<{ id: string; edit_site: string; method: string }> = [];
   const outcomes: { not_attempts: Array<{ id: string; kind: string; reason: string; not_before: string }>; failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { not_attempts: [], failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
   let refused = 0;
+  // Attempts the rhythm already holds as settled, and the ones this tick settles (stored by its settlement write).
+  const settledBefore = new Set(settledAttemptsOf(rhythm.body));
+  const settledNow: string[] = [];
+  const resettled: Array<{ id: string; dispatch_id: string | null }> = [];
 
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
   let armBudget = perTick;
@@ -881,15 +906,17 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal((report as Record<string, unknown> | null)?.["red_reason"], titles) : null;
     const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) : null;
     if (verdict !== "present" || wrongReason) {
-      // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown stays dispatched and is judged again.
-      const state = verdict === "unknown" ? "goal_dispatched" : verdict === "absent" ? "green_at_head" : "arm_refused";
-      if (state !== "goal_dispatched") refused += 1;
+      // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown keeps the row's state and is judged again:
+      // turned back to goal_dispatched, a settled failure was read back and settled again on the next tick.
+      const unknown = verdict === "unknown";
+      const state = unknown ? ledger.state : verdict === "absent" ? "green_at_head" : "arm_refused";
+      if (!unknown) refused += 1;
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
       if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
-      const judged = state === "goal_dispatched" ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD" };
+      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD" };
       // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
       // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
-      const handedOff = state !== "goal_dispatched" && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
+      const handedOff = !unknown && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
       if (!pointer.dry_run) await writeMeta(row, { ...(handedOff ? { evidence_resolve: null } : {}), check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
       continue;
     }
@@ -944,10 +971,22 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       continue;
     }
     const next: Ledger = { ...ledger, state: v.kind === "failed" ? "dispatch_failed" : "dispatch_lost", reason: v.reason, outcome, non_attempt_streak: 0 };
-    refused += 1;
+    const did = nonEmpty(ledger.dispatch_id) ? String(ledger.dispatch_id) : null;
+    // ONE DEBIT PER ATTEMPT (settledAttemptKey): an attempt the rhythm already holds as settled is re-recorded, never re-debited.
+    const key = settledAttemptKey(id, ledger);
+    const again = settledBefore.has(key) || settledNow.includes(key);
+    if (again) resettled.push({ id, dispatch_id: did });
+    else { refused += 1; settledNow.push(key); }
     if (v.kind === "failed") outcomes.failed.push({ id, reason: v.reason }); else outcomes.lost.push({ id, why: v.why, reason: v.reason });
-    console.log(`[gap-check-supply] outcome ${next.state} for ${id}: ${v.reason}`);
-    if (!pointer.dry_run) await writeMeta(row, { check_supply: next });
+    console.log(`[gap-check-supply] outcome ${next.state} for ${id} (dispatch ${did ?? "none"}${again ? ", settled before: not debited again" : ""}): ${v.reason}`);
+    if (!pointer.dry_run) {
+      try {
+        const w = await writeMeta(row, { check_supply: next });
+        if (w.shape === "structuredError") console.warn(`[gap-check-supply] settlement write for ${id} (dispatch ${did ?? "none"}) refused, the row stays as read: ${JSON.stringify(w.body).slice(0, 200)}`);
+      } catch (err) {
+        console.warn(`[gap-check-supply] settlement write for ${id} (dispatch ${did ?? "none"}) lost: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
+      }
+    }
     // The same tick's dispatch step sees the settled ledger (a due retry may be sent now).
     (meta as Row)["check_supply"] = next;
   }
@@ -1165,7 +1204,9 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
 
   // A localized gap is work done this tick (I1), graded as a dispatch is.
   const leg = checkSupplySettlementLeg({ dispatched: dispatched.length + localized.length, armed: armed.length, refused });
-  if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due);
+  const keep = Math.floor(posNum(rhythm.body["settled_attempts_kept"], 200));
+  const settledKeys = settledNow.length > 0 ? { settled_attempts: [...settledAttemptsOf(rhythm.body), ...settledNow].slice(-keep) } : {};
+  if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys);
 
   const after = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
   const afterRows = ((after.body ?? {}) as { gaps?: Row[] }).gaps ?? [];
@@ -1187,6 +1228,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       armed,
       not_armed: notArmed,
       refused,
+      ...(resettled.length ? { resettled } : {}),
       exhausted,
       control_marked: controlMarked,
       localized,

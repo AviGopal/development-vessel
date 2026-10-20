@@ -81,6 +81,7 @@ describe("a gate refusal is reported as one, never as 'not applied' (must-fail a
 });
 
 describe("the checked-in applier applies real mutants of a real in-scope file (positive control)", () => {
+  // Its own timeout: up to 6 serial `bun run <applier>` spawns, each 0.67–2.0 s measured, so bun's 5 s default is at the bound by construction.
   it("MUST-FAIL: ≥1 operator mutant of src/resolvers/maintenance-lease.ts applies at this tree, exactly where selected", () => {
     const applier = (testSuite as unknown as { MUTANT_APPLIER_PATH?: string }).MUTANT_APPLIER_PATH;
     expect(typeof applier).toBe("string");
@@ -103,7 +104,7 @@ describe("the checked-in applier applies real mutants of a real in-scope file (p
       }
     }
     expect(applied).toBeGreaterThan(0);
-  });
+  }, 30_000);
   it("the applier refuses when the text at [start,end) is not exactly `original` (file untouched)", () => {
     const applier = (testSuite as unknown as { MUTANT_APPLIER_PATH?: string }).MUTANT_APPLIER_PATH!;
     const dir = mkdtempSync(join(tmpdir(), "mutant-mismatch-"));

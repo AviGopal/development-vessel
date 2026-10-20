@@ -738,15 +738,25 @@ async function discover(shape: string): Promise<string | null> {
   } catch { return null; }
 }
 
-async function callTool(endpoint: string, tool: string, args: Json): Promise<{ ok: boolean; body: Json }> {
+/** How long past the time a tool call asked the tool for (timeout_sec) the client waits for its answer. */
+const TOOL_CALL_MARGIN_MS = 60_000;
+export async function callTool(endpoint: string, tool: string, args: Json): Promise<{ ok: boolean; body: Json }> {
   try {
+    // A write tool carries the lane's write grant for exactly this path (write-containment.ts):
+    // without it local-tools refuses vessel runtime / clone / compose-worktree writes.
+    const pointer: Record<string, unknown> = { type: tool, ...(tool === "shell" ? { timeout_sec: 300 } : {}), ...withWriteGrant(tool, args as Record<string, unknown>, METABOB_API_KEY) };
+    // THE CLIENT WAITS AS LONG AS IT ASKED THE TOOL TO RUN. Bun cuts any fetch at its ~300 s default unless told
+    // `timeout: false`, so a verify that asked the shell for 720 s was cut at 300 s and its empty output read as an
+    // environment non-attempt; and the fixed 600 s signal would still abort it before the shell's own 720 s kill.
+    // The bound is the call's own timeout_sec plus a margin; a call that names none keeps the per-call cap.
+    const askedSec = Number(pointer["timeout_sec"]);
+    const boundMs = Number.isFinite(askedSec) && askedSec > 0 ? askedSec * 1000 + TOOL_CALL_MARGIN_MS : PER_CALL_TIMEOUT_MS;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      // A write tool carries the lane's write grant for exactly this path (write-containment.ts):
-      // without it local-tools refuses vessel runtime / clone / compose-worktree writes.
-      body: JSON.stringify({ impulse: { pointer: { type: tool, ...(tool === "shell" ? { timeout_sec: 300 } : {}), ...withWriteGrant(tool, args as Record<string, unknown>, METABOB_API_KEY) } } }),
-      signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
+      body: JSON.stringify({ impulse: { pointer } }),
+      ...({ timeout: false } as RequestInit),
+      signal: AbortSignal.timeout(boundMs),
     });
     const body = (await res.json().catch(() => ({}))) as Json;
     const errored =

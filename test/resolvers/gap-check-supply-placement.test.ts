@@ -59,7 +59,7 @@ const VESSEL = "local-tools-vessel";
 const LOCAL = supply.checkSupplyNode();
 
 /** A peer compose producer as discovery lists it and as it answers a placement query. */
-type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500" };
+type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500"; origin?: string };
 // Peers on THIS host (the node key goes to no other: self-auth.ts crossNodeKeyHeaders): loopback, one port per name.
 const peerPorts = new Map<string, number>();
 const loopbackUrl = (name: string): string => {
@@ -132,7 +132,7 @@ beforeAll(() => {
       if (cap.shape === "composeOwnership") {
         return Response.json({ content: { vessels: [
           { vesselId: "development-vessel-self", endpoint: "http://127.0.0.1:8090", resolve_endpoint: "http://127.0.0.1:8090/v2/impulses/resolve", origin: "local" },
-          ...peers.map((p) => ({ vesselId: p.id, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve`, origin: "overlay" })),
+          ...peers.map((p) => ({ vesselId: p.id, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve`, origin: p.origin ?? "overlay" })),
         ] } });
       }
       if (cap.shape === "poolImpulse") return Response.json({ content: { vessels: [{ vesselId: "pool-self", endpoint: "http://pool.self.test", resolve_endpoint: "http://pool.self.test/v2/impulses/resolve", origin: "local" }] } });
@@ -365,6 +365,34 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     expect(peerGoalsFor(id).length).toBe(1);
     expect(peerGoalsFor(id)[0]!.auth).toBe(`ApiKey ${NODE_KEY}`);
     expect(warned.some((w) => w.includes("[cross-node-key]"))).toBe(false);
+  });
+
+  it("[CONTROL] a same-host peer node's row under THIS node's own id (node-distinct composeOwnership) is asked and placed on", async () => {
+    // What discovery answers once composeOwnership is declared stateful_data_owner_merge on both nodes: the peer's
+    // development-vessel row carries the same vesselId as this node's own, from the peer's own registry.
+    const id = T("gcs-sameid");
+    await seed(id, "same-id peer row");
+    setLocalBusy(true);
+    peers = [peerAt("node-b", { id: "development-vessel-self", origin: "peer:http://127.0.0.1:28100" })];
+    await tick(Date.now());
+    expect(peerGoalsFor(id).length).toBe(1);
+    expect(peerGoalsFor(id)[0]!.node).toBe("node-b");
+    expect(localGoalsFor(id).length).toBe(0);
+    expect(ledgerOf(await storeRow(id))["dispatch_node"]).toBe("node-b");
+  });
+
+  it("[BACKSTOP] a self-echo under this node's own id (its own row seen again through a peer's discovery) is never a candidate", async () => {
+    // A node whose peer list reaches its OWN discovery (through the runtime's host name) sees its own development-vessel
+    // again, under the same id, as a peer row. It answers with this node's name, so even with a free slot it is refused.
+    const id = T("gcs-selfecho");
+    await seed(id, "self echo");
+    setLocalBusy(true);
+    peers = [peerAt("self-echo", { id: "development-vessel-self", node: LOCAL, free: 3, origin: "peer:http://host.containers.internal:18100" })];
+    await tick(Date.now());
+    expect(peerReads.some((r) => r.pointer["gap_id"] === id)).toBe(true);
+    expect(peerGoals.length).toBe(0);
+    expect(localGoalsFor(id).length).toBe(1);
+    expect(ledgerOf(await storeRow(id))["dispatch_node"]).toBe(LOCAL);
   });
 
   it("[MUST-FAIL] the producer side answers a placement query from its own capacity per class, scope and store", async () => {

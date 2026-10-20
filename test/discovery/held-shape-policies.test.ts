@@ -1,6 +1,8 @@
 // HELD SHAPES ARE ADVERTISED AS HELD (discovery held-shape-routing; user ruling 2026-10-17T04:47:53Z). dev-vessel's
 // registration carries per-shape stateful_data_owner_pin + holder for the shapes whose data it holds, DERIVED from the
-// store modules' own declarations; every other shape stays as before (no row-level pin).
+// store modules' own declarations; every other shape stays as before (no row-level pin). The one NODE-DISTINCT shape,
+// composeOwnership (each node answers from its own capacity, scope and store; compose-placement.ts), is declared
+// stateful_data_owner_merge, so discovery lists a same-host peer node's row of it beside this node's own.
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +28,18 @@ describe("held shapes are advertised as held", () => {
     expect(unpinned.length).toBeGreaterThan(100);
     expect(unpinned).toContain("resolver_schema");
     expect(p.distribution_policy).toBeUndefined();
+  });
+  it("[MUST-FAIL] composeOwnership alone is declared node-distinct (stateful_data_owner_merge, no holder); no other shape changes", async () => {
+    const placement = await import("../../src/resolvers/compose-placement.js");
+    const p = reg.buildRegistrationPayload() as { shape_policies?: Record<string, { distribution_policy: string; holder?: string }>; shapes: string[] };
+    expect(p.shapes).toContain("composeOwnership");
+    expect(p.shape_policies?.["composeOwnership"]).toEqual({ distribution_policy: "stateful_data_owner_merge" });
+    expect([...placement.NODE_DISTINCT_SHAPES]).toEqual(["composeOwnership"]);
+    // every other entry is exactly the store modules' pins, as before
+    const others = Object.entries(p.shape_policies ?? {}).filter(([s]) => s !== "composeOwnership");
+    expect(others.every(([, v]) => v.distribution_policy === "stateful_data_owner_pin" && !!v.holder)).toBe(true);
+    const held = new Set<string>([...gap.GAP_STORE_HELD_SHAPES, ...mem.MEMORY_NOTE_HELD_SHAPES, ...lc.LEARNING_CREDIT_HELD_SHAPES]);
+    expect(others.map(([s]) => s).sort()).toEqual(p.shapes.filter((s) => held.has(s)).sort());
   });
   it("[UNIT] the holder names the store: this node's gap store on the holder, the designated holder on a non-holder", () => {
     const saved = process.env["GAP_STORE_ENDPOINT"];

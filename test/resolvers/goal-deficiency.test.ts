@@ -1129,6 +1129,12 @@ describe("#1e: the serving vessel is read from discovery as the real adapter map
       { vesselId: "development-vessel-local@syzygy-hub", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
       { vesselId: "development-vessel-local@spoke-cfaaaa8d", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
     ],
+    // A node-distinct shape (shape_policies stateful_data_owner_merge): discovery lists a same-host peer node's row under
+    // the SAME id beside this node's own (synthetic endpoints).
+    composeOwnership: [
+      { vesselId: "development-vessel-local", endpoint: "http://localhost:18090", resolve_endpoint: "/v2/impulses/resolve", origin: "local" },
+      { vesselId: "development-vessel-local", endpoint: "http://127.0.0.1:28090", resolve_endpoint: "/v2/impulses/resolve", origin: "peer:http://127.0.0.1:28100", origin_upstream: "local" },
+    ],
   };
   const withLiveDiscovery = async <T>(f: () => Promise<T>): Promise<T> => {
     const { HttpDiscoveryAdapter } = await import("@avigopal/ias-executor-ts/adapters");
@@ -1142,6 +1148,9 @@ describe("#1e: the serving vessel is read from discovery as the real adapter map
   });
   it("MUST-FAIL: concept_write, served by two local vessels, says so by name (never 'no local vessel')", async () => {
     expect(await withLiveDiscovery(() => grt.vesselOfResolver("concept_write", { repoExists: () => true }))).toEqual({ why: "concept_write is served by 2 local vessels: concept-db-local, development-vessel-local" });
+  });
+  it("MUST-FAIL: a node-distinct shape listed twice under one id (this node's row and a same-host peer's) is one serving vessel", async () => {
+    expect(await withLiveDiscovery(() => grt.vesselOfResolver("composeOwnership", { repoExists: (r: string) => r === "repos/development-vessel" }))).toEqual({ vessel: "development-vessel" });
   });
   it("controls: a shape no vessel serves says no local vessel; a local vessel with no repo here says so", async () => {
     expect(await withLiveDiscovery(() => grt.vesselOfResolver("unserved_fixture_shape", { repoExists: () => true }))).toEqual({ why: "no local vessel serves unserved_fixture_shape" });

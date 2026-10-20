@@ -43,6 +43,13 @@ import type { DispatchGoalPointer } from "./dispatch-goal.js";
 import type { ResolverResult } from "./types.js";
 
 type Row = Record<string, unknown>;
+/**
+ * NODE-DISTINCT SHAPES (discovery shape_policies "stateful_data_owner_merge"): each node answers composeOwnership from
+ * its OWN capacity, scope and store, so every node's producer is a different answer, not an interchangeable replica.
+ * Declaring it lets discovery list a same-host peer node's row beside this node's own (same vesselId), which is what
+ * placeCompose needs to see a peer. Declared here, beside the resolver that makes the answer per node.
+ */
+export const NODE_DISTINCT_SHAPES: readonly string[] = ["composeOwnership"];
 const READ_TIMEOUT_MS = 5_000;
 /** Above dispatch_goal's own goal-host timeout (the supply sends 15 s) plus the overlay hop. */
 const PLACED_SEND_TIMEOUT_MS = 20_000;

@@ -3,16 +3,21 @@ import { GAP_STORE_HELD_SHAPES, gapStoreIsLocal } from "./resolvers/substrate-ga
 import { MEMORY_NOTE_HELD_SHAPES } from "./resolvers/memory-note.js";
 import { LEARNING_CREDIT_HELD_SHAPES } from "./judge/learning-credit.js";
 import { LLM_COMPLETION_DISPATCH_DECLARED_TIERS } from "./resolvers/llm-completion-dispatch.js";
+import { NODE_DISTINCT_SHAPES } from "./resolvers/compose-placement.js";
 
 /** Per-shape held-data policies for the advertised shapes, from the store modules' own declarations. The holder names
- *  which store: this node's gap store when it holds it, else the designated holder it forwards to; its own memory store. */
-export function heldShapePolicies(advertised: readonly string[]): Record<string, { distribution_policy: "stateful_data_owner_pin"; holder: string }> {
+ *  which store: this node's gap store when it holds it, else the designated holder it forwards to; its own memory store.
+ *  A NODE-DISTINCT shape (compose-placement.ts NODE_DISTINCT_SHAPES: each node answers from its own state) is declared
+ *  stateful_data_owner_merge, with no holder: discovery then lists a same-host peer node's row of it beside this one. */
+export type ShapePolicy = { distribution_policy: "stateful_data_owner_pin" | "stateful_data_owner_merge"; holder?: string };
+export function heldShapePolicies(advertised: readonly string[]): Record<string, ShapePolicy> {
   const gapHolder = gapStoreIsLocal() ? `gap-store@${config.vesselId}` : "gap-store@designated-holder";
-  const out: Record<string, { distribution_policy: "stateful_data_owner_pin"; holder: string }> = {};
+  const out: Record<string, ShapePolicy> = {};
   const add = (shapes: readonly string[], holder: string) => { for (const s of shapes) if (advertised.includes(s)) out[s] = { distribution_policy: "stateful_data_owner_pin", holder }; };
   add(GAP_STORE_HELD_SHAPES, gapHolder);
   add(LEARNING_CREDIT_HELD_SHAPES, gapHolder);
   add(MEMORY_NOTE_HELD_SHAPES, `memory-store@${config.vesselId}`);
+  for (const s of NODE_DISTINCT_SHAPES) if (advertised.includes(s) && !out[s]) out[s] = { distribution_policy: "stateful_data_owner_merge" };
   return out;
 }
 /** The resolver tiers this vessel DECLARES, from the resolver modules' own declarations (as the held shapes are), for the

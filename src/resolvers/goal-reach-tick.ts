@@ -1355,7 +1355,9 @@ export async function vesselOfResolver(resolver: string, deps: { repoExists?: (r
   const { lookupShape } = await import("../config.js");
   const r = await lookupShape(resolver);
   if (!r.ok) return { why: `discovery unreadable for ${resolver} (${"reason" in r ? r.reason : "?"})` };
-  const local = (r.producers as Array<{ id?: string; vesselId?: string }>).map((p) => String(p.id || p.vesselId || "")).filter((v) => v && !v.includes("@"));
+  // One id names one vessel: a node-distinct shape lists a same-host peer node's row under the SAME id beside this
+  // node's own (discovery peer-instance merge), and that is still one serving vessel, not two.
+  const local = [...new Set((r.producers as Array<{ id?: string; vesselId?: string }>).map((p) => String(p.id || p.vesselId || "")).filter((v) => v && !v.includes("@")))];
   if (local.length !== 1) return { why: local.length ? `${resolver} is served by ${local.length} local vessels: ${local.join(", ")}` : `no local vessel serves ${resolver}` };
   const repoPathExists = deps.repoExists ?? (await import("../judge/gap-admission.js")).repoPathExists;
   const name = local[0]!.replace(/-local$/, "");

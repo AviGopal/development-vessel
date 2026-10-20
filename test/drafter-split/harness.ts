@@ -25,6 +25,7 @@ import * as realFsp from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 
 export type Row = Record<string, any>;
 export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped" | "seed_new" | "seed_new_versioned";
@@ -173,7 +174,11 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     .replace(/\b1[6-9]\d{11}\b/g, "<MS>")
     .replace(/\b\d+(?:\.\d+)?ms\b/g, "<DUR>")
     .replace(/https?:\/\/(?!(?:tools|llm|pool|gap-store)\.drafter-split)[^/\s'"`]+/g, "<EXT>")
-    .replace(/\bfc-[a-z0-9]{6,}-[a-z0-9]{4,}\b/g, "fc-<ID>");
+    .replace(/\bfc-[a-z0-9]{6,}-[a-z0-9]{4,}\b/g, "fc-<ID>")
+    // The child-env prefix's redirect list (src/test-child-env.ts testChildEnvShellPrefix) is built from a walk of
+    // src in readdir order, which differs between filesystems: the same set came out in another order on the gate's
+    // tree than where the corpus was recorded. Sorted here, so the recording pins the set, not the walk order.
+    .replace(/env -S " ([^"]*)"/g, (_m, list: string) => `env -S " ${list.trim().split(/\s+/).sort().join(" ")}"`);
   let rec: Recording;
   let fx: Fixture;
   let storeRows: Row[] = [];
@@ -449,21 +454,15 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     }
   }
 
-  // ENVIRONMENT PINS (INTERIM). The corpus was recorded in the test-child shape (env -i … WORKSPACE_ROOT="$(mktemp
-  // -d)"): every learned-state variable unset, WORKSPACE_ROOT a scratch dir under the OS temp dir. The gate runs the
-  // suite under pull-sync's scrubbed_env instead, which ALSO sets the learned-state variables to a fresh root under
-  // /tmp: the compose path then makes its report dir there (feature-compose.ts PROPOSALS_DIR), INSIDE the fs guard's
-  // tmpdir, so the refused `mkdirSync /workspace/proposals` the recording holds never happens. Each run therefore
-  // unsets those again and gives WORKSPACE_ROOT a scratch dir under ROOT (inside the guard, as mktemp was: the
-  // compose's authoring-inflight marker, feature-compose.ts writeAuthoringMarker, lands there unrecorded either way).
-  // Pinning a variable in a test is not the repair: each pinned src read is an env-sweep entry on its own row.
-  // EXPECTATION_CALIB_PATH is read at module load (judge/gap-attempt-credit.ts), so a per-run pin cannot reach it;
-  // nothing in the corpus writes it.
-  const PLAIN_SHELL_UNSET = [
-    "PROPOSALS_DIR", "GAP_CLASS_POSTERIOR_PATH", "EXPECTATION_CALIB_PATH",
-    "CLOSE_ORACLE_CALIB_PATH", "DETECTOR_CLOSURE_LEDGER_PATH",
-  ] as const;
-  const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "VESSEL_CLONE_ROOT", "VESSELS_CLONE_ROOT", "PARKED_LANDINGS_DIR", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "COMPOSE_WS_DIR", "SEMANTIC_CUTOVER_GATE", "WORKSPACE_ROOT", ...PLAIN_SHELL_UNSET] as const;
+  // LEARNED STATE, ISOLATED IN PROCESS (INTERIM: the env-sweep row owns the src reads). The compose path is a
+  // learned-state writer, so each run goes through test/resolvers/isolated-gap-store-run.ts
+  // isolateLearnedStateInProcess, the shared in-process helper (the class detector in
+  // test/resolvers/learned-state-isolation-sites.test.ts requires it): every learned-state default src names, and
+  // WORKSPACE_ROOT, points under the OS temp dir, and a redirect the gate's scrubbed_env already put there is kept. So
+  // the compose's report dir (feature-compose.ts PROPOSALS_DIR), the credit tables and the authoring-inflight marker
+  // all land inside the fs guard's tmpdir, unrecorded, in a plain shell and under the gate's scrubbed_env alike. The
+  // helper's values are restored after the run.
+  const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "VESSEL_CLONE_ROOT", "VESSELS_CLONE_ROOT", "PARKED_LANDINGS_DIR", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "COMPOSE_WS_DIR", "SEMANTIC_CUTOVER_GATE", "WORKSPACE_ROOT"] as const;
   const savedEnv: Record<string, string | undefined> = {};
 
   return {
@@ -499,8 +498,8 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       process.env["COMPOSE_SLOT_DIR"] = join(ws, "slots");
       process.env["COMPOSE_WS_DIR"] = join(ws, "compose-ws");
       delete process.env["SEMANTIC_CUTOVER_GATE"];
-      for (const k of PLAIN_SHELL_UNSET) delete process.env[k];
-      process.env["WORKSPACE_ROOT"] = join(ws, "workspace-root");
+      const beforeIsolation: Record<string, string | undefined> = { ...process.env };
+      const isolated = Object.keys(isolateLearnedStateInProcess(join(ws, "learned")));
       originalFetch = globalThis.fetch;
       const sink = (...a: unknown[]) => { rec.console.push(norm(a.map((x) => (typeof x === "string" ? x : (() => { try { return JSON.stringify(x); } catch { return String(x); } })())).join(" "))); };
       console.log = sink; console.warn = sink; console.error = sink;
@@ -528,6 +527,7 @@ export function createHarness(ROOT: string, RUNTIME: string) {
         globalThis.fetch = originalFetch;
         console.log = ORIGINAL.log; console.warn = ORIGINAL.warn; console.error = ORIGINAL.error;
         Math.random = ORIGINAL.random;
+        for (const k of isolated) { if (beforeIsolation[k] === undefined) delete process.env[k]; else process.env[k] = beforeIsolation[k]; }
         for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
         await ORIG_P["rm"](ws, { recursive: true, force: true });
       }

@@ -213,14 +213,17 @@ export const TEST_SUITE_RESPONSE_FIELDS = [
 /**
  * Why `test_file` is not a file this resolver can measure, or null when it is. It runs `bun test ./<test_file>`, so only
  * a bun test module can report counts: a source file that is not a test reads ran:false on every run. The test-module
- * names are the conventions the store's armings use (*.test.*, *.spec.*, *.check.*). A shell script (*.sh) is run as a
- * shell check (A SHELL CHECK, below).
+ * names are the conventions the store's armings use (*.test.*, *.spec.*, *.check.*). A shell check is run as one
+ * (A SHELL CHECK, below), and only a file named as one: SHELL_CHECK_FILE, the super-repo's *.test.sh glue tests and
+ * *.check.sh checks. Any other shell script prints no case lines, so it stays unmeasurable (the falsifier grammar's
+ * golden table, mirrored by goal-host, pins scripts/check-thing.sh as unresolvable).
  */
+export const SHELL_CHECK_FILE = /\.(test|check)\.sh$/;
 export function testSuiteFileProblem(testFile: unknown): string | null {
   if (typeof testFile !== "string" || testFile.trim() === "") return null; // no file: the whole suite runs
   const f = testFile.trim();
-  if (/\.(test|spec|check)\.[cm]?[jt]sx?$/.test(f) || /\.sh$/.test(f)) return null;
-  return `test_file ${f} is not a bun test module (*.test.*, *.spec.* or *.check.* with a js/ts extension) or a shell check (*.sh); test_suite runs \`bun test ./<test_file>\` or \`bash ./<test_file>\``;
+  if (/\.(test|spec|check)\.[cm]?[jt]sx?$/.test(f) || SHELL_CHECK_FILE.test(f)) return null;
+  return `test_file ${f} is not a bun test module (*.test.*, *.spec.* or *.check.* with a js/ts extension) or a shell check (*.test.sh or *.check.sh); test_suite runs \`bun test ./<test_file>\` or \`bash ./<test_file>\``;
 }
 
 /** One command through the shell producer: its stdout, and the containment gate's refusal when it refused. Throws on transport failure. */
@@ -247,7 +250,7 @@ async function runInShell(shellEndpoint: string, command: string, budgetSec: num
 }
 
 /**
- * A SHELL CHECK (2026-10-19): a `test_file` ending in .sh is run as the super-repo's glue checks are
+ * A SHELL CHECK (2026-10-19): a `test_file` named as one (SHELL_CHECK_FILE: *.test.sh, *.check.sh) is run as the super-repo's glue checks are
  * (validation/scripts/run-glue-tests.sh), not by bun. Those checks print one line per case, `ok   - <label>` or
  * `FAIL - <label>`, and exit non-zero on any FAIL; a gap that tracks one names its labels in only_tests, with vessel
  * "super-repo" (the convention scripts/substrate/lib/gap-tracked-red.sh reads). Until this, test_suite ran such a file
@@ -453,8 +456,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     }
     testFile = rel;
   }
-  // A shell check (*.sh) is run as the glue runner runs one, in an exported committed tree (see A SHELL CHECK).
-  if (/\.sh$/.test(testFile)) {
+  // A shell check (*.test.sh / *.check.sh) is run as the glue runner runs one, in an exported committed tree (see A SHELL CHECK).
+  if (SHELL_CHECK_FILE.test(testFile)) {
     if (mutate || edit) return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: mutate ? "mutate_revert" : "mutate_edit", detail: "a mutation runs only on a bun test file, not a shell check" } };
     const baseRefSh = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim()) ? pointer.base_ref.trim() : "";
     return runShellCheck({ name, rel, testFile, onlyTests, baseRef: baseRefSh, timeoutMs, budgetSec, shellEndpoint, pointer });

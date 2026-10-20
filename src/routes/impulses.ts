@@ -576,6 +576,7 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       }
       return resolveFeatureCompose({ ...(p as Parameters<typeof resolveFeatureCompose>[0]), spec: fcSpec });
     }
+    // @shape-dispatch:private (reached only at the holder's resolve URL: learning-credit.ts send() -> forwardToGapStore -> GAP_STORE_ENDPOINT)
     case "gapLearningCredit_write": {
       // I4a: the learning credit write-through (the holder applies; a non-holder forwards). The route's write gate
       // (refuseUnauthenticatedWrite) has already required an identity-validated credential for this _write shape.

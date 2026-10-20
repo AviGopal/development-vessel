@@ -151,7 +151,11 @@ export function resolvePoolImpulse(pointer: {
 //   a caller's key to (same_authority_peers). A forged row could switch enforcement off or name an attacker's peer as
 //   same-authority, so only an operator may write it, and the transport honours a row only when this node's read marks
 //   it attested_verified with by 'operator' (scripts/substrate/federation-relay/federation-transport-server.ts).
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter', 'fedIngressAuthPolicy']);
+// daemonAuthPolicy: this node's VesselDaemon mutating-shape gate mode (report/enforce; user ruling 2026-10-20). A
+//   forged or lane-written row could switch the gate to report, so it is the same operator-only record, and the
+//   daemon honours a row only when this node's read marks it attested_verified by 'operator' (ias-executor-ts
+//   src/hosts/vessel-daemon.ts daemonAuthModeFromPoolResponse).
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter', 'fedIngressAuthPolicy', 'daemonAuthPolicy']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */

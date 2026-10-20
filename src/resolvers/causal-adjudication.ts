@@ -137,11 +137,23 @@ const SURREALDB_NS = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
 const SURREALDB_DB = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
 
 type SurrealRows = Array<{ status?: string; result?: unknown }>;
+type SurrealFn = (body: string, vars?: Record<string, unknown>) => Promise<SurrealRows | null>;
 /** Why the most recent surreal() returned null, so a failure log can name its cause. */
 let lastSurrealError = "";
-async function surreal(body: string): Promise<SurrealRows | null> {
+/**
+ * VALUES TRAVEL AS BOUND PARAMETERS, NEVER AS STATEMENT TEXT. /sql binds each URL query parameter
+ * as `$name`, parsing its value as JSON, so every value is JSON-encoded here. The stamps used to
+ * splice `JSON.stringify(pointer)` and quote-stripped ids into the statement; JSON escaping is
+ * not SurrealQL quoting, and a trailing backslash in a stripped id escaped its own closing quote
+ * and put the next value in statement position. A caller's string bound here can only be data.
+ */
+async function surreal(body: string, vars?: Record<string, unknown>): Promise<SurrealRows | null> {
   try {
-    const res = await fetch(`${SURREALDB_URL}/sql`, {
+    const qs =
+      vars && Object.keys(vars).length > 0
+        ? "?" + new URLSearchParams(Object.entries(vars).map(([k, v]) => [k, JSON.stringify(v)])).toString()
+        : "";
+    const res = await fetch(`${SURREALDB_URL}/sql${qs}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -161,6 +173,40 @@ async function surreal(body: string): Promise<SurrealRows | null> {
   }
 }
 const surrealDefault = surreal;
+
+/**
+ * The statement expression for one bound value, adding the value to `vars`. A string travels as
+ * its characters and is joined back in the statement: /sql parses a bound value as it parses
+ * JSON input, and there a string shaped like a record id or a prefixed literal is converted, and
+ * can be cut short (`impulse:ebase-1-x` arrives as the record `impulse:ebase`). That would turn
+ * baseline_snapshot_id, which is always record-shaped and which readers test with
+ * type::is::string, into a record. One character cannot take any of those shapes, so the joined
+ * string is exactly the one sent. NULL is written as the literal: NONE and NULL are distinct here.
+ */
+function bindValue(vars: Record<string, unknown>, name: string, v: string | boolean | null): string {
+  if (v === null) return "NULL";
+  if (typeof v === "string") {
+    vars[name] = Array.from(v);
+    return `array::join($${name}, '')`;
+  }
+  vars[name] = v;
+  return `$${name}`;
+}
+
+/** An object literal whose every value is bound. The keys are this file's own field names. */
+function boundObject(
+  obj: Record<string, string | boolean | null | undefined>,
+  prefix: string,
+): { text: string; vars: Record<string, unknown> } {
+  const fields: string[] = [];
+  const vars: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined) continue;
+    if (!/^[a-z_][a-z0-9_]*$/.test(k)) throw new Error(`unbindable field name ${JSON.stringify(k)}`);
+    fields.push(`${k}: ${bindValue(vars, `${prefix}_${k}`, v)}`);
+  }
+  return { text: `{ ${fields.join(", ")} }`, vars };
+}
 
 /**
  * Measure a Class-1 predicate: is the literal still present at its edit site?
@@ -201,12 +247,17 @@ export async function stampBaseline(
   actionId: string,
   observation: Observation,
   predicateKind: "class1" | "class2",
+  deps?: { surreal?: SurrealFn },
 ): Promise<"stamped" | "already_stamped" | "failed"> {
   if (!gapId || !actionId) return "failed";
+  const surreal = deps?.surreal ?? surrealDefault;
+  const keyVars: Record<string, unknown> = {};
+  const keyWhere =
+    `pointer.gap_id = ${bindValue(keyVars, "gap_id", gapId)} ` +
+    `AND pointer.action_id = ${bindValue(keyVars, "action_id", actionId)}`;
   const existing = await surreal(
-    `SELECT id FROM impulse WHERE shape = 'falsifierBaseline' ` +
-      `AND pointer.gap_id = '${gapId.replace(/'/g, "")}' ` +
-      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' LIMIT 1;`,
+    `SELECT id FROM impulse WHERE shape = 'falsifierBaseline' AND ${keyWhere} LIMIT 1;`,
+    keyVars,
   );
   const rows = existing?.[0]?.result;
   if (Array.isArray(rows) && rows.length > 0) return "already_stamped";
@@ -220,19 +271,28 @@ export async function stampBaseline(
     measurable: observation !== null,
     stamped_at: new Date().toISOString(),
   };
+  const bound = boundObject(pointer, "p");
   const res = await surreal(
     `INSERT INTO impulse { id: 'fbase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}', ` +
-      `shape: 'falsifierBaseline', org_id: 'organizations:substrate', pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
+      `shape: 'falsifierBaseline', org_id: 'organizations:substrate', pointer: ${bound.text}, created_at: time::now(), budget: 0 };`,
+    bound.vars,
   );
   return res ? "stamped" : "failed";
 }
 
 /** Read back the baseline for a gap+action, or null when none was ever taken. */
-export async function readBaseline(gapId: string, actionId: string): Promise<Observation> {
+export async function readBaseline(
+  gapId: string,
+  actionId: string,
+  deps?: { surreal?: SurrealFn },
+): Promise<Observation> {
+  const surreal = deps?.surreal ?? surrealDefault;
+  const keyVars: Record<string, unknown> = {};
   const r = await surreal(
     `SELECT pointer FROM impulse WHERE shape = 'falsifierBaseline' ` +
-      `AND pointer.gap_id = '${gapId.replace(/'/g, "")}' ` +
-      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' ORDER BY created_at ASC LIMIT 1;`,
+      `AND pointer.gap_id = ${bindValue(keyVars, "gap_id", gapId)} ` +
+      `AND pointer.action_id = ${bindValue(keyVars, "action_id", actionId)} ORDER BY created_at ASC LIMIT 1;`,
+    keyVars,
   );
   const rows = r?.[0]?.result;
   if (!Array.isArray(rows) || rows.length === 0) return null;
@@ -269,7 +329,7 @@ export async function stampEnvironmentBaseline(
   gapId: string,
   actionId: string,
   deps?: {
-    surreal?: (body: string) => Promise<SurrealRows | null>;
+    surreal?: SurrealFn;
     routedWrite?: (p: { type: "poolImpulse_write"; id: string; shape: string; body: unknown; source: string; status: "open" }) => { ok: boolean; id: string; error?: string };
   },
 ): Promise<"stamped" | "already_stamped" | "failed"> {
@@ -280,9 +340,11 @@ export async function stampEnvironmentBaseline(
   // "linked" baselines with `pointer.baseline_snapshot_id != NONE` reported every null-
   // referencing row as linked and declared the chain closed while zero snapshots existed. Use
   // `type::is::string(...)` when the question is "does this hold a real id".
+  const dupVars: Record<string, unknown> = {};
   const dup = await surreal(
     `SELECT id FROM impulse WHERE shape = 'environmentBaseline' ` +
-      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' LIMIT 1;`,
+      `AND pointer.action_id = ${bindValue(dupVars, "action_id", actionId)} LIMIT 1;`,
+    dupVars,
   );
   const dupRows = dup?.[0]?.result;
   if (Array.isArray(dupRows) && dupRows.length > 0) return "already_stamped";
@@ -403,10 +465,12 @@ export async function stampEnvironmentBaseline(
     ...(latest ? {} : { baseline_unavailable: "no operationalStateSnapshot could be read or seeded" }),
     stamped_at: new Date().toISOString(),
   };
+  const bound = boundObject(pointer, "p");
   const res = await surreal(
     `INSERT INTO impulse { id: 'ebase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}', ` +
       `shape: 'environmentBaseline', org_id: 'organizations:substrate', ` +
-      `pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
+      `pointer: ${bound.text}, created_at: time::now(), budget: 0 };`,
+    bound.vars,
   );
   if (res) {
     return "stamped";

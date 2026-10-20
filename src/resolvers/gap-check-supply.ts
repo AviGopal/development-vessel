@@ -59,7 +59,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { DETECTOR_ROW_UNARMABLE_REASON, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
+import { birthTreeMoved, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken, type MintedBirthVerdict } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -765,7 +765,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
   let armBudget = perTick;
   for (const row of open) {
-    if (armBudget <= 0) break;
+    // A forwarding node reads on past a spent budget: a row waiting on, or settled by, the holder spends none.
+    if (armBudget <= 0 && gapStoreIsLocal()) break;
     const id = String(row["id"]);
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
@@ -778,7 +779,11 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const baseline = Array.isArray(ledger.baseline_titles) ? ledger.baseline_titles : [];
     const titles = declaredTestTitles(src).filter((t) => !baseline.includes(t)).slice(0, 20);
     if (titles.length === 0) continue; // nothing appended yet: still waiting on the goal
-    armBudget -= 1;
+    // The budget bounds the checks run for this tick: here, the ones this node runs; on a node that forwards its gap
+    // store, the ones it hands to the holder (counted at the hand-off below), which bounds the holder's load. Waiting on
+    // or reading back the holder's verdict runs nothing and spends nothing; spent on the judge's abstain, it let one
+    // row's re-judged unknown block every other row on every tick.
+    if (gapStoreIsLocal()) armBudget -= 1;
     touched.add(id);
     // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
     // form testImportsFile reads; with none, an existing src module the test imports becomes it.
@@ -816,12 +821,41 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };
-    const { verdict, report, stamp } = await takeBirthVerdictWithReport(id, { ...meta, evidence_resolve, edit_site: editSite });
+    // THE BIRTH VERDICT IS TAKEN WHERE THE STORE IS HELD. Here, the one judge with its report. On a node that forwards
+    // its gap store the judge abstains ('unknown'), so the row was re-judged on every tick and never armed; and the
+    // minted stamp never crosses the forward anyway (gateThenForward sends the pointer only), so the holder's write seam
+    // judges every forwarded check itself (applyBirthStamp: a new class-2 check is stamped pending and run there, through
+    // the same judge, on the holder's tree). So this node HANDS THE CANDIDATE OFF: it writes the check, keeping the
+    // needs-localization hold, and settles from the holder's stamp on a later tick. The row is held (not eligible, and
+    // pending is predicate_suspect) until a measured 'present' for this exact check is read back here.
+    let verdict: "present" | "absent" | "unknown";
+    let report: Record<string, unknown> | null = null;
+    let stamp: MintedBirthVerdict | undefined;
+    if (gapStoreIsLocal()) {
+      ({ verdict, report, stamp } = await takeBirthVerdictWithReport(id, { ...meta, evidence_resolve, edit_site: editSite }));
+    } else {
+      const atHolder = meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve }) ? meta["predicate_birth_verdict"] : undefined;
+      if (atHolder === undefined) {
+        if (armBudget <= 0) { notArmed.push({ id, reason: "hand_off_deferred: this tick's max_per_tick hand-offs are spent; next tick" }); continue; }
+        armBudget -= 1;
+        notArmed.push({ id, reason: "birth_verdict_at_holder: the check was handed to the gap-store holder, which measures it" });
+        if (pointer.dry_run) continue;
+        const holdable = !nonEmpty(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION;
+        const w = await writeMeta(row, { evidence_resolve, edit_site: editSite, predicate_source: CHECK_SUPPLY_SOURCE, ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}) });
+        if (w.shape === "structuredError") console.warn(`[gap-check-supply] ${id}: hand-off to the gap-store holder refused: ${JSON.stringify(w.body).slice(0, 200)}`);
+        else console.log(`[gap-check-supply] ${id}: check ${JSON.stringify(titles)} handed to the gap-store holder for its birth verdict; held until it reads present`);
+        continue;
+      }
+      // An absent the holder re-labelled unknown because its tree moved is still the check passing at HEAD.
+      verdict = atHolder === "present" ? "present" : atHolder === "absent" || (atHolder === "unknown" && birthTreeMoved(meta)) ? "absent" : "unknown";
+      if (verdict === "unknown") { notArmed.push({ id, reason: `awaiting_holder_verdict: ${String(atHolder)}` }); continue; }
+    }
     // RED FOR THE RIGHT REASON, BY THE SHARED CLASSIFIER: every named test among the failures (redForTheRightReason)
     // AND each an assertion in the report's red_reason (retry-evidence.ts), the rule feature_compose's verify applies.
-    // A report without red_reason cannot attribute its red: nothing is armed.
-    const classified = verdict === "present" ? armRedReasonRefusal((report as Record<string, unknown> | null)?.["red_reason"], titles) : null;
-    const wrongReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) : null;
+    // A report without red_reason cannot attribute its red: nothing is armed. The holder's stamp carries no report, so
+    // a handed-off check is held to the test_writing verify's classifier (judgeTestWritingCheck) it landed through.
+    const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal((report as Record<string, unknown> | null)?.["red_reason"], titles) : null;
+    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) : null;
     if (verdict !== "present" || wrongReason) {
       // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown stays dispatched and is judged again.
       const state = verdict === "unknown" ? "goal_dispatched" : verdict === "absent" ? "green_at_head" : "arm_refused";
@@ -829,7 +863,10 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
       if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
       const judged = state === "goal_dispatched" ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD" };
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
+      // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
+      // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
+      const handedOff = state !== "goal_dispatched" && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
+      if (!pointer.dry_run) await writeMeta(row, { ...(handedOff ? { evidence_resolve: null } : {}), check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
       continue;
     }
     if (pointer.dry_run) { armed.push(id); continue; }
@@ -839,7 +876,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
       check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) },
-    }, { birthVerdict: stamp }); // the verdict minted by the run above: the seam honours nothing else
+    }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;
       refused += 1;
@@ -896,7 +933,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const meta = metaOf(row);
     if (meta["disposition"] !== CHECK_SUPPLY_DISPOSITION || touched.has(String(row["id"]))) continue;
     const cls = falsifierClassOf(meta);
-    if ((cls === "class1" || cls === "class2") && !pointer.dry_run) {
+    // A check not yet measured present (a handed-off one still pending at the holder) has not armed the row.
+    if ((cls === "class1" || cls === "class2") && predicateSuspect(meta) === null && !pointer.dry_run) {
       touched.add(String(row["id"]));
       await writeMeta(row, { disposition: "" });
     }

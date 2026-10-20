@@ -44,6 +44,10 @@
  * WHY it was lost. A settled gap (failed or lost) is retried after its backoff ahead of fresh gaps, and a gap whose
  * goal is in flight is never sent a second one. A gap whose target the live autonomyScope excludes gets no goal and one
  * skip record (state scope_excluded): the lane could never land it. Bounds are read from the family's rhythm body.
+ * PLACEMENT (compose-placement.ts, law 11): with no free local compose slot of the supply's class, the goal goes through
+ * the development-vessel of a peer that composes the vessel, sees the row, admits the targets and has a free slot, so
+ * the compose runs where capacity is while the store holder stays authoritative for the row. Its ledger names that
+ * peer as dispatch_node (placed_by this node); unread here, it settles by arming or, unsettled, by dispatch_timeout_hours.
  *
  * CADENCE IS A RHYTHM (law 5). The family's timeShapedRhythm impulse is read at use time: no rhythm means no
  * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no work, and
@@ -73,6 +77,7 @@ import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmB
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
+import { dispatchGoalOnPeer, placeCompose } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource } from "./retry-evidence.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
@@ -104,6 +109,9 @@ type Ledger = {
   /** The node that sent the goal (its bootstrap identity) and its goal-host: the only place its outcome can be read. */
   dispatch_node?: string;
   dispatch_host?: string;
+  /** Set when THIS node placed the goal on a peer with a free compose slot (compose-placement.ts): the sender, and why. */
+  placed_by?: string;
+  placement?: string;
   /** The outcome read back for the last dispatch (status, reached, why it was lost, where and when it was read). */
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
@@ -617,7 +625,11 @@ export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, now
     age > bound ? { kind: "lost", why, reason: `${why}: ${detail}; unsettled ${hours(age)} (bound ${hours(bound)})` } : { kind: "wait", why, detail };
   if (!nonEmpty(ledger.dispatch_id)) return lostOr("no_dispatch_id", "the dispatch recorded no id, so its outcome cannot be read");
   const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
-  if (owner !== null && owner !== localNode) return lostOr("owning_node_never_settled", `dispatched by ${owner}; only its goal-host can read the outcome`, bounds.foreign_stale_ms);
+  // A goal this node PLACED on a peer is read by nobody here; its compose (ceiling 15 min) is long over by the
+  // dispatch timeout, so it settles by that shaped bound, not by the foreign one meant for another sender's dispatch.
+  if (owner !== null && owner !== localNode) return ledger.placed_by === localNode
+    ? lostOr("owning_node_never_settled", `placed on ${owner} by this node; only ${owner}'s goal-host can read the outcome`, bounds.timeout_ms)
+    : lostOr("owning_node_never_settled", `dispatched by ${owner}; only its goal-host can read the outcome`, bounds.foreign_stale_ms);
   const where = owner === null ? `this node's goal-host (the dispatching node was not recorded)` : `${owner}'s goal-host`;
   if (probe === null || probe.http === "unreachable") return lostOr("host_unreachable", `${where} did not answer${probe && probe.http === "unreachable" ? ` (${probe.error.slice(0, 120)})` : ""}`);
   if (probe.http === 404) return lostOr("not_found_on_host", `${where} has no record of dispatch ${ledger.dispatch_id} (pruned, or sent from another node)`);
@@ -1003,6 +1015,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   let scopeRead: AutonomyScope | null = null;
   let scopeUnread: string | null = null;
   const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
+  // Goals placed on each peer this tick: debited from the free slots it reports (a peek, not a claim).
+  const placedThisTick = new Map<string, number>();
   for (const row of candidates) {
     if (dispatched.length >= perTick && controlMarked.length >= perTick) break;
     const id = String(row["id"]);
@@ -1102,10 +1116,17 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // unrecorded. If even that write is refused, nothing is sent: a send this tick cannot record is a send the next
     // tick would repeat (the 455-a-day loop). A crash between this write and the send settles through the existing
     // no_dispatch_id path (lost past the staleness bound), so the record is safe to leave.
-    const { goal: _priorGoal, not_before: _priorNotBefore, ...ledgerRest } = ledger;
-    void _priorGoal; void _priorNotBefore;
+    // PLACEMENT (law 11, compose-placement.ts): with no free local slot of the class this compose is admitted as (a
+    // supply compose is never armed: feature_compose's composeArmed), a peer that composes the vessel, sees the row,
+    // admits the targets and has a free slot takes it. Decided before the record, so the record names where it went.
+    const placement = await placeCompose({ gap_id: id, vessel, targets, armed: false }, localNode, placedThisTick);
+    const placed = placement.where === "peer" ? placement : null;
+    if (placed) console.log(`[gap-check-supply] ${id}: placed on ${placed.node}: ${placed.why}`);
+    const { goal: _priorGoal, not_before: _priorNotBefore, placed_by: _priorPlacedBy, placement: _priorPlacement, ...ledgerRest } = ledger;
+    void _priorGoal; void _priorNotBefore; void _priorPlacedBy; void _priorPlacement;
     const intent: Ledger = { ...ledgerRest, state: "goal_dispatched", attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
-      baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: localNode, dispatch_host: GOAL_HOST_ENDPOINT, reason: "", outcome: {}, history: settledHistory(ledger) };
+      baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: placed ? placed.node : localNode, dispatch_host: placed ? placed.via : GOAL_HOST_ENDPOINT,
+      ...(placed ? { placed_by: localNode, placement: placed.why } : {}), reason: "", outcome: {}, history: settledHistory(ledger) };
     const arm = { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "treatment" };
     const iw = await writeMeta(row, { ...arm, check_supply: intent });
     if (iw.shape === "structuredError") {
@@ -1114,7 +1135,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       console.warn(`[gap-check-supply] ${id}: ${reason}`);
       continue;
     }
-    const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
+    const send = { type: "dispatch_goal" as const, goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 };
+    const r = placed ? await dispatchGoalOnPeer(placed.via, send) : await resolveDispatchGoal(send);
     if (r.shape !== "goalDispatchResult") {
       // ONE classification of the send (CHANGE-30): a refusal or a non-attempt is recorded as what it is, with its wait;
       // only a genuine failed send is an attempt.

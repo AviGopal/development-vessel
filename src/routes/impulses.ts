@@ -1080,7 +1080,11 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     }
     case "composeOwnership": {
       const { ownedVessels } = await import("../judge/gap-policy.js");
-      return { shape: "composeOwnership", body: { node: process.env["SUBSTRATE_NAME"] ?? "substrate", owned_repos: [...ownedVessels()].sort() } };
+      // A PLACEMENT QUERY ({gap_id, targets, armed}) is answered from this node's own capacity, scope and store
+      // (compose-placement.ts); the plain read is unchanged.
+      const { composePlacementAnswer } = await import("../resolvers/compose-placement.js");
+      const placement = await composePlacementAnswer(pointer as Record<string, unknown>);
+      return { shape: "composeOwnership", body: { node: process.env["SUBSTRATE_NAME"] ?? "substrate", owned_repos: [...ownedVessels()].sort(), ...(placement ? { placement } : {}) } };
     }
     case "vessel_health_report":
       return resolveVesselHealthReport(pointer);

@@ -220,6 +220,9 @@ export const config = {
       "substrateGap_write",
       // One landing lease per gap, held at the gap-store holder (substrate-gap.ts LANDING LEASE).
       "substrateGapLease_write",
+      // One event per substrateGap_write, names only, held with the gap store (substrate-gap.ts GAP-WRITE EVENTS).
+      // Read: filter by gap_id, since, limit.
+      "gapWriteEvent",
       "resolver_schema",
       // Standing-pool resolver (pool-impulse): persistent store of standing
       // intent impulses at WORKSPACE_ROOT/pool/standing.json.

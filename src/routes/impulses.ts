@@ -45,7 +45,7 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
 import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
@@ -369,6 +369,9 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     // The landing lease (substrate-gap.ts LANDING LEASE): a write, so the route's write gate (ApiKey) applies.
     case "substrateGapLease_write":
       return resolveSubstrateGapLease(p as Record<string, unknown>);
+    // The gap-write events (substrate-gap.ts GAP-WRITE EVENTS): a read, held with the gap store.
+    case "gapWriteEvent":
+      return resolveGapWriteEvent(p as Record<string, unknown>);
     case "resolver_schema": {
       const { resolveResolverSchema } = await import("../resolvers/resolver-schema.js");
       return resolveResolverSchema(p as Record<string, unknown>);

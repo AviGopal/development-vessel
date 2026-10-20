@@ -39,7 +39,7 @@ import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
-import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
+import { appendFile, readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -126,9 +126,10 @@ export async function baselineEarnedRecordFromStore(): Promise<{ alpha: number; 
 
 /** Whether this node holds the gap store (no holder endpoint configured): the one test every gap-store caller uses. */
 export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDPOINT"]; }
-/** The shapes whose resolvers in THIS module read or write the gap store (gaps.json and its leases): HELD data, so a
- *  router must take them to the holder's own route, never to an interchangeable peer (discovery held-shape routing). */
-export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write"] as const;
+/** The shapes whose resolvers in THIS module read or write the gap store (gaps.json, its leases and its write events):
+ *  HELD data, so a router must take them to the holder's own route, never to an interchangeable peer (discovery
+ *  held-shape routing). */
+export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write", "gapWriteEvent"] as const;
 
 export async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];
@@ -627,6 +628,199 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   await rename(tmp, GAPS_PATH());
   __gapWriteGeneration++;
   __gapReadSnapshot = null; // the rename already changes the inode; the generation covers same-second, same-size in-process writes
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP-WRITE EVENTS (2026-10-20). gaps.json keeps only each row's latest state, /gaps/ is not in git, and a
+// substrateGap_write is a direct resolve, not a traced execution, so who wrote which field when could not be
+// established from the store; the [gap-audit] journal line covers only writes carrying the operator marker.
+// Every resolveSubstrateGapWrite call now appends ONE event beside the store (gaps/gap-write-events.jsonl), in
+// the same call, whether the write was saved, refused or threw, read back through the gapWriteEvent shape.
+//
+// NAMES ONLY. An event carries field names, statuses, the refusal's rule, the principal KIND, the first 6
+// characters of the identity-issued key id when the route's label names one, the route's remote, and whether
+// the marker was present. Never a field value, the summary, a refusal's detail (it can quote the summary), or
+// anything derived from a presented key (the route stamps none; see routes/caller-identity.ts).
+//
+// fields_changed: for a write SAVED here (even one whose call threw after the save), the top-level and
+// classification_metadata keys whose value differs between the stored row before the write and the row saved
+// (what landed: a close without the marker keeps the stored summary, so summary is not listed). For a refused
+// write, one that threw before saving, and one FORWARDED to the gap-store holder (store: "forwarded"), only the
+// attempt exists: the keys the incoming write sends whose value differs from the stored row. `outcome` says which.
+// principal_kind "jwt" is never produced today: the write door accepts an ApiKey only.
+//
+// PER NODE. A forwarding node records the call it handled (the original principal); the holder records the
+// forwarded call it handled (the forwarding node's key). The read shape is held with the store: on a forwarding
+// node it is forwarded to the holder, unless the pointer says local:true (this node's own file).
+//
+// A failed append is logged with the gap id and never fails or changes the write. Appends are serialized by
+// their own in-process chain, never by withGapLock: the event is written after the write's critical section.
+//
+// RETENTION: past the tuning row gap_write_events.max_bytes (activity-api tuning-params; absent means
+// GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT) the file is rewritten to its newest half. The row is read only when the
+// file is over the cap, at most once per GAP_WRITE_EVENTS_CAP_READ_MS, and never from a scratch store.
+export type GapWritePrincipalKind = "node-self" | "key" | "jwt" | "unauthenticated" | "in-process";
+export type GapWriteEvent = {
+  gap_id: string | null;
+  fields_changed: string[];
+  /** The stored status before the write; "absent" for no row, "?" when the write was refused before the store was read. */
+  status_from: string;
+  status_to: string;
+  /** "written", "refused:<rule>", or "threw". */
+  outcome: string;
+  principal_kind: GapWritePrincipalKind;
+  key_id: string | null;
+  route_caller_remote: string | null;
+  operator_marker: boolean;
+  store: "local" | "forwarded";
+  ts: string;
+};
+export const GAP_WRITE_EVENTS_MAX_BYTES_ROW = "gap_write_events.max_bytes";
+export const GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT = 64 * 1024 * 1024;
+const GAP_WRITE_EVENTS_CAP_READ_MS = 10 * 60_000;
+const GAP_WRITE_EVENTS_PATH = () => join(workspaceRoot(), "gaps", "gap-write-events.jsonl");
+let __gapEventChain: Promise<unknown> = Promise.resolve();
+let __gapEventTmpCounter = 0;
+let gapWriteEventsMaxBytes = GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT;
+let gapWriteEventsCapReadAt = Number.NEGATIVE_INFINITY;
+let gapWriteEventsCompacting = false;
+let __gapEventCompaction: Promise<void> = Promise.resolve();
+let gapWriteEventsEnabled = true;
+/** Tests only: the retention cap in bytes (null restores the default), and the event layer on or off (the control). */
+export function __setGapWriteEventsMaxBytesForTests(n: number | null): void { gapWriteEventsMaxBytes = n ?? GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT; gapWriteEventsCapReadAt = n === null ? Number.NEGATIVE_INFINITY : Date.now(); }
+export function __setGapWriteEventsEnabledForTests(on: boolean): void { gapWriteEventsEnabled = on; }
+/** Tests only: settle every queued append and compaction. */
+export async function __settleGapWriteEventsForTests(): Promise<void> { await __gapEventChain; await __gapEventCompaction; await __gapEventChain; }
+function onGapEventChain<T>(fn: () => Promise<T>): Promise<T> {
+  const run = __gapEventChain.then(fn, fn);
+  __gapEventChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/** The principal of a write, from the route's _route_caller stamp (routes/caller-identity.ts callerAuthLabel). */
+export function gapWritePrincipal(pointer: unknown): { kind: GapWritePrincipalKind; key_id: string | null; remote: string | null } {
+  const rc = (pointer as { _route_caller?: unknown } | null | undefined)?._route_caller as { auth?: unknown; remote?: unknown } | undefined;
+  if (!rc || typeof rc !== "object") return { kind: "in-process", key_id: null, remote: null };
+  const remote = typeof rc.remote === "string" ? rc.remote : null;
+  const auth = typeof rc.auth === "string" ? rc.auth : "unauthenticated";
+  if (auth === "authenticated:node-self") return { kind: "node-self", key_id: null, remote };
+  // The write door accepts an ApiKey only (lib/caller-credential.ts), so every other authenticated label is a key.
+  if (auth === "authenticated" || auth.startsWith("authenticated:")) {
+    const m = /^authenticated:key_id:(.+)$/.exec(auth);
+    return { kind: "key", key_id: m ? m[1]!.slice(0, 6) : null, remote };
+  }
+  return { kind: "unauthenticated", key_id: null, remote };
+}
+
+const sameValue = (a: unknown, b: unknown): boolean => a === b || stableStringify(a) === stableStringify(b);
+const recordOf = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+/** The names of the top-level and classification_metadata keys whose value differs between two rows. */
+export function gapFieldsChanged(before: unknown, after: unknown): string[] {
+  const b = recordOf(before), a = recordOf(after);
+  const out: string[] = [];
+  for (const k of new Set([...Object.keys(b), ...Object.keys(a)])) {
+    if (k !== "classification_metadata" && !sameValue(b[k], a[k])) out.push(k);
+  }
+  const bm = recordOf(b["classification_metadata"]), am = recordOf(a["classification_metadata"]);
+  for (const k of new Set([...Object.keys(bm), ...Object.keys(am)])) {
+    if (!sameValue(bm[k], am[k])) out.push(`classification_metadata.${k}`);
+  }
+  return out.sort();
+}
+/** The names of the keys an incoming write SENDS whose value differs from the stored row (null: no row). */
+export function gapFieldsAttempted(stored: unknown, incoming: unknown): string[] {
+  const s = recordOf(stored), inc = recordOf(incoming);
+  const out: string[] = [];
+  for (const k of Object.keys(inc)) {
+    if (k !== "classification_metadata" && inc[k] !== undefined && !sameValue(s[k], inc[k])) out.push(k);
+  }
+  const sm = recordOf(s["classification_metadata"]), im = recordOf(inc["classification_metadata"]);
+  for (const k of Object.keys(im)) {
+    if (im[k] !== undefined && !sameValue(sm[k], im[k])) out.push(`classification_metadata.${k}`);
+  }
+  return out.sort();
+}
+
+/** Append one event (awaited by the write), then compact past the cap (not awaited). Never throws. */
+async function appendGapWriteEvent(ev: GapWriteEvent): Promise<void> {
+  if (!gapWriteEventsEnabled) return;
+  try {
+    await onGapEventChain(async () => {
+      await mkdir(join(workspaceRoot(), "gaps"), { recursive: true }).catch((err: NodeJS.ErrnoException) => {
+        if (err?.code !== "EEXIST") throw err;
+      });
+      await appendFile(GAP_WRITE_EVENTS_PATH(), JSON.stringify(ev) + "\n", "utf-8");
+    });
+  } catch (err) {
+    console.error(`[gap-write-event] event NOT recorded for gap=${ev.gap_id ?? "(no id)"} outcome=${ev.outcome} (the write itself is unaffected): ${String(err).slice(0, 200)}`);
+    return;
+  }
+  __gapEventCompaction = compactGapWriteEventsIfOver().catch((err) => {
+    console.error(`[gap-write-event] retention compaction failed after gap=${ev.gap_id ?? "(no id)"} (events kept, file over cap): ${String(err).slice(0, 200)}`);
+  });
+}
+
+async function compactGapWriteEventsIfOver(): Promise<void> {
+  if (gapWriteEventsCompacting) return;
+  const path = GAP_WRITE_EVENTS_PATH();
+  const st = await stat(path).catch(() => null);
+  if (!st || st.size <= gapWriteEventsMaxBytes) return;
+  gapWriteEventsCompacting = true;
+  try {
+    if (!isScratchGapStoreRoot(workspaceRoot()) && Date.now() - gapWriteEventsCapReadAt > GAP_WRITE_EVENTS_CAP_READ_MS) {
+      gapWriteEventsCapReadAt = Date.now();
+      const { readTuningNumber } = await import("../judge/gap-policy.js");
+      const tuned = await readTuningNumber(GAP_WRITE_EVENTS_MAX_BYTES_ROW);
+      gapWriteEventsMaxBytes = tuned !== null && tuned > 0 ? tuned : GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT;
+      if (st.size <= gapWriteEventsMaxBytes) return;
+    }
+    await onGapEventChain(async () => {
+      const lines = (await readFile(path, "utf-8")).split("\n").filter((l) => l.length > 0);
+      const keepBytes = Math.floor(gapWriteEventsMaxBytes / 2);
+      let i = lines.length, bytes = 0;
+      while (i > 0 && bytes + Buffer.byteLength(lines[i - 1]!) + 1 <= keepBytes) { i--; bytes += Buffer.byteLength(lines[i]!) + 1; }
+      const tmp = `${path}.${process.pid}.${__gapEventTmpCounter++}.tmp`;
+      await writeFile(tmp, lines.slice(i).map((l) => l + "\n").join(""), "utf-8");
+      await rename(tmp, path);
+      console.log(`[gap-write-event] retention: ${st.size} bytes over the cap (${gapWriteEventsMaxBytes}); kept the newest ${lines.length - i} of ${lines.length} events`);
+    });
+  } finally {
+    gapWriteEventsCompacting = false;
+  }
+}
+
+/**
+ * gapWriteEvent: the gap store's write events, oldest first, read at the holder (local:true reads this node's own
+ * file). Pointer filters: gap_id (exact), since (an ISO time: events at or after it), limit (the newest N that
+ * match; default 100, at most 1000).
+ */
+export async function resolveGapWriteEvent(pointer: { gap_id?: unknown; since?: unknown; limit?: unknown; local?: unknown } | Record<string, unknown>): Promise<ResolverResult> {
+  const p = pointer as { gap_id?: unknown; since?: unknown; limit?: unknown; local?: unknown };
+  if (!gapStoreIsLocal() && p.local !== true) {
+    const fwd = await forwardToGapStore({ ...(pointer as Record<string, unknown>), type: "gapWriteEvent" });
+    if (fwd) return fwd;
+  }
+  const gapId = typeof p.gap_id === "string" && p.gap_id.length > 0 ? p.gap_id : null;
+  const sinceMs = typeof p.since === "string" ? Date.parse(p.since) : Number.NaN;
+  if (typeof p.since === "string" && !Number.isFinite(sinceMs)) {
+    return { shape: "structuredError", body: { resolver: "gapWriteEvent", failure_mode: "validation_rejected", field: "since", detail: `since must be an ISO time, got ${JSON.stringify(p.since).slice(0, 80)}` } };
+  }
+  const limitRaw = typeof p.limit === "number" ? p.limit : Number(p.limit ?? 100);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 1000) : 100;
+  let raw = "";
+  try { raw = await readFile(GAP_WRITE_EVENTS_PATH(), "utf-8"); } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+  }
+  const matched: GapWriteEvent[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let ev: GapWriteEvent;
+    try { ev = JSON.parse(line) as GapWriteEvent; } catch { continue; } // a torn or foreign line is skipped
+    if (gapId !== null && ev.gap_id !== gapId) continue;
+    if (Number.isFinite(sinceMs) && !(Date.parse(ev.ts) >= sinceMs)) continue;
+    matched.push(ev);
+  }
+  return { shape: "gapWriteEvent", body: { events: matched.slice(-limit), matched: matched.length, gap_id: gapId, since: Number.isFinite(sinceMs) ? new Date(sinceMs).toISOString() : null, limit } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2061,7 +2255,7 @@ function existingRowGates(
 export function redactAuthTokens(text: string): string {
   return text.replace(/\b(ApiKey|Bearer)(\s+)[^\s"'\\,}\]]+/gi, "$1$2[redacted]");
 }
-async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>, audit: { from?: string }): Promise<ResolverResult> {
+async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>, audit: GapWriteAudit): Promise<ResolverResult> {
   const id = String(incoming["id"]);
   const status = String(incoming["status"] ?? "open");
   const read = await forwardToGapStore({ type: "substrateGap", id, limit: 5 });
@@ -2081,6 +2275,7 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
   }
   const stored = (rows as SubstrateGap[]).find((g) => g && g.id === id);
   audit.from = stored ? String(stored.status ?? "open") : "absent";
+  audit.stored = stored ?? null;
   const ph = placeholderGate(incoming, id, status, stored);
   if (ph) return ph;
   if (stored) {
@@ -2098,8 +2293,11 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
  * _route_caller (the identity that validated the request, or "unauthenticated", never anything derived
  * from the presented key; and the remote address). A write
  * that did not come through the route is caller=in-process.
+ *
+ * Every call, marked or not, also appends one gap-write event (see GAP-WRITE EVENTS). `stored` is the row the
+ * write was gated against (null: no row), `id` and `changed` are set only when the write is saved here.
  */
-type GapWriteAudit = { from?: string };
+type GapWriteAudit = { from?: string; stored?: SubstrateGap | null; id?: string; changed?: string[] };
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -2132,6 +2330,34 @@ export async function resolveSubstrateGapWrite(
       const b = (r?.body ?? {}) as Record<string, unknown>;
       const outcome = !r ? "threw" : r.shape === "structuredError" ? `structuredError:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}` : r.shape;
       console.log(`[gap-audit] operator-marked write gap=${String(g["id"] ?? "(no id)")} transition=${audit.from ?? "?"}->${String(g["status"] ?? "open")} marker=${marker} caller=${caller} outcome=${outcome}`);
+    }
+    // ONE GAP-WRITE EVENT PER CALL (see GAP-WRITE EVENTS). Built inside its own catch: nothing here may throw
+    // out of this finally or replace the write's result.
+    let gapIdForLog = "(no id)";
+    try {
+      const p = pointer as Record<string, unknown>;
+      const env = p["gap"];
+      const g = (env && typeof env === "object" && !Array.isArray(env) ? env : {}) as Record<string, unknown>;
+      const incomingId = typeof g["id"] === "string" && g["id"].length > 0 ? g["id"] : null;
+      gapIdForLog = audit.id ?? incomingId ?? "(no id)";
+      const b = (r?.body ?? {}) as Record<string, unknown>;
+      const outcome = !r ? "threw" : r.shape === "structuredError" ? `refused:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}` : "written";
+      const principal = gapWritePrincipal(pointer);
+      await appendGapWriteEvent({
+        gap_id: audit.id ?? incomingId,
+        fields_changed: audit.changed ?? gapFieldsAttempted(audit.stored ?? null, g),
+        status_from: audit.from ?? "?",
+        status_to: String(g["status"] ?? "open"),
+        outcome,
+        principal_kind: principal.kind,
+        key_id: principal.key_id,
+        route_caller_remote: principal.remote,
+        operator_marker: marker !== null,
+        store: gapStoreIsLocal() ? "local" : "forwarded",
+        ts: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(`[gap-write-event] event NOT recorded for gap=${gapIdForLog} (the write itself is unaffected): ${String(err).slice(0, 200)}`);
     }
   }
 }
@@ -2330,6 +2556,7 @@ async function resolveSubstrateGapWriteInner(
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
   audit.from = existingIdx >= 0 ? String(gaps[existingIdx]!.status ?? "open") : "absent";
+  audit.stored = existingIdx >= 0 ? gaps[existingIdx]! : null;
   // PLACEHOLDER GATE, EVERY STATUS (see placeholderGate). Inside the lock because the exemption compares
   // against the stored row with this exact id.
   {
@@ -2456,7 +2683,7 @@ async function resolveSubstrateGapWriteInner(
   // row of its class is a no-op. This was gated on SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1", a
   // test variable deciding production semantics, so in production such a write fell through to an
   // INSERT: a non-holder forwarding closes from a stale copy minted 90 closed rows that never existed.
-  if (existingIdx >= 0) audit.from = String(gaps[existingIdx]!.status ?? "open");
+  if (existingIdx >= 0) { audit.from = String(gaps[existingIdx]!.status ?? "open"); audit.stored = gaps[existingIdx]!; }
   if (existingIdx < 0 && gap.status !== "open") {
     return {
       early: {
@@ -2803,7 +3030,12 @@ async function resolveSubstrateGapWriteInner(
     else if (m && "landing_last_release" in m) { const c = { ...m }; delete c["landing_last_release"]; gap.classification_metadata = c as SubstrateGap["classification_metadata"]; }
   }
 
+  // What this save changes on the row (see GAP-WRITE EVENTS): the stored row before (audit.stored, null for a new
+  // row; gaps[existingIdx] has already been replaced) against the row saved.
+  const changed = gapFieldsChanged(audit.stored ?? null, gap);
   await saveGaps(gaps);
+  audit.id = String(gap.id);
+  audit.changed = changed;
   return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, dedupeReason, birthJob };
   });
 

@@ -131,6 +131,30 @@ export function hasNoAttemptEvidence(g: unknown): boolean {
   return true;
 }
 
+/**
+ * Is this row measured by its OWN armed check?
+ *
+ * Expiry asserts "we stopped seeing it". An armed row has a check that re-runs against every
+ * tree (gap-check-supply arms it red at HEAD), so the check IS its re-detector and age says
+ * nothing about it. Observed 2026-10-20: 2 of 10 expired_not_redetected closures that day
+ * carried check_supply.state "armed".
+ *
+ * OWN, NOT COPIED. Both were narrowed children whose armed_at equalled their parent's: the
+ * ledger had been carried over at narrowing, so the "arm" measured the parent. The arm record
+ * names its row by time: an arm stamped before the row was narrowed into being (armed_at
+ * earlier than classification_metadata.narrowed_at, or unstamped on a narrowed row) is the
+ * parent's, and does not hold the row open.
+ */
+export function hasLiveOwnArm(g: unknown): boolean {
+  const meta = ((g as { classification_metadata?: Record<string, unknown> } | null)?.classification_metadata) ?? {};
+  const cs = meta.check_supply as { state?: unknown; armed_at?: unknown } | null | undefined;
+  if (!cs || typeof cs !== 'object' || cs.state !== 'armed') return false;
+  const narrowedAt = Date.parse(String(meta.narrowed_at ?? ''));
+  if (!Number.isFinite(narrowedAt)) return true;
+  const armedAt = Date.parse(String(cs.armed_at ?? ''));
+  return Number.isFinite(armedAt) && armedAt >= narrowedAt;
+}
+
 const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 /** Gap categories considered low-value for auto-close purposes */
@@ -586,6 +610,8 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     // 174 (55.2%) had no attempt evidence at all, so with maxExpire=100 a run would have
     // expired 100 gaps of which roughly 55% were work nobody ever looked at.
     if (hasNoAttemptEvidence(g)) return false;
+    // Its own armed check re-detects it on every tree, so age is not evidence it went away.
+    if (hasLiveOwnArm(g)) return false;
     return (isDetectorStale || isExpireStale || isBaselineTypecheckStale) && !lowValueClosed.includes(g.id!);
   });
   const expired: string[] = [];

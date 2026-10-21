@@ -46,7 +46,7 @@ import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 import { countLiteralOnEvaluatorTree, evaluatorEditSite } from "../lib/evaluator-tree.js";
-import { EDIT_SITE_IS_OWN_CHECK, editSiteIsOwnCheck } from "../judge/gap-eligibility.js";
+import { EDIT_SITE_IS_OWN_CHECK, editSiteIsOwnCheck, routedOffCompose } from "../judge/gap-eligibility.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -982,6 +982,7 @@ export function landingLeaseRefusalCounts(): Record<LandingLeaseRefusalKind, num
 // operator row, goal_deficiency_recognition. A new unarmable row is COUNTED per source, served on /health
 // (unarmable_detector_rows) and logged, because most detectors fire and forget: the count is the demand signal for
 // which detector must learn to localize what it finds.
+// A NEW such row that carries its own reading is armed from it instead (2026-10-21, the rule below).
 // ─────────────────────────────────────────────────────────────────────────────
 const unarmableDetectorRows: Record<string, number> = {};
 /** New unarmable detector rows written since process start, by source (served on development-vessel /health). */
@@ -989,10 +990,17 @@ export function unarmableDetectorRowCounts(): Record<string, number> { return { 
 /** Prefix of the falsifier_unresolvable_reason of a detector row nothing can arm, beside its "none" label (see the
  *  rule above). Readers key on this prefix, never on the falsifier label. */
 export const DETECTOR_ROW_UNARMABLE_REASON = "detector_row_unarmable: ";
-/** A detector source: the shared `substrate_detected`, or a detector's own `<name>_detector` / `<name>_scan`. */
+/** THE DETECTOR SOURCES, defined once: a row's source is a detector's when it is one of `exact` (the shared
+ *  `substrate_detected`), or a snake_case `<name>_<suffix>` with a suffix in `suffixes` (a detector's own
+ *  `<name>_detector` / `<name>_scan`). The mark above and the write-time contract below apply to these sources only.
+ *  Every other source (human_reported, operator, goal_deficiency_recognition, a vessel or satisfier name) is a writer,
+ *  not a detector, and is written as before. */
+export const DETECTOR_SOURCES: { readonly exact: readonly string[]; readonly suffixes: readonly string[] } = { exact: ["substrate_detected"], suffixes: ["detector", "scan"] };
+const DETECTOR_SOURCE_RE = new RegExp(`^[a-z0-9]+(?:_[a-z0-9]+)*_(?:${DETECTOR_SOURCES.suffixes.join("|")})$`);
+/** A detector source (DETECTOR_SOURCES). */
 export function isDetectorSource(source: unknown): boolean {
   const s = typeof source === "string" ? source.trim() : "";
-  return s === "substrate_detected" || /^[a-z0-9]+(?:_[a-z0-9]+)*_(?:detector|scan)$/.test(s);
+  return DETECTOR_SOURCES.exact.includes(s) || DETECTOR_SOURCE_RE.test(s);
 }
 // A file path a summary names: a token with a directory and an extension, or a bare file name with a code extension.
 const SUMMARY_FILE_RE = /(?:^|[\s`'"(\[])(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b|(?:^|[\s`'"(\[])[\w-]+(?:\.[\w-]+)*\.(?:ts|tsx|js|mjs|cjs|sh|py|json|md|yml|yaml|toml|service)\b/;
@@ -1006,6 +1014,132 @@ export function unarmableDetectorRow(gap: Record<string, unknown>, falsifier: st
   if (has(((meta["tsc_error"] ?? {}) as Record<string, unknown>)["file"])) return null;
   if (SUMMARY_FILE_RE.test(String(gap["summary"] ?? ""))) return null;
   return `a ${String(gap["source"])} row with no falsifier, no edit_site and no file named in its summary can never be armed (admission needs a falsifier, gap-check-supply a site or a named file); carry the check the detector measured as classification_metadata.evidence_resolve (as goal_deficiency_recognition does: goal-deficiency.ts goalReachCheck), or the edit_site, or name the file`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A NEW DETECTOR ROW NOTHING CAN ARM IS ARMED FROM ITS OWN READING (2026-10-21, gap row
+// a-detector-filed-gap-must-carry-the-check-the-detector-measured-otherwise-it-is-born-unadmittable).
+// Measured on one node: 76% of open gaps are unarmed, 1,614 of 1,879 open substrate_detected rows among them, and
+// admission takes none of them. goal_deficiency_recognition never files one: it arms each row with the check it
+// measured (goalReachCheck). That is now the write-time contract for every detector source, at this seam, instead of a
+// fix per detector. For a NEW open row from a detector source (DETECTOR_SOURCES):
+//   (a) it carries a predicate (any class: a class2 evidence_resolve over a shape and a field the instrument returns,
+//       as goalReachCheck builds, or a literal), or a site or file gap-check-supply localizes from, or another route
+//       acts on it (routedOffCompose): written exactly as before.
+//   (b) else it carries the detector's own READING at classification_metadata.detector_reading
+//       { shape, input?, field, value } (the instrument it read, the inputs it read it with, the field, the number it
+//       saw): the reading becomes its class2 check (detectorReadingCheck: a count > 0 is a zero_field, a health field
+//       read at 0 a nonzero_field, the judge's polarity), validated by classifyFalsifier like any other arming, and the
+//       row is written disposition needs_information, so it is armed later and never admitted on an unconfirmed check.
+//   (c) else it is written and marked as the rule above says, and the rule it would name (DETECTOR_ROW_REFUSAL) is
+//       what the re-arm proposal reports. The contract fails open: a throw writes the row as before (marked).
+// The reading is never derived here from other fields: a predicate guessed at write time was tried and reverted
+// (be26a6b), and a class2 check is resolved at birth, so its instrument and inputs must be the detector's own.
+// detectorRearmProposal (below) is the read-only view of the rows already stored.
+// ─────────────────────────────────────────────────────────────────────────────
+/** Where a detector puts the reading it measured on a row's classification_metadata (see the rule above). */
+export const DETECTOR_READING_FIELD = "detector_reading";
+/** Why a detector row nothing can arm names no check: no reading, or a reading that cannot arm. */
+export const DETECTOR_ROW_REFUSAL = {
+  no_reading: "detector_row_unarmable_no_reading",
+  reading_unusable: "detector_row_unarmable_reading_unusable",
+} as const;
+export type DetectorRowRefusal = (typeof DETECTOR_ROW_REFUSAL)[keyof typeof DETECTOR_ROW_REFUSAL];
+/** The class2 check a detector's reading names, or the rule and reason it names none. */
+export type DetectorReadingVerdict = { evidence_resolve: Record<string, unknown> } | { rule: DetectorRowRefusal; reason: string };
+
+/** The class2 check (evidence_resolve) `meta.detector_reading` names, validated by classifyFalsifier, or why there is none. */
+export function detectorReadingCheck(meta: Record<string, unknown> | null | undefined, vocabulary?: ShapeVocabulary | null): DetectorReadingVerdict {
+  const raw = (meta ?? {})[DETECTOR_READING_FIELD];
+  if (raw === undefined || raw === null) return { rule: DETECTOR_ROW_REFUSAL.no_reading, reason: `no ${DETECTOR_READING_FIELD}` };
+  const unusable = (reason: string): DetectorReadingVerdict => ({ rule: DETECTOR_ROW_REFUSAL.reading_unusable, reason: `${DETECTOR_READING_FIELD} ${reason}` });
+  if (typeof raw !== "object" || Array.isArray(raw)) return unusable("is not an object {shape, input?, field, value}");
+  const r = raw as Record<string, unknown>;
+  const shape = usablePredicateString(r["shape"]);
+  const field = usablePredicateString(r["field"]);
+  if (!shape || !field) return unusable("names no shape or no field");
+  const input = r["input"];
+  if (input !== undefined && (input === null || typeof input !== "object" || Array.isArray(input))) return unusable("input is not an object");
+  const value = r["value"];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return unusable(`value ${JSON.stringify(value)?.slice(0, 40)} is not a finite count >= 0`);
+  const er: Record<string, unknown> = { shape, ...(input !== undefined ? { input } : {}), [value > 0 ? "zero_field" : "nonzero_field"]: field };
+  const c = classifyFalsifier({ evidence_resolve: er }, vocabulary);
+  if (c.falsifier !== "class2") return unusable(`does not arm: ${c.unresolvable_reason ?? (c.unadvertised_shape ? `shape "${c.unadvertised_shape}" is not advertised` : `classified ${c.falsifier}`)}`);
+  return { evidence_resolve: er };
+}
+
+/** What the write-time contract does with a NEW row (see the rule above): null writes it as before; otherwise the
+ *  check its reading names (b), or the rule it names none under (c), with the unarmable reason. */
+export function detectorBirthContract(gap: Record<string, unknown>, vocabulary?: ShapeVocabulary | null): (DetectorReadingVerdict & { unarmable: string }) | null {
+  if (!isDetectorSource(gap["source"]) || String(gap["status"] ?? "open") !== "open") return null;
+  const meta = (gap["classification_metadata"] ?? {}) as Record<string, unknown>;
+  if (classifyFalsifier(meta, vocabulary).falsifier !== "none") return null;
+  const why = unarmableDetectorRow(gap, "none");
+  if (!why || routedOffCompose(gap)) return null;
+  return { ...detectorReadingCheck(meta, vocabulary), unarmable: why };
+}
+
+/** One unarmed detector row's re-arm verdict in the proposal. */
+export type DetectorRearmVerdict = "armable_from_reading" | "armable_from_row_fields" | "localizable" | "routed_elsewhere" | "not_armable";
+/**
+ * THE ONE-TIME RE-ARM SWEEP, AS A PROPOSAL (read-only: it writes nothing, it returns a body). For the open, unarmed
+ * (falsifier "none" or unstamped) detector rows among `rows`, whether each can be armed from fields already on it, and
+ * how, or why not: its own detector_reading (detectorReadingCheck, as the write seam takes it); else the instrument it
+ * names (meta.detector, or its source) has a declared response contract and the row carries a number under a field
+ * that contract lists (a proposal only: the inputs the detector read it with are not on the row, so input_confirmed is
+ * false); else a site or file gap-check-supply localizes from ("localizable", as today); else another route acts on it;
+ * else not armable, with the reason. Nothing is armed by hand: a proposal is for the system to act on.
+ */
+export function detectorRearmProposal(rows: ReadonlyArray<Record<string, unknown>>, vocabulary?: ShapeVocabulary | null): Record<string, unknown> {
+  const vocab = vocabulary !== undefined ? vocabulary : cachedFleetVocabulary();
+  const counts: Record<DetectorRearmVerdict, number> = { armable_from_reading: 0, armable_from_row_fields: 0, localizable: 0, routed_elsewhere: 0, not_armable: 0 };
+  const out: Array<Record<string, unknown>> = [];
+  let openDetector = 0;
+  for (const g of rows) {
+    if (!g || typeof g !== "object" || !isDetectorSource(g["source"]) || String(g["status"] ?? "open") !== "open") continue;
+    openDetector++;
+    const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+    const label = meta["falsifier"];
+    if (label !== undefined && label !== null && label !== "none") continue;
+    const er = meta["evidence_resolve"] as { shape?: unknown } | null | undefined;
+    if (usablePredicateString(meta["hardcoded_url"]) || usablePredicateString(meta["expected_literal"]) || (er && typeof er === "object" && usablePredicateString(er.shape))) continue;
+    const detector = typeof meta["detector"] === "string" ? meta["detector"] : null;
+    const row: Record<string, unknown> = { id: g["id"], source: g["source"], ...(detector ? { detector } : {}) };
+    const fromReading = detectorReadingCheck(meta, vocab);
+    let verdict: DetectorRearmVerdict;
+    if ("evidence_resolve" in fromReading) { verdict = "armable_from_reading"; row["evidence_resolve"] = fromReading.evidence_resolve; }
+    else {
+      const derived = rowFieldsCheck(g, meta, vocab);
+      if (derived) { verdict = "armable_from_row_fields"; row["evidence_resolve"] = derived; row["input_confirmed"] = false; }
+      else {
+        const why = unarmableDetectorRow(g, "none");
+        if (!why) { verdict = "localizable"; row["reason"] = "carries an edit_site or a file gap-check-supply localizes from"; }
+        else if (routedOffCompose(g)) { verdict = "routed_elsewhere"; row["reason"] = "a route other than compose acts on it (gap-eligibility routedOffCompose)"; }
+        else { verdict = "not_armable"; row["reason"] = `${fromReading.rule}: ${fromReading.reason}; ${detector || String(g["source"])} names no instrument with a declared response contract a field on the row is listed in`; }
+      }
+    }
+    row["verdict"] = verdict;
+    counts[verdict]++;
+    out.push(row);
+  }
+  return { kind: "detector_rearm_proposal", writes: 0, generated_at: new Date().toISOString(), open_detector_rows: openDetector, unarmed_detector_rows: out.length, counts, rows: out };
+}
+/** A class2 check from the row's own fields (the proposal's second bucket), or null. */
+function rowFieldsCheck(g: Record<string, unknown>, meta: Record<string, unknown>, vocab: ShapeVocabulary | null): Record<string, unknown> | null {
+  for (const shape of [meta["detector"], g["source"]]) {
+    if (typeof shape !== "string") continue;
+    const contract = RESPONSE_CONTRACTS[shape];
+    if (!contract) continue;
+    for (const field of contract.fields) {
+      const v = meta[field];
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) continue;
+      const need = contract.needs_input?.[field];
+      const input = need && nonEmptyInput(meta[need]) ? { [need]: meta[need] } : undefined;
+      const er: Record<string, unknown> = { shape, ...(input ? { input } : {}), [v > 0 ? "zero_field" : "nonzero_field"]: field };
+      if (classifyFalsifier({ evidence_resolve: er }, vocab).falsifier === "class2") return er;
+    }
+  }
+  return null;
 }
 
 export async function resolveSubstrateGapLease(pointer: SubstrateGapLeasePointer | Record<string, unknown>): Promise<ResolverResult> {
@@ -2971,6 +3105,21 @@ async function resolveSubstrateGapWriteInner(
     action = "created";
   }
 
+  // A NEW DETECTOR ROW NOTHING CAN ARM (see the rule above): BEFORE the stamp, so a check built from its reading is
+  // classified and birth-evaluated like any other arming. A row with no usable reading, or a throw (fail-open,
+  // constraint A), is written as before and marked below.
+  if (action === "created") {
+    let contract: ReturnType<typeof detectorBirthContract> = null;
+    try { contract = detectorBirthContract(gap as unknown as Record<string, unknown>, vocabForClassify); }
+    catch (err) { console.error(`[gap-falsifier] detector contract threw for ${gap.id} (non-fatal, written as before):`, err); }
+    if (contract && "evidence_resolve" in contract) {
+      gap.classification_metadata = {
+        ...((gap.classification_metadata ?? {}) as Record<string, unknown>),
+        evidence_resolve: contract.evidence_resolve, evidence_resolve_from: DETECTOR_READING_FIELD, disposition: "needs_information",
+      } as SubstrateGap["classification_metadata"];
+    }
+  }
+
   // ── FALSIFIER STAMP ──────────────────────────────────────────────────────────
   // AFTER the metadata merge above, deliberately. The carry-forward loop copies an
   // existing row's `evidence_resolve` into a re-emission that lacks one (detectors
@@ -3021,7 +3170,8 @@ async function resolveSubstrateGapWriteInner(
 
   // A DETECTOR ROW NOTHING CAN ARM (see the rule above): a new row, or a row born so that is still unarmable, read from
   // the stamp (a classification that threw stamped nothing, and a row it did not stamp is not marked here). Written,
-  // never refused, and the label stays as stamped ("none"): only the reason is set beside it.
+  // never refused, and the label stays as stamped ("none"): only the reason is set beside it. A NEW row armed from its
+  // reading above is class2 here, and is not marked.
   if (action === "created" || String(priorMetaForBirth["falsifier_unresolvable_reason"] ?? "").startsWith(DETECTOR_ROW_UNARMABLE_REASON)) {
     const m = (gap.classification_metadata ?? {}) as Record<string, unknown>;
     let why = typeof m["falsifier"] === "string" ? unarmableDetectorRow(gap as unknown as Record<string, unknown>, String(m["falsifier"])) : null;

@@ -181,6 +181,26 @@ describe("every gap write leaves exactly one names-only event", () => {
     expect(j.body?.events?.map((e) => e["outcome"])).toEqual(["written", "refused:close_needs_evidence", "refused:classification_metadata_must_be_object"]);
   });
 
+  // The event layer adds no await to the write. An awaited async append let the birth evaluation the write
+  // schedules after its save run (and stamp) before the write returned: gap-falsify-v2-birth read "present" where
+  // the write leaves "pending". With an immediate judge the race is deterministic.
+  it("[MUST-FAIL] the event adds no await: work the write schedules after its save has not run when the write returns", async () => {
+    const id = `${ROW}-noawait`;
+    const settleBirth = gapMod["__settleBirthEvaluationsForTests"] as () => Promise<void>;
+    const before = eventsFor(id).length;
+    const r = await write({
+      type: "substrateGap_write",
+      gap: base(id, { classification_metadata: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/fixture-vessel", test_file: "test/widget.test.ts", only_tests: ["widget counts rejected frames"], timeout_ms: 180000 }, zero_field: "requested_not_passing" } } }),
+    }, { birthJudge: async () => "present" });
+    expect(r.shape).toBe("substrateGapWriteResult");
+    expect(eventsFor(id).length - before).toBe(1); // the event is on disk when the write returns
+    // Read back through the store's own read path, as a caller does right after its write.
+    const stamped = async () => ((await gapMod.resolveSubstrateGap({ type: "substrateGap", id } as never)).body as { gaps?: Array<Record<string, any>> }).gaps?.find((g) => g["id"] === id)?.["classification_metadata"]?.["predicate_birth_verdict"];
+    expect(await stamped()).toBe("pending");
+    await settleBirth();
+    expect(await stamped()).toBe("present");
+  });
+
   it("[UNIT] retention keeps the newest events under the cap", async () => {
     const setCap = gapMod["__setGapWriteEventsMaxBytesForTests"] as (n: number | null) => void;
     const id = `${ROW}-retention`;

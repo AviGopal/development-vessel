@@ -39,8 +39,8 @@ import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
-import { appendFile, readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
+import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
@@ -653,8 +653,13 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 // forwarded call it handled (the forwarding node's key). The read shape is held with the store: on a forwarding
 // node it is forwarded to the holder, unless the pointer says local:true (this node's own file).
 //
-// A failed append is logged with the gap id and never fails or changes the write. Appends are serialized by
-// their own in-process chain, never by withGapLock: the event is written after the write's critical section.
+// A failed append is logged with the gap id and never fails or changes the write. THE APPEND IS SYNCHRONOUS, so
+// the event layer adds no await to the write: the write resolves at the same turn as without it, and work the write
+// schedules after its save (the birth evaluation) cannot run before the caller sees the result. An awaited async
+// append let a fast birth judge stamp its verdict before the write returned (gap-falsify-v2-birth: read "present"
+// where the write leaves "pending"). Never withGapLock: the event is written after the write's critical section.
+// While a retention rewrite runs, appends are held in memory and written into the new file just before its rename,
+// in one synchronous step, so none is lost or reordered.
 //
 // RETENTION: past the tuning row gap_write_events.max_bytes (activity-api tuning-params; absent means
 // GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT) the file is rewritten to its newest half. The row is read only when the
@@ -679,23 +684,18 @@ export const GAP_WRITE_EVENTS_MAX_BYTES_ROW = "gap_write_events.max_bytes";
 export const GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT = 64 * 1024 * 1024;
 const GAP_WRITE_EVENTS_CAP_READ_MS = 10 * 60_000;
 const GAP_WRITE_EVENTS_PATH = () => join(workspaceRoot(), "gaps", "gap-write-events.jsonl");
-let __gapEventChain: Promise<unknown> = Promise.resolve();
 let __gapEventTmpCounter = 0;
 let gapWriteEventsMaxBytes = GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT;
 let gapWriteEventsCapReadAt = Number.NEGATIVE_INFINITY;
-let gapWriteEventsCompacting = false;
+/** Non-null while a retention rewrite runs: the event lines appended meanwhile, written into the new file. */
+let gapWriteEventsHeld: string[] | null = null;
 let __gapEventCompaction: Promise<void> = Promise.resolve();
 let gapWriteEventsEnabled = true;
 /** Tests only: the retention cap in bytes (null restores the default), and the event layer on or off (the control). */
 export function __setGapWriteEventsMaxBytesForTests(n: number | null): void { gapWriteEventsMaxBytes = n ?? GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT; gapWriteEventsCapReadAt = n === null ? Number.NEGATIVE_INFINITY : Date.now(); }
 export function __setGapWriteEventsEnabledForTests(on: boolean): void { gapWriteEventsEnabled = on; }
-/** Tests only: settle every queued append and compaction. */
-export async function __settleGapWriteEventsForTests(): Promise<void> { await __gapEventChain; await __gapEventCompaction; await __gapEventChain; }
-function onGapEventChain<T>(fn: () => Promise<T>): Promise<T> {
-  const run = __gapEventChain.then(fn, fn);
-  __gapEventChain = run.then(() => undefined, () => undefined);
-  return run;
-}
+/** Tests only: settle a running retention rewrite. */
+export async function __settleGapWriteEventsForTests(): Promise<void> { await __gapEventCompaction; }
 
 /** The principal of a write, from the route's _route_caller stamp (routes/caller-identity.ts callerAuthLabel). */
 export function gapWritePrincipal(pointer: unknown): { kind: GapWritePrincipalKind; key_id: string | null; remote: string | null } {
@@ -741,16 +741,16 @@ export function gapFieldsAttempted(stored: unknown, incoming: unknown): string[]
   return out.sort();
 }
 
-/** Append one event (awaited by the write), then compact past the cap (not awaited). Never throws. */
-async function appendGapWriteEvent(ev: GapWriteEvent): Promise<void> {
+/** Append one event, synchronously (see GAP-WRITE EVENTS), then compact past the cap (not awaited). Never throws. */
+function appendGapWriteEvent(ev: GapWriteEvent): void {
   if (!gapWriteEventsEnabled) return;
   try {
-    await onGapEventChain(async () => {
-      await mkdir(join(workspaceRoot(), "gaps"), { recursive: true }).catch((err: NodeJS.ErrnoException) => {
-        if (err?.code !== "EEXIST") throw err;
-      });
-      await appendFile(GAP_WRITE_EVENTS_PATH(), JSON.stringify(ev) + "\n", "utf-8");
-    });
+    const line = JSON.stringify(ev) + "\n";
+    if (gapWriteEventsHeld) { gapWriteEventsHeld.push(line); return; }
+    try { mkdirSync(join(workspaceRoot(), "gaps"), { recursive: true }); } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    }
+    appendFileSync(GAP_WRITE_EVENTS_PATH(), line, "utf-8");
   } catch (err) {
     console.error(`[gap-write-event] event NOT recorded for gap=${ev.gap_id ?? "(no id)"} outcome=${ev.outcome} (the write itself is unaffected): ${String(err).slice(0, 200)}`);
     return;
@@ -761,31 +761,39 @@ async function appendGapWriteEvent(ev: GapWriteEvent): Promise<void> {
 }
 
 async function compactGapWriteEventsIfOver(): Promise<void> {
-  if (gapWriteEventsCompacting) return;
+  if (gapWriteEventsHeld) return;
   const path = GAP_WRITE_EVENTS_PATH();
   const st = await stat(path).catch(() => null);
-  if (!st || st.size <= gapWriteEventsMaxBytes) return;
-  gapWriteEventsCompacting = true;
+  if (!st || st.size <= gapWriteEventsMaxBytes || gapWriteEventsHeld) return;
+  if (!isScratchGapStoreRoot(workspaceRoot()) && Date.now() - gapWriteEventsCapReadAt > GAP_WRITE_EVENTS_CAP_READ_MS) {
+    gapWriteEventsCapReadAt = Date.now();
+    const { readTuningNumber } = await import("../judge/gap-policy.js");
+    const tuned = await readTuningNumber(GAP_WRITE_EVENTS_MAX_BYTES_ROW);
+    gapWriteEventsMaxBytes = tuned !== null && tuned > 0 ? tuned : GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT;
+    if (st.size <= gapWriteEventsMaxBytes || gapWriteEventsHeld) return;
+  }
+  const held: string[] = [];
+  gapWriteEventsHeld = held; // from here every append is held until the rename (or the failure flush) below
+  const tmp = `${path}.${process.pid}.${__gapEventTmpCounter++}.tmp`;
   try {
-    if (!isScratchGapStoreRoot(workspaceRoot()) && Date.now() - gapWriteEventsCapReadAt > GAP_WRITE_EVENTS_CAP_READ_MS) {
-      gapWriteEventsCapReadAt = Date.now();
-      const { readTuningNumber } = await import("../judge/gap-policy.js");
-      const tuned = await readTuningNumber(GAP_WRITE_EVENTS_MAX_BYTES_ROW);
-      gapWriteEventsMaxBytes = tuned !== null && tuned > 0 ? tuned : GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT;
-      if (st.size <= gapWriteEventsMaxBytes) return;
-    }
-    await onGapEventChain(async () => {
-      const lines = (await readFile(path, "utf-8")).split("\n").filter((l) => l.length > 0);
-      const keepBytes = Math.floor(gapWriteEventsMaxBytes / 2);
-      let i = lines.length, bytes = 0;
-      while (i > 0 && bytes + Buffer.byteLength(lines[i - 1]!) + 1 <= keepBytes) { i--; bytes += Buffer.byteLength(lines[i]!) + 1; }
-      const tmp = `${path}.${process.pid}.${__gapEventTmpCounter++}.tmp`;
-      await writeFile(tmp, lines.slice(i).map((l) => l + "\n").join(""), "utf-8");
-      await rename(tmp, path);
-      console.log(`[gap-write-event] retention: ${st.size} bytes over the cap (${gapWriteEventsMaxBytes}); kept the newest ${lines.length - i} of ${lines.length} events`);
-    });
+    const lines = (await readFile(path, "utf-8")).split("\n").filter((l) => l.length > 0);
+    const keepBytes = Math.floor(gapWriteEventsMaxBytes / 2);
+    let i = lines.length, bytes = 0;
+    while (i > 0 && bytes + Buffer.byteLength(lines[i - 1]!) + 1 <= keepBytes) { i--; bytes += Buffer.byteLength(lines[i]!) + 1; }
+    await writeFile(tmp, lines.slice(i).map((l) => l + "\n").join(""), "utf-8");
+    // One synchronous step from here: the held lines go into the new file, then it replaces the old one.
+    if (held.length > 0) appendFileSync(tmp, held.join(""), "utf-8");
+    renameSync(tmp, path);
+    gapWriteEventsHeld = null;
+    console.log(`[gap-write-event] retention: ${st.size} bytes over the cap (${gapWriteEventsMaxBytes}); kept the newest ${lines.length - i} of ${lines.length} events (+${held.length} appended during the rewrite)`);
+  } catch (err) {
+    // The old file is still in place: the held lines go there, in order.
+    gapWriteEventsHeld = null;
+    try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+    if (held.length > 0) appendFileSync(path, held.join(""), "utf-8");
+    throw err;
   } finally {
-    gapWriteEventsCompacting = false;
+    gapWriteEventsHeld = null;
   }
 }
 
@@ -2343,7 +2351,7 @@ export async function resolveSubstrateGapWrite(
       const b = (r?.body ?? {}) as Record<string, unknown>;
       const outcome = !r ? "threw" : r.shape === "structuredError" ? `refused:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}` : "written";
       const principal = gapWritePrincipal(pointer);
-      await appendGapWriteEvent({
+      appendGapWriteEvent({
         gap_id: audit.id ?? incomingId,
         fields_changed: audit.changed ?? gapFieldsAttempted(audit.stored ?? null, g),
         status_from: audit.from ?? "?",

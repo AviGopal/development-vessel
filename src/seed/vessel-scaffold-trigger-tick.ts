@@ -250,9 +250,11 @@ export const VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
         type: "http_fetch",
         method: "POST",
         url: "http://127.0.0.1:8210/run-goal",
+        // No Authorization here: http_fetch attaches this vessel's key to a loopback target only when the
+        // step has not set one. No executor expands a `${...}` placeholder, so a literal header would be sent
+        // as-is and suppress the real key, and goal-host's credential check would refuse every tick.
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "ApiKey ${METABOB_API_KEY}",
         },
         body: JSON.stringify({
           goal:

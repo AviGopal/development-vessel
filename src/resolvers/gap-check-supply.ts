@@ -1279,6 +1279,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const reason = `not sent: the in-flight record could not be written (${String((iw.body as Row)?.["detail"] ?? (iw.body as Row)?.["failure_mode"] ?? "").slice(0, 120)})`;
       skipped.push({ id, reason });
       console.warn(`[gap-check-supply] ${id}: ${reason}`);
+      // A REFUSED WRITE MAY STILL LAND. On a node that forwards its gap store, "unreachable: The operation timed out"
+      // is this side's timeout, not the holder's refusal: five rows were left at goal_dispatched with no dispatch id
+      // and no goal for a send that never happened. Nothing was sent, so if the store now holds THIS pass's in-flight
+      // record it is put back as it was read; if it does not, nothing is written (the store has no conditional write,
+      // and a write here could only race a late intent). Either way an intent that lands late cannot stay: OUTCOME
+      // settles a goal_dispatched row with no dispatch id as dispatch_lost (no_dispatch_id) past dispatch_stale_hours.
+      const reread = await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never);
+      const stored = ledgerOf(metaOf((((reread.body ?? {}) as { gaps?: Row[] }).gaps ?? [])[0] ?? {}));
+      if (stored.state === "goal_dispatched" && !nonEmpty(stored.dispatch_id) && stored.last_dispatch_at === nowIso) {
+        const back = await writeMeta(row, { check_supply: ledger });
+        console.warn(`[gap-check-supply] ${id}: the unsent in-flight record had landed; ${back.shape === "structuredError" ? "it could not be put back, so the no_dispatch_id bound settles it" : "put back as read"}`);
+      }
       continue;
     }
     const send = { type: "dispatch_goal" as const, goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 };

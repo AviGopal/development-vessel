@@ -95,18 +95,18 @@ async function fetchFailureTraces(
   endpoint: string,
   apiKey: string,
   limit: number,
-): Promise<{ traces: ExecutionTrace[]; read: boolean }> {
+): Promise<{ traces: ExecutionTrace[]; read: boolean; why?: string }> {
   const url = `${endpoint}/v2/activities/execution-traces?limit=${limit}`;
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   // A read that failed is not a read of zero failures: the caller reports it as measured:false.
   try {
     const resp = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
-    if (!resp.ok) return { traces: [], read: false };
+    if (!resp.ok) return { traces: [], read: false, why: `HTTP ${resp.status}` };
     const json = (await resp.json()) as { executions?: ExecutionTrace[] };
     return { traces: (json.executions ?? []).filter((t) => t.status === "failure"), read: true };
-  } catch {
-    return { traces: [], read: false };
+  } catch (e) {
+    return { traces: [], read: false, why: e instanceof Error ? e.name : "error" };
   }
 }
 
@@ -229,6 +229,8 @@ export async function resolveVectorSpaceOrthogonalityAudit(
 
   const cutoff = Date.now() - windowHours * 3600 * 1000;
   const fetched = await fetchFailureTraces(metabobEndpoint, selfAuthKey(metabobEndpoint, DEFAULT_METABOB_ENDPOINT), traceLimit);
+  // An unmeasured run is said out loud: a quiet measured:false reads only as "unknown" downstream and hides the outage.
+  if (!fetched.read) console.warn(`[vector_space_orthogonality_audit] trace store read failed (${fetched.why ?? "unknown"}): this run is unmeasured (measured:false)`);
   const traces = fetched.traces.filter((t) => {
     if (!t.executed_at) return true;
     const ts = Date.parse(t.executed_at);

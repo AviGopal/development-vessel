@@ -256,10 +256,14 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
   let traces: ExecutionTrace[] = [];
   // A read that failed is not a read of zero failures: reported as measured:false.
   let tracesRead = false;
+  let unreadWhy = "unknown";
   try {
     const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, { headers, signal: AbortSignal.timeout(20_000) });
     if (r.ok) { const j = await r.json() as { executions?: ExecutionTrace[] }; traces = j.executions ?? []; tracesRead = true; }
-  } catch { /* tolerant */ }
+    else unreadWhy = `HTTP ${r.status}`;
+  } catch (e) { unreadWhy = e instanceof Error ? e.name : "error"; /* tolerant */ }
+  // An unmeasured run is said out loud: a quiet measured:false reads only as "unknown" downstream and hides the outage.
+  if (!tracesRead) console.warn(`[detector_coverage_scan] trace store read failed (${unreadWhy}): this run is unmeasured (measured:false)`);
 
   const coverageStats = await fetchCoverageStats(emitUrl, apiKey, scope !== null ? coverageGapId(scope) : null);
   const cited = coverageStats.cited;

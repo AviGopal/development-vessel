@@ -5,7 +5,7 @@
 // (input.cluster_key), with the filing run's parameters and emit_gap false; cluster_count is its zero_field.
 // Verified at the consumer: the armed check is run by the real judge (gap-check-judge.ts evaluateGapCheck) against
 // this resolver. Every value below is supplied by this test.
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { resolveVectorSpaceOrthogonalityAudit } from "../../src/resolvers/vector-space-orthogonality-audit.js";
 import { detectorBirthContract, DETECTOR_ROW_REFUSAL } from "../../src/resolvers/substrate-gap.js";
 import { evaluateGapCheck } from "../../src/judge/gap-check-judge.js";
@@ -97,8 +97,15 @@ describe("MUST-FAIL: a row the orthogonality audit files is armed from its own r
     world = { traces: [...failures("actA", "novel_fm", 2), ...failures("actB", "other_fm", 3)], covered: new Set() };
     expect(await judge(er as Row)).toBe("absent");
     // the trace store could not be read: not a measurement, never the defect gone
-    world = { traces: [], tracesStatus: 503, covered: new Set() };
-    expect(await judge(er as Row)).toBe("unknown");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    let warned: string[] = [];
+    try {
+      world = { traces: [], tracesStatus: 503, covered: new Set() };
+      expect(await judge(er as Row)).toBe("unknown");
+      warned = warn.mock.calls.map((c) => String(c[0]));
+    } finally { warn.mockRestore(); }
+    // and the unmeasured run says so, naming the detector and the status
+    expect(warned.filter((l) => l.includes("[vector_space_orthogonality_audit]") && l.includes("HTTP 503") && l.includes("unmeasured"))).toHaveLength(1);
     // a check never files a row
     expect(writes).toEqual([]);
   });

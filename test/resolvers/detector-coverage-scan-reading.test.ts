@@ -5,7 +5,7 @@
 // (input.gap_class), with the filing run's parameters and emit_gap false; uncovered_clusters is its zero_field.
 // Verified at the consumer: the armed check is run by the real judge (gap-check-judge.ts evaluateGapCheck) against
 // this resolver, over a store that holds the filed row itself. Every value below is supplied by this test.
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { resolveDetectorCoverageScan } from "../../src/resolvers/detector-coverage-scan.js";
 import { detectorBirthContract, DETECTOR_ROW_REFUSAL } from "../../src/resolvers/substrate-gap.js";
 import { evaluateGapCheck } from "../../src/judge/gap-check-judge.js";
@@ -99,8 +99,15 @@ describe("MUST-FAIL: a row the coverage scan files is armed from its own reading
     world = { traces: [...failures("development-vessel:widget-step", "empty_body", 2), ...failures("development-vessel:gadget-step", "timeout", 3)], store: [row] };
     expect(await judge(er as Row)).toBe("absent");
     // the trace store could not be read: not a measurement, never the defect gone
-    world = { traces: [], tracesStatus: 503, store: [row] };
-    expect(await judge(er as Row)).toBe("unknown");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    let warned: string[] = [];
+    try {
+      world = { traces: [], tracesStatus: 503, store: [row] };
+      expect(await judge(er as Row)).toBe("unknown");
+      warned = warn.mock.calls.map((c) => String(c[0]));
+    } finally { warn.mockRestore(); }
+    // and the unmeasured run says so, naming the detector and the status
+    expect(warned.filter((l) => l.includes("[detector_coverage_scan]") && l.includes("HTTP 503") && l.includes("unmeasured"))).toHaveLength(1);
     // a check never files a row
     expect(writes).toEqual([]);
   });

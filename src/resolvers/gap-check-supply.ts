@@ -31,7 +31,9 @@
  *      call or a timeout) is written, through substrateGap_write with the verdict as the in-process trusted birth stamp,
  *      clearing the disposition in the same write. Green at HEAD, red for the wrong reason, a test that does
  *      not import the edit site, or one that reads a name its module does not export (check-supply-admission.ts
- *      missingExportRefusal: check_references_missing_export) writes no check: the gap stays unarmed (fail closed). No region is written, so
+ *      missingExportRefusal: check_references_missing_export), or whose red asserts a shape or body field the function
+ *      it calls never returns (contractMismatchRefusal: check_asserts_contract_mismatch) writes no check: the gap stays
+ *      unarmed (fail closed). The first failure's error line and Expected/Received are kept on the ledger. No region is written, so
  *      the arm-time region gate has nothing to refuse; the write still passes through it.
  *
  * OUTCOME (the dispatch is read back; a dispatch alone earns no credit): every dispatch records the node that sent
@@ -72,7 +74,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -157,6 +159,14 @@ const falsifierClassOf = (meta: Row): string => {
   return String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
 };
 const nonEmpty = (v: unknown): boolean => typeof v === "string" && v.trim().length > 0;
+/** A check run's first failure from its red_reason (retry-evidence.ts classifyCheckRun): name, error line, and Expected/Received when it is an assertion. */
+const firstFailureOf = (redReason: unknown): Row | null => {
+  const c = redReason as { failures?: unknown; compared?: unknown } | null | undefined;
+  const f = Array.isArray(c?.failures) ? (c!.failures[0] as { name?: unknown; error?: unknown } | undefined) : undefined;
+  if (!f || typeof f !== "object") return null;
+  const v = Array.isArray(c?.compared) ? (c!.compared as Array<{ name?: unknown; expected?: unknown; received?: unknown } | null>).find((x) => x?.name === f.name) : undefined;
+  return { name: f.name ?? null, error: f.error ?? null, expected: v?.expected ?? null, received: v?.received ?? null };
+};
 const clonesRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
 const runtimeRoot = (): string => process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels";
 
@@ -903,8 +913,13 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // AND each an assertion in the report's red_reason (retry-evidence.ts), the rule feature_compose's verify applies.
     // A report without red_reason cannot attribute its red: nothing is armed. The holder's stamp carries no report, so
     // a handed-off check is held to the test_writing verify's classifier (judgeTestWritingCheck) it landed through.
-    const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal((report as Record<string, unknown> | null)?.["red_reason"], titles) : null;
-    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) : null;
+    // An assertion red on a contract the target does not have (333be5f: a shape and a body field the resolver never
+    // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
+    const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
+    const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal(redReason, titles) : null;
+    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? null : null;
+    // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
+    const firstFailure = gapStoreIsLocal() ? firstFailureOf(redReason) : null;
     if (verdict !== "present" || wrongReason) {
       // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown keeps the row's state and is judged again:
       // turned back to goal_dispatched, a settled failure was read back and settled again on the next tick.
@@ -913,7 +928,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (!unknown) refused += 1;
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
       if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
-      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD" };
+      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD", ...(firstFailure ? { first_failure: firstFailure } : {}) };
       // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
       // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
       const handedOff = !unknown && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
@@ -926,7 +941,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) },
+      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}) },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

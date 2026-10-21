@@ -1,0 +1,19 @@
+import { describe, expect, test } from 'bun:test';
+import * as mod from '../../src/resolvers/template-input-lint-scan';
+
+describe('template-input-lint-development-vessel-harness-check-scenario', () => {
+  test('detects unused template inputs', async () => {
+    const result = await mod.resolveTemplateInputLintScan({
+      type: 'template_input_lint_scan',
+      template: {
+        id: 'development-vessel:harness-check-scenario',
+        input_variables: ['gapScenario', 'none'],
+        tasks: []
+      }
+    });
+
+    expect(result.shape).toBe('template_input_lint_issues');
+    expect(result.body.unusedInputs).toContain('gapScenario');
+    expect(result.body.unusedInputs).toContain('none');
+  });
+});

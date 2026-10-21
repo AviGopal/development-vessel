@@ -1,0 +1,22 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/genuine-red.check.ts:
+ 7 |       type: 'template_input_lint_scan',
+ 8 |       dry_run: true,
+ 9 |       _templates: [{ id: 'x', inputShapes: ['gapScenario'], tasks: [{ inputShapes: ['gapScenario'] }] }],
+10 |     });
+11 |     expect(result.shape).toBe('templateInputLintReport');
+12 |     expect(result.body.finding_count).toBe(1);
+                                           ^
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 0
+
+      at <anonymous> (/tmp/fx/test/checks/genuine-red.check.ts:12:39)
+(fail) genuine > flags the unused input [0.97ms]
+
+ 0 pass
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [510.00ms]

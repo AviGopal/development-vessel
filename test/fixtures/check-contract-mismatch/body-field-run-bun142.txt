@@ -1,0 +1,27 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/body-field.check.ts:
+11 |         tasks: []
+12 |       }
+13 |     });
+14 | 
+15 |     expect(result.shape).toBe('templateInputLintReport');
+16 |     expect(result.body.unusedInputs).toEqual(['gapScenario']);
+                                          ^
+error: expect(received).toEqual(expected)
+
+- [
+-   "gapScenario",
+- ]
++ undefined
+
+- Expected  - 3
++ Received  + 1
+
+      at <anonymous> (/tmp/fx/test/checks/body-field.check.ts:16:38)
+(fail) template-input-lint-development-vessel-harness-check-scenario > detects unused template inputs [1.26ms]
+
+ 0 pass
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [900.00ms]

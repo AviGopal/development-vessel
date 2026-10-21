@@ -738,12 +738,187 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
   return null;
 }
 
+/**
+ * A CHECK THAT ASSERTS A CONTRACT ITS TARGET DOES NOT HAVE IS NOT A FALSIFIER. 333be5f (template-input-lint
+ * harness-check-scenario) asserted `expect(result.shape).toBe('template_input_lint_issues')` on a resolver that returns
+ * shape "templateInputLintReport", then `result.body.unusedInputs`, a field its body never sets. That is an assertion red
+ * by the shared classifier, so it passed the verify and the arm, yet it is red on every tree whatever the fix: the
+ * arm attached an unclosable falsifier. Judged from the RUN and the SOURCE together, never from the source alone:
+ *   - the run: the failing expect() of each assertion failure, placed by its first stack frame in the check, and the
+ *     Expected/Received bun printed (retry-evidence.ts classifyCheckRun `compared`);
+ *   - the source: the assertion's subject must be a value the check got by CALLING an export of a src module of its
+ *     vessel (`const r = await ns.fn(…)`, `fn(…)`, or the call inline), and that function's returns are read with the
+ *     TypeScript parser (object literals, through local helper calls, conditionals and await; any other return leaves
+ *     the returned shapes or body open).
+ * It refuses, `check_asserts_contract_mismatch:<shape | body.X>`, when
+ *   - the assertion reads `<r>.shape`, Received is a shape the function returns, and Expected is a string that is neither
+ *     a shape it returns nor any string literal in its module; or
+ *   - it reads `<r>.body.<X>`, Received is undefined, and every return's body is an object literal none of which sets X.
+ * An assertion it cannot place, a value it cannot trace, or an open contract decides nothing. Known limit (accepted, as
+ * for a missing export): a gap whose fix ADDS the shape or the body field writes exactly this check, and it is refused.
+ * Applied where missingExportRefusal is: at the verify of a test_writing compose and at the arm step. null = no refusal.
+ */
+export const CONTRACT_MISMATCH_STAGE = "check_asserts_contract_mismatch";
+type ReturnedContract = { shapes: Set<string> | null; bodyKeys: Set<string> | null };
+function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): ReturnedContract | null {
+  const locals = new Map<string, TS.FunctionLikeDeclaration>();
+  for (const s of sf.statements) {
+    if (ts.isFunctionDeclaration(s) && s.name && s.body) locals.set(s.name.text, s);
+    if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) locals.set(d.name.text, d.initializer);
+  }
+  const root = locals.get(fnName);
+  if (!root) return null;
+  const shapes = new Set<string>(), bodyKeys = new Set<string>();
+  let shapesOpen = false, bodyOpen = false;
+  const open = (): void => { shapesOpen = true; bodyOpen = true; };
+  const unwrap = (e: TS.Expression): TS.Expression => {
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e) || ts.isAwaitExpression(e)) e = e.expression;
+    return e;
+  };
+  const keyOf = (p: TS.ObjectLiteralElementLike): string | null => (p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : null);
+  const seen = new Set<TS.Node>([root]);
+  const returnsOf = (fn: TS.FunctionLikeDeclaration): Array<TS.Expression | undefined> => {
+    if (!fn.body) return [undefined];
+    if (!ts.isBlock(fn.body)) return [fn.body];
+    const out: Array<TS.Expression | undefined> = [];
+    const visit = (n: TS.Node): void => { if (ts.isFunctionLike(n)) return; if (ts.isReturnStatement(n)) out.push(n.expression); ts.forEachChild(n, visit); };
+    ts.forEachChild(fn.body, visit);
+    return out;
+  };
+  const value = (raw: TS.Expression | undefined): void => {
+    if (!raw) { open(); return; }
+    const e = unwrap(raw);
+    if (ts.isConditionalExpression(e)) { value(e.whenTrue); value(e.whenFalse); return; }
+    const helper = ts.isCallExpression(e) && ts.isIdentifier(e.expression) ? locals.get(e.expression.text) : undefined;
+    if (helper) { if (!seen.has(helper)) { seen.add(helper); for (const r of returnsOf(helper)) value(r); } return; }
+    if (!ts.isObjectLiteralExpression(e)) { open(); return; }
+    let shape = false, body = false;
+    for (const p of e.properties) {
+      const k = ts.isSpreadAssignment(p) ? null : keyOf(p);
+      if (k === null) { open(); continue; }
+      const init = ts.isPropertyAssignment(p) ? unwrap(p.initializer) : null;
+      if (k === "shape") {
+        shape = true;
+        if (init && (ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init))) shapes.add(init.text); else shapesOpen = true;
+      } else if (k === "body") {
+        body = true;
+        if (!init || !ts.isObjectLiteralExpression(init)) { bodyOpen = true; continue; }
+        for (const bp of init.properties) { const bk = ts.isSpreadAssignment(bp) ? null : keyOf(bp); if (bk === null) bodyOpen = true; else bodyKeys.add(bk); }
+      }
+    }
+    if (!shape) shapesOpen = true;
+    if (!body) bodyOpen = true;
+  };
+  for (const r of returnsOf(root)) value(r);
+  return { shapes: shapesOpen ? null : shapes, bodyKeys: bodyOpen ? null : bodyKeys };
+}
+export function contractMismatchRefusal(source: string, checkRel: string, redReason: unknown, reader: SrcReader): { test: string; module: string; fn: string; reads: string; reason: string } | null {
+  const compared = (redReason as { compared?: unknown } | null | undefined)?.compared;
+  if (!Array.isArray(compared) || compared.length === 0) return null;
+  const ts = loadTs();
+  if (!ts) return null;
+  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const unwrap = (e: TS.Expression): TS.Expression => {
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e) || ts.isAwaitExpression(e)) e = e.expression;
+    return e;
+  };
+  const relSpec = (n: TS.Expression | undefined): string | null => (n && ts.isStringLiteral(n) && n.text.startsWith(".") ? n.text : null);
+  // The check's module bindings: namespace imports and `const ns = await import(…)` by local name, named imports by local name.
+  const ns = new Map<string, string>();
+  const named = new Map<string, { spec: string; imported: string }>();
+  const bind = (n: TS.Node): void => {
+    if (ts.isImportDeclaration(n) && n.importClause && !n.importClause.isTypeOnly) {
+      const spec = relSpec(n.moduleSpecifier), nb = n.importClause.namedBindings;
+      if (spec && nb && ts.isNamespaceImport(nb)) ns.set(nb.name.text, spec);
+      if (spec && nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (!el.isTypeOnly) named.set(el.name.text, { spec, imported: (el.propertyName ?? el.name).text });
+    }
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+      const init = unwrap(n.initializer);
+      const spec = ts.isCallExpression(init) && init.expression.kind === ts.SyntaxKind.ImportKeyword ? relSpec(init.arguments[0]) : null;
+      if (spec) ns.set(n.name.text, spec);
+    }
+    ts.forEachChild(n, bind);
+  };
+  bind(sf);
+  // Every expect(<subject>)…<matcher>(…) call: the matcher name's position is where bun's stack frame points.
+  const expects: Array<{ subject: TS.Expression; line: number; col: number }> = [];
+  const findExpects = (n: TS.Node): void => {
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "expect" && n.arguments[0]) {
+      let m: TS.Node = n;
+      while (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m && m.parent.name.text === "not") m = m.parent;
+      if (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m) {
+        const pos = sf.getLineAndCharacterOfPosition(m.parent.name.getStart(sf));
+        expects.push({ subject: n.arguments[0], line: pos.line + 1, col: pos.character + 1 });
+      }
+    }
+    ts.forEachChild(n, findExpects);
+  };
+  findExpects(sf);
+  /** The declaration of `name` in scope at `from`: the nearest enclosing block's `const|let name = <init>`. */
+  const initOf = (from: TS.Node, name: string): TS.Expression | null => {
+    for (let a: TS.Node | undefined = from.parent; a; a = a.parent) {
+      if (!ts.isBlock(a) && !ts.isSourceFile(a)) continue;
+      for (const s of a.statements) if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && d.name.text === name && d.initializer) return d.initializer;
+    }
+    return null;
+  };
+  const parseValue = (v: string | null): string | null => { if (v === null || !v.startsWith("\"")) return null; try { const s = JSON.parse(v) as unknown; return typeof s === "string" ? s : null; } catch { return null; } };
+  for (const c of compared as Array<Record<string, unknown>>) {
+    const file = typeof c["file"] === "string" ? c["file"].replace(/\\/g, "/") : "";
+    if (!(file === checkRel || file.endsWith(`/${checkRel}`)) || typeof c["line"] !== "number") continue;
+    // One expect() on the frame's line is that assertion; several are told apart by the frame's column.
+    const onLine = expects.filter((x) => x.line === c["line"]);
+    const at = onLine.length > 1 ? onLine.filter((x) => x.col === c["col"]) : onLine;
+    if (at.length !== 1) continue;
+    // The subject's member path (r.body.X -> ["body", "X"]) and its root.
+    const path: string[] = [];
+    let e = unwrap(at[0]!.subject);
+    for (;;) {
+      if (ts.isPropertyAccessExpression(e)) { path.unshift(e.name.text); e = unwrap(e.expression); continue; }
+      if (ts.isElementAccessExpression(e) && (ts.isStringLiteral(e.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(e.argumentExpression))) { path.unshift(e.argumentExpression.text); e = unwrap(e.expression); continue; }
+      break;
+    }
+    const reads = path[0] === "shape" && path.length === 1 ? "shape" : path[0] === "body" && path.length >= 2 ? `body.${path[1]}` : null;
+    if (!reads) continue;
+    const init = ts.isIdentifier(e) ? initOf(at[0]!.subject, e.text) : e;
+    const call = init ? unwrap(init) : null;
+    if (!call || !ts.isCallExpression(call)) continue;
+    const callee = call.expression;
+    let target: { spec: string; fn: string } | null = null;
+    if (ts.isIdentifier(callee) && named.has(callee.text)) target = { spec: named.get(callee.text)!.spec, fn: named.get(callee.text)!.imported };
+    else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && ns.has(callee.expression.text)) target = { spec: ns.get(callee.expression.text)!, fn: callee.name.text };
+    else if (ts.isElementAccessExpression(callee) && ts.isIdentifier(callee.expression) && ns.has(callee.expression.text) && ts.isStringLiteral(callee.argumentExpression)) target = { spec: ns.get(callee.expression.text)!, fn: callee.argumentExpression.text };
+    if (!target) continue;
+    const mod = resolveModule(checkRel, target.spec, reader);
+    if (!mod || !mod.rel.startsWith("src/")) continue;
+    const msf = ts.createSourceFile(mod.rel, mod.source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(mod.rel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const contract = returnedContract(ts, msf, target.fn);
+    if (!contract) continue;
+    const test = String(c["name"] ?? "");
+    const where = `the failing assertion of "${test.slice(0, 120)}" (line ${c["line"]})`;
+    if (reads === "shape") {
+      const expected = parseValue(typeof c["expected"] === "string" ? c["expected"] : null), received = parseValue(typeof c["received"] === "string" ? c["received"] : null);
+      if (!contract.shapes || expected === null || received === null || !contract.shapes.has(received) || contract.shapes.has(expected)) continue;
+      const literals = new Set<string>();
+      const lit = (n: TS.Node): void => { if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) literals.add(n.text); ts.forEachChild(n, lit); };
+      lit(msf);
+      if (literals.has(expected)) continue;
+      return { test, module: mod.rel, fn: target.fn, reads, reason: `${CONTRACT_MISMATCH_STAGE}:shape: ${where} expects the shape ${JSON.stringify(expected)} from ${target.fn} in ${mod.rel}, which returns ${[...contract.shapes].map((s) => JSON.stringify(s)).join(", ")} and names ${JSON.stringify(expected)} nowhere, so the check is red on every tree, not for the defect` };
+    }
+    const field = path[1]!;
+    if (c["received"] !== "undefined" || !contract.bodyKeys || contract.bodyKeys.has(field)) continue;
+    const keys = [...contract.bodyKeys].slice(0, 12).join(", ");
+    return { test, module: mod.rel, fn: target.fn, reads, reason: `${CONTRACT_MISMATCH_STAGE}:body.${field}: ${where} reads body.${field} from ${target.fn} in ${mod.rel}, whose returned body never sets ${field} (it sets ${contract.bodyKeys.size} field${contract.bodyKeys.size === 1 ? "" : "s"}${keys ? `: ${keys}${contract.bodyKeys.size > 12 ? ", …" : ""}` : ""}), so the check is red on every tree, not for the defect` };
+  }
+  return null;
+}
+
 /** W1: how many times the verify runs the check (every run must be the same assertion red). */
 export const TEST_WRITING_CHECK_RUNS = 3;
 
 export type TestWritingJudgement = {
   ok: boolean;
-  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof MISSING_EXPORT_STAGE;
+  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof MISSING_EXPORT_STAGE | typeof CONTRACT_MISMATCH_STAGE;
   cause?: string;
   reason: string;
   /** Set when the missing-export guard could not run (EXPORT_GUARD_UNAVAILABLE): it decided nothing. */
@@ -759,7 +934,8 @@ export type TestWritingJudgement = {
  * up to `runs` times through `run` (feature_compose's shell; the caller supplies the command; stopping at the first run
  * that is not an assertion red), be the same assertion red every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier),
  * and require no export its module lacks (missingExportRefusal, the attach guard: a red on a missing name is red on every
- * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify). The export check runs
+ * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify) and assert no contract its
+ * target lacks (contractMismatchRefusal, applied at the arm step too). The static checks run
  * after the runs so every earlier stage keeps its verdict (a named import of a missing export still fails to LOAD and is
  * wrong_reason). ok only then.
  */
@@ -789,6 +965,9 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });
   const missing = missingExportRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
   if (missing) return out(MISSING_EXPORT_STAGE, missing.reason, { edit_site: site.edit_site, runs });
+  // The runs agree (W1), so the first one's compared values stand for all; 333be5f passed this verify before.
+  const mismatch = contractMismatchRefusal(source, checkRel, classifyCheckRun(raws[0]!), srcReaderAt(input.vesselRoot));
+  if (mismatch) return out(CONTRACT_MISMATCH_STAGE, mismatch.reason, { edit_site: site.edit_site, runs });
   const unguarded = exportGuardUnavailable();
   return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) });
 }

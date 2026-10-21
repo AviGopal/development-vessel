@@ -207,7 +207,16 @@ export function parseOwnCheckFailures(raw: string, only: string[] = []): OwnChec
  */
 export type RedCause = "network" | "timeout" | "missing_export" | "module" | "syntax" | "reference" | "non_assertion" | "load_error" | "did_not_run";
 export type ClassifiedFailure = { name: string; cls: "assertion" | "wrong_reason"; cause?: RedCause; error: string | null };
-export type CheckRunClass = { ran: boolean; pass: number; unhandled: boolean; unhandled_cause: RedCause | null; unhandled_error: string | null; failures: ClassifiedFailure[] };
+/**
+ * WHAT AN ASSERTION RED COMPARED (one per `assertion` failure, by name): the Expected and Received values bun printed
+ * (the text after the colon, as printed; for a toEqual diff, its "-" and "+" lines joined), and where the failing
+ * expect() sits, from the first stack frame after the error line (the file as the run printed it, absolute). The red's
+ * class never reads these (a Received is data); the
+ * contract guard does (check-supply-admission.ts contractMismatchRefusal). Kept beside `failures`, not on them, so a
+ * failure's record stays name / class / cause / error.
+ */
+export type ComparedValues = { name: string; file: string | null; line: number | null; col: number | null; expected: string | null; received: string | null };
+export type CheckRunClass = { ran: boolean; pass: number; unhandled: boolean; unhandled_cause: RedCause | null; unhandled_error: string | null; failures: ClassifiedFailure[]; compared?: ComparedValues[] };
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -257,10 +266,28 @@ function classifyFailureBlock(name: string, block: string[], trailer: string[]):
   return { name, cls: "wrong_reason", cause: why ?? "non_assertion", error: errLine ? capLine(errLine) : trailer[0] ? capLine(trailer[0].trim()) : null };
 }
 
+/** The values an assertion failure's printout compared, and its first stack frame (the block as classifyFailureBlock reads it). */
+function comparedValues(name: string, block: string[]): ComparedValues {
+  let at = -1;
+  for (let i = block.length - 1; i >= 0; i--) if (!isExcerpt(block[i]!) && ERROR_LINE.test(block[i]!)) { at = i; break; }
+  const tail = at >= 0 ? block.slice(at + 1) : [];
+  const stack = tail.findIndex((l) => /^\s*at\s/.test(l));
+  const printout = stack < 0 ? tail : tail.slice(0, stack);
+  const value = (rx: RegExp): string | null => { const l = printout.find((x) => rx.test(x)); return l === undefined ? null : capLine(l.slice(l.indexOf(":") + 1).trim(), 300); };
+  // toEqual prints a diff instead ("- <expected>" / "+ <received>" lines, then the "- Expected  - n" header pair).
+  const side = (sign: "-" | "+"): string | null => {
+    const ls = printout.filter((l) => l.trimStart().startsWith(`${sign} `) && !/^\s*[-+]\s+(?:Expected|Received)\s+[-+]\s*\d/.test(l)).map((l) => l.trimStart().slice(2).trim());
+    return ls.length ? capLine(ls.join(" "), 300) : null;
+  };
+  const frame = stack < 0 ? null : /\(?((?:[A-Za-z]:)?[^\s()]+):(\d+):(\d+)\)?\s*$/.exec(tail[stack]!);
+  return { name, file: frame ? frame[1]! : null, line: frame ? Number(frame[2]) : null, col: frame ? Number(frame[3]) : null, expected: value(/^\s*Expected\b[^:]*:/) ?? side("-"), received: value(/^\s*Received\b[^:]*:/) ?? side("+") };
+}
+
 /** The shared classifier: what one `bun test ./<check file>` run printed, failure by failure. */
 export function classifyCheckRun(raw: string): CheckRunClass {
   const lines = stripAnsi(raw).split("\n");
   const failures: ClassifiedFailure[] = [];
+  const compared: ComparedValues[] = [];
   let pass = 0;
   let unhandled = false;
   let unhandledText: string[] = [];
@@ -289,7 +316,11 @@ export function classifyCheckRun(raw: string): CheckRunClass {
     // A name seen before is bun's "N tests failed:" recap (a whole-suite run re-prints every failure, with no block;
     // measured: a single-file run prints none): the first block is the failure.
     const name = r[3] ?? "";
-    if (!failures.some((f) => f.name === name)) failures.push(classifyFailureBlock(name, block, trailer));
+    if (!failures.some((f) => f.name === name)) {
+      const f = classifyFailureBlock(name, block, trailer);
+      failures.push(f);
+      if (f.cls === "assertion") compared.push(comparedValues(name, block));
+    }
     block = [];
   }
   const text = stripAnsi(raw);
@@ -300,6 +331,7 @@ export function classifyCheckRun(raw: string): CheckRunClass {
     unhandled_cause: unhandled ? causeOf(unhandledText.join("\n")) ?? "load_error" : null,
     unhandled_error: unhandled ? capLine((unhandledText.find((l) => ERROR_LINE.test(l)) ?? unhandledText[0] ?? "").trim()) || null : null,
     failures: failures.slice(0, 50),
+    compared: compared.slice(0, 50),
   };
 }
 

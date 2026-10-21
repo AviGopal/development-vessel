@@ -1,0 +1,22 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/template-input-lint-development-vessel-harness-check-scenari.check.ts:
+10 |         input_variables: ['gapScenario', 'none'],
+11 |         tasks: []
+12 |       }
+13 |     });
+14 | 
+15 |     expect(result.shape).toBe('template_input_lint_issues');
+                              ^
+error: expect(received).toBe(expected)
+
+Expected: "template_input_lint_issues"
+Received: "templateInputLintReport"
+
+      at <anonymous> (/tmp/fx/test/checks/template-input-lint-development-vessel-harness-check-scenari.check.ts:15:26)
+(fail) template-input-lint-development-vessel-harness-check-scenario > detects unused template inputs [1.69ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [1184.00ms]

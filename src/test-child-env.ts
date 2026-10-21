@@ -24,6 +24,16 @@
  * pull-sync's scrubbed env derives its redirects by); the test harness imports this one definition. Both renderers
  * carry them. A redirect is a path, not a credential: the passthrough allowlist is unchanged.
  *
+ * EVERY ENDPOINT IS THE DISCARD ADDRESS (2026-10-21). Stripping the key left every endpoint on its live code default
+ * (GOAL_HOST_VESSEL_ENDPOINT -> the live goal-host, METABOB_ENDPOINT, DISCOVERY_ENDPOINT, ...), so suites run in these
+ * children sent keyless requests to the live nodes all day (refused, but refused hits and live /run-goal dispatches the
+ * scaffold posterior graded). Every endpoint name is now given the FIXED value TEST_CHILD_DISCARD_ENDPOINT, port 9 where
+ * nothing listens, the address pull-sync's scrubbed env already gives the gate's suites. The names are that env's fleet
+ * list (the shell prefix also runs OTHER vessels' suites, whose names this vessel's src cannot show) plus every name this
+ * vessel's src reads with a URL default (`endpointDefaults`, derived like the learned-state scan, so a new live default
+ * is covered with no edit here). Both renderers carry them, with or without a scratch root. A discard address is not a
+ * credential: the passthrough allowlist is unchanged.
+ *
  * Not configurable at runtime, by design: nothing reads an env var or a flag to widen it.
  */
 import { dirname, join } from "node:path";
@@ -52,6 +62,31 @@ const RESERVED = (): Set<string> => new Set([...TEST_CHILD_ENV_PASSTHROUGH, ...O
 export const START_SHAPING_NAME = /^(LD_|DYLD_|NODE_|BUN_|NPM_|GIT_|SSH_)|_(OPTIONS|PRELOAD|LOADER)$/;
 let stateDefaultsCache: Map<string, string> | null = null;
 
+/** Where every endpoint of a scrubbed child points: port 9 (discard), where nothing listens, so a connect is refused at
+ *  once and no request reaches a live node. The address pull-sync's scrubbed env uses. */
+export const TEST_CHILD_DISCARD_ENDPOINT = "http://127.0.0.1:9";
+/** The fleet's HTTP endpoint names, as pull-sync's scrubbed env lists them (its database address and fleet endpoints,
+ *  the Obsidian listeners): the names other vessels' suites read, which a scan of this vessel's src cannot see. */
+const FLEET_ENDPOINT_NAMES: readonly string[] = Object.freeze([
+  "SURREALDB_URL",
+  "ACTIVITY_API_ENDPOINT", "ACTIVITY_API_URL", "METABOB_ENDPOINT", "TUNING_PARAM_ENDPOINT", "TEST_API_URL", "SUBSTRATE_API_URL",
+  "DISCOVERY_VESSEL_ENDPOINT", "DISCOVERY_ENDPOINT", "PRODUCER_DISCOVERY_ENDPOINT", "PEER_DISCOVERY_ENDPOINT",
+  "IDENTITY_VESSEL_URL",
+  "DEV_VESSEL_ENDPOINT", "DEVELOPMENT_VESSEL_ENDPOINT", "DEV_VESSEL_IMPULSES_URL", "DEV_VESSEL_SELF_ENDPOINT", "SELF_ENDPOINT",
+  "SELF_RESOLVE_ENDPOINT", "GAP_STORE_ENDPOINT", "FEATURE_COMPOSE_ENDPOINT", "GOAL_HOST_VESSEL_ENDPOINT", "GOAL_HOST_ENDPOINT",
+  "CONCEPT_DB_ENDPOINT", "CONCEPT_DB_URL", "CONCEPT_DB_CLUSTER_ENDPOINT", "CONCEPT_DB_EMBED_ENDPOINT",
+  "LLM_RESOLVER_VESSEL_ENDPOINT", "LLM_TOOL_DISPATCH_ENDPOINT", "LLM_VESSEL_ENDPOINT", "LLM_ROUTER_API_ENDPOINT",
+  "RELEVANCE_SINK_ENDPOINT", "EVENT_BUS_ENDPOINT",
+  "LIGHT_DISPATCH_ENDPOINT", "LIGHT_DISPATCH_VESSEL_ENDPOINT", "LIGHT_DISPATCH_URL",
+  "STATEFUL_UI_VESSEL_ENDPOINT", "HUMAN_SURFACE_ENDPOINT", "TRANSPORT_VESSEL_ENDPOINT", "FED_TRANSPORT_EGRESS",
+  "OBSIDIAN_ENDPOINT", "OBSIDIAN_LEARN_ENDPOINT", "OBSIDIAN_PLUGIN_ENDPOINT", "OBSIDIAN_PROBE_ENDPOINT",
+]);
+/** An env read whose default is a URL literal (a live code default): `process` `.env.NAME` (or `["NAME"]`) `??`/`||`, or
+ *  config's `env("NAME", …)`, then a quoted `scheme://`. An override read with no default is not matched: unset, it
+ *  falls back to discovery, itself redirected; set, it would change the code path under test. */
+const ENDPOINT_DEFAULT = /(?:process\.env(?:\.([A-Z0-9_]+)|\[["']([A-Z0-9_]+)["']\])\s*(?:\?\?|\|\|)|\benv\(\s*["']([A-Z0-9_]+)["']\s*,)\s*["'`][a-z][a-z0-9+.-]*:\/\//g;
+let endpointNamesCache: string[] | null = null;
+
 /**
  * Every learned-state env name in src with its /workspace default, scanned once and cached for the vessel's own src.
  * Excluded: the bare /workspace and source trees under /workspace/git*, test files, node_modules, a default with
@@ -78,6 +113,35 @@ export function learnedStateDefaults(srcDir: string = OWN_SRC): Map<string, stri
   walk(srcDir);
   if (srcDir === OWN_SRC) stateDefaultsCache = out;
   return out;
+}
+
+/**
+ * Every endpoint name a scrubbed child is given the discard address under, sorted: the fleet list and every name src
+ * reads with a URL default (scanned once and cached for the vessel's own src; test files and node_modules excluded). A
+ * reserved name, a START_SHAPING_NAME and a learned-state name are never taken.
+ */
+export function endpointNames(srcDir: string = OWN_SRC): string[] {
+  if (endpointNamesCache && srcDir === OWN_SRC) return endpointNamesCache;
+  const reserved = RESERVED();
+  const learned = learnedStateDefaults(srcDir);
+  const out = new Set<string>(FLEET_ENDPOINT_NAMES);
+  const walk = (d: string): void => {
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (statSync(p).isDirectory()) { if (n !== "node_modules") walk(p); continue; }
+      if (!/\.(ts|js)$/.test(n) || /\.test\.ts$/.test(n)) continue;
+      for (const m of readFileSync(p, "utf8").matchAll(ENDPOINT_DEFAULT)) out.add((m[1] ?? m[2] ?? m[3])!);
+    }
+  };
+  walk(srcDir);
+  const names = [...out].filter((n) => !reserved.has(n) && !START_SHAPING_NAME.test(n) && !learned.has(n)).sort();
+  if (srcDir === OWN_SRC) endpointNamesCache = names;
+  return names;
+}
+
+/** The endpoint redirects, name -> TEST_CHILD_DISCARD_ENDPOINT. */
+export function endpointRedirects(): Record<string, string> {
+  return Object.fromEntries(endpointNames().map((n) => [n, TEST_CHILD_DISCARD_ENDPOINT]));
 }
 
 /** Where a learned-state default lands under a scratch root: `<root>/<path below /workspace>`, the live layout with
@@ -117,7 +181,7 @@ export function testChildEnv(
   const dirs = path.split(":");
   for (const extra of [...(opts.pathAppend ?? []), dirname(process.execPath)]) if (extra && !dirs.includes(extra)) dirs.push(extra);
   env["PATH"] = dirs.join(":");
-  Object.assign(env, TEST_CHILD_ENV_FIXED);
+  Object.assign(env, TEST_CHILD_ENV_FIXED, endpointRedirects());
   if (opts.workspaceRoot) {
     env["WORKSPACE_ROOT"] = opts.workspaceRoot;
     Object.assign(env, learnedStateRedirects(opts.workspaceRoot));
@@ -157,7 +221,8 @@ export function withTestChildEnv<T>(
 
 /**
  * The same allowlist as a shell prefix, for a command run through the shell producer:
- * `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" env -S " NAME=\${WORKSPACE_ROOT}/… …"`.
+ * `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC ENDPOINT=http://127.0.0.1:9 … WORKSPACE_ROOT="$(mktemp -d)" env -S " NAME=\${WORKSPACE_ROOT}/… …"`.
+ * Each endpoint word is a literal (no quote, no `$`), so the gate reads it as an assignment.
  * The parent's shape is kept: ONE flat `$(mktemp -d)` substitution (run by the outer shell, so a caller's TMPDIR still
  * places the root), no inline program, no `;` (the prefix sits inside callers' `( … )`, and the local-tools shell gate
  * refuses a substitution or command word it cannot read literally). The redirects are expanded by the SECOND `env`
@@ -175,7 +240,8 @@ export function testChildEnvShellPrefix(): string {
   // feature-compose) its quote parity is flipped: the leading space ends the word before it at ` env -S ` (a literal
   // word), and every other word it then sees holds no `$` in a command position.
   const redirects = [...learnedStateDefaults()].map(([n, d]) => `${n}=\\\${WORKSPACE_ROOT}/${d.slice("/workspace/".length)}`);
-  const parts = ["env -i", ...passthrough, ...fixed, `WORKSPACE_ROOT="$(mktemp -d)"`];
+  const endpoints = endpointNames().map((n) => `${n}=${TEST_CHILD_DISCARD_ENDPOINT}`);
+  const parts = ["env -i", ...passthrough, ...fixed, ...endpoints, `WORKSPACE_ROOT="$(mktemp -d)"`];
   if (redirects.length > 0) parts.push(`env -S " ${redirects.join(" ")}"`);
   return parts.join(" ");
 }

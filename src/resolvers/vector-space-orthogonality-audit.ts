@@ -24,6 +24,17 @@ import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
  * min_failure_traces, emit one substrateGap with category=
  * novel_failure_mode_detected. Closes the meta-recursion: substrate detects
  * what it wasn't taught to detect, drafter authors the missing principle.
+ *
+ * EVERY ROW CARRIES THE READING IT WAS FILED ON (classification_metadata.detector_reading,
+ * the form substrate-gap.ts detectorReadingCheck reads). A filed row names no check, no
+ * edit site and no file, so without it the row is born unarmable. The reading is this
+ * resolver re-read under the row's own scope: input.cluster_key limits the answer to that
+ * one cluster, the window/threshold/minimum/limit are the ones the filing run used, and
+ * emit_gap is false because the judge resolves the check live and a check must never file.
+ * Its field, cluster_count, counts the clusters that still meet the filing criterion (1 at
+ * filing, 0 once a principle covers the cluster or its failures stop recurring), so the core
+ * arms it as a zero_field. A run that could not read the trace store says measured:false,
+ * which the judge reads as unknown, so an outage never reads as the defect gone.
  */
 
 const DEFAULT_METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
@@ -40,6 +51,8 @@ export interface VectorSpaceOrthogonalityAuditPointer {
   conceptDbUrl?: string;
   devVesselImpulsesUrl?: string;
   trace_limit?: number;
+  /** Scope the answer to one cluster (its `<activity_id>|<failure_mode_type>` key): the row's own re-read. */
+  cluster_key?: string;
 }
 
 interface ExecutionTrace {
@@ -65,6 +78,11 @@ function stripActivityWrap(id: string): string {
   return id.replace(/^activity:⟨/, "").replace(/⟩$/, "");
 }
 
+/** The cluster a trace falls in: `<activity_id>|<failure_mode_type>`. */
+function clusterKeyOf(t: ExecutionTrace): string {
+  return `${stripActivityWrap(t.activity_id ?? "unknown")}|${t.failure_mode?.type ?? "unknown"}`;
+}
+
 function summarizeTrace(t: ExecutionTrace): string {
   const aid = stripActivityWrap(t.activity_id ?? "unknown_activity");
   const fmType = t.failure_mode?.type ?? "unknown_failure";
@@ -77,14 +95,38 @@ async function fetchFailureTraces(
   endpoint: string,
   apiKey: string,
   limit: number,
-): Promise<ExecutionTrace[]> {
+): Promise<{ traces: ExecutionTrace[]; read: boolean }> {
   const url = `${endpoint}/v2/activities/execution-traces?limit=${limit}`;
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
-  const resp = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
-  if (!resp.ok) return [];
-  const json = (await resp.json()) as { executions?: ExecutionTrace[] };
-  return (json.executions ?? []).filter((t) => t.status === "failure");
+  // A read that failed is not a read of zero failures: the caller reports it as measured:false.
+  try {
+    const resp = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
+    if (!resp.ok) return { traces: [], read: false };
+    const json = (await resp.json()) as { executions?: ExecutionTrace[] };
+    return { traces: (json.executions ?? []).filter((t) => t.status === "failure"), read: true };
+  } catch {
+    return { traces: [], read: false };
+  }
+}
+
+/** The parameters a filing run used: the input its rows' readings re-read the audit with. */
+export interface AuditParams {
+  trace_window_hours: number;
+  similarity_threshold: number;
+  min_failure_traces: number;
+  trace_limit: number;
+}
+
+/** The reading a row is filed on (substrate-gap.ts detectorReadingCheck): this audit, scoped to the row's cluster,
+ *  with the filing run's parameters and emit_gap false; cluster_count is 1 when the cluster meets the criterion. */
+export function orthogonalClusterReading(clusterKey: string, params: AuditParams): Record<string, unknown> {
+  return {
+    shape: "vector_space_orthogonality_audit",
+    input: { cluster_key: clusterKey, ...params, emit_gap: false },
+    field: "cluster_count",
+    value: 1,
+  };
 }
 
 interface PrincipleHit {
@@ -121,6 +163,7 @@ async function emitGap(
   emitUrl: string,
   apiKey: string,
   cluster: OrthogonalCluster,
+  params: AuditParams,
 ): Promise<{ status: number | "error"; ok: boolean }> {
   const body = {
     impulse: {
@@ -148,6 +191,7 @@ async function emitGap(
             centroid_summary: cluster.centroid_summary,
             proposed_action:
               "synthesize new architectural_pattern_principle covering this vector subspace",
+            detector_reading: orthogonalClusterReading(cluster.cluster_key, params),
           },
         },
       },
@@ -180,12 +224,16 @@ export async function resolveVectorSpaceOrthogonalityAudit(
   const traceLimit = pointer.trace_limit ?? 200;
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
 
+  const scope = typeof pointer.cluster_key === "string" && pointer.cluster_key.trim() !== "" ? pointer.cluster_key.trim() : null;
+  const params: AuditParams = { trace_window_hours: windowHours, similarity_threshold: threshold, min_failure_traces: minFailures, trace_limit: traceLimit };
+
   const cutoff = Date.now() - windowHours * 3600 * 1000;
-  const traces = (await fetchFailureTraces(metabobEndpoint, selfAuthKey(metabobEndpoint, DEFAULT_METABOB_ENDPOINT), traceLimit)).filter((t) => {
+  const fetched = await fetchFailureTraces(metabobEndpoint, selfAuthKey(metabobEndpoint, DEFAULT_METABOB_ENDPOINT), traceLimit);
+  const traces = fetched.traces.filter((t) => {
     if (!t.executed_at) return true;
     const ts = Date.parse(t.executed_at);
     return Number.isFinite(ts) ? ts >= cutoff : true;
-  });
+  }).filter((t) => scope === null || clusterKeyOf(t) === scope); // a scoped read scores only its cluster's traces
 
   // 1. Score each trace against nearest principle.
   const scored = await Promise.all(
@@ -212,9 +260,7 @@ export async function resolveVectorSpaceOrthogonalityAudit(
     }
   >();
   for (const s of orthogonal) {
-    const aid = stripActivityWrap(s.trace.activity_id ?? "unknown");
-    const fm = s.trace.failure_mode?.type ?? "unknown";
-    const key = `${aid}|${fm}`;
+    const key = clusterKeyOf(s.trace);
     const existing = clusters.get(key);
     if (existing) existing.traces.push(s);
     else clusters.set(key, { key, traces: [s] });
@@ -249,7 +295,7 @@ export async function resolveVectorSpaceOrthogonalityAudit(
   const emissions: Array<{ cluster_key: string; status: number | "error" }> = [];
   if (emitGapsFlag) {
     for (const cl of out) {
-      const r = await emitGap(emitUrl, apiKey, cl);
+      const r = await emitGap(emitUrl, apiKey, cl, params);
       emissions.push({ cluster_key: cl.cluster_key, status: r.status });
       if (r.ok) gaps_emitted += 1;
     }
@@ -258,6 +304,9 @@ export async function resolveVectorSpaceOrthogonalityAudit(
   return {
     shape: "vectorSpaceOrthogonalityResult",
     body: {
+      measured: fetched.read,
+      ...(scope !== null ? { cluster_key: scope } : {}),
+      cluster_count: out.length,
       traces_examined: traces.length,
       orthogonal_traces: orthogonal.length,
       principles_consulted_per_trace: principles_consulted > 0,

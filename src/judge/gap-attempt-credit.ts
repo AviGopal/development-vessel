@@ -385,12 +385,19 @@ export function predictLand(gap: Record<string, unknown>): { predicted: boolean;
 // landed that literal and still failed, so the child would be born satisfied.
 // The store reclassifies `falsifier` on write (substrate-gap.ts), so the class
 // label is recomputed from what survives, never carried.
+// `check_supply` is the parent's check-supply ledger (gap-check-supply.ts): its
+// state, armed_at, dispatch and attempts describe the PARENT's check. Carried
+// over, an "armed" child is skipped by the supply pass and never armed on its
+// own check, and expiry read the parent's arm as the child's (two children
+// observed 2026-10-20 with armed_at equal to their parent's). The child starts
+// its own ledger.
 const NARROWED_INHERIT_NEVER = new Set([
   "detector", "evidence_resolve", "falsifier_exercise",
   "pending_outcome_verification", "pending_set_at", "pending_note",
   "predicate_source", "predicate_derived_at", "predicate_commit",
   "closed_reason", "close_basis", "closed_at", "resolution", "landed_sha",
   "operator_hold", "operator_hold_reason", "reopen_note",
+  "check_supply",
 ]);
 // checks:"drop" (a child minted from a landing's semantic dissent, feature-compose settleSemanticDissent):
 // the parent's check already passed on the landed tree, so NO predicate of the parent's is carried, nor its

@@ -194,6 +194,12 @@ export function editSiteIsOwnCheck(row: Record<string, unknown>): { site: string
   return null;
 }
 
+/** The metadata write that un-arms an own-check row: the decision, recorded on it. The write seam re-labels the check
+ *  unresolvable (substrate-gap classifyFalsifier) on the same write. One record for every writer (the pick, the supply). */
+export function ownCheckUnarmMeta(own: { site: string; check: string }, at: string): Record<string, unknown> {
+  return { own_check_unarmed: { at, site: own.site, check: own.check, reason: EDIT_SITE_IS_OWN_CHECK } };
+}
+
 /** Why a gap row is not compose work, or null when it is: THE ONE ELIGIBILITY PREDICATE shared by the autonomous
  *  picker's admission, the drain observer's compose nudge and the gap-write path's compose nudge, so a nudge never
  *  fires for a gap the picker cannot take and the two cannot drift. Eligible = open, armed (falsifier class1/class2,

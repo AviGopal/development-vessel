@@ -31,7 +31,7 @@ import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { gapEditSite, composeEligibilitySkipReason, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
+import { gapEditSite, composeEligibilitySkipReason, editSiteIsOwnCheck, isNonAttemptComposeResult, ownCheckUnarmMeta } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
 import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
@@ -2207,8 +2207,30 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // the holder. It is skipped and the next workable member holds, keeping one live gap per (lineage, check). Deleting
     // the hold instead (the previous fix) made every sibling of the check pickable at once.
     const isLineageCapped = (g: Record<string, unknown>): boolean => String(g.id ?? "").startsWith("recommit-") && lineageBackoffState(g, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP;
+    // A GAP SITED AT ITS OWN CHECK IS REFUSED BY NAME, BEFORE EVERY OTHER BRAKE (gap-eligibility editSiteIsOwnCheck). It
+    // was refused only inside admission, after the lease, hold, lineage-cap and backoff filters, so the rows those
+    // filters caught (recommit-route-edit-7ffa6330-step-1-*) were never named and stayed armed: the supply tick that
+    // un-arms them runs only when its rhythm is due. The pick reads every open row on every pass, so it refuses each one
+    // here, un-arms an armed one once (the seam re-labels it on that write, so the next pass writes nothing), and never
+    // elects one as a lineage's predicate holder (it can never work, so it may not park a sibling).
+    const ownChecks = new Map<string, { site: string; check: string }>();
+    if (!pointer.gap_id) {
+      for (const g of gaps) {
+        const own = editSiteIsOwnCheck(g);
+        if (!own) continue;
+        const id = String(g.id ?? "");
+        ownChecks.set(id, own);
+        console.log(`[check-supply] refused ${id}: edit_site_is_own_check (${own.site})`);
+        const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+        const f = meta.falsifier as unknown;
+        const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+        if (cls !== "class2" || pointer.dry_run) continue;
+        const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: String(g.status ?? "open"), classification_metadata: ownCheckUnarmMeta(own, new Date(nowMs).toISOString()) } } as never).catch((e: unknown) => ({ shape: "structuredError", body: { error: String(e) } }));
+        console.log(w.shape === "structuredError" ? `[check-supply] un-arm of ${id} refused: ${JSON.stringify(w.body).slice(0, 200)}` : `[check-supply] un-armed ${id}: edit_site_is_own_check (${own.site})`);
+      }
+    }
     let cappedHolderCandidates = 0;
-    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps, (g) => { const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; });
+    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps, (g) => { if (ownChecks.has(String(g.id ?? ""))) return false; const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; });
     if (cappedHolderCandidates > 0) console.log(`[gap-to-feature] predicate hold: ${cappedHolderCandidates} lineage-capped gap(s) passed over as holder; the next workable member holds`);
     const heldLines: string[] = [];
     const inFlightLines: string[] = [];
@@ -2216,6 +2238,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const { thisNode } = await import("./self-fact-reconcile.js");
     const pickNode = thisNode();
     const eligible = gaps.filter((g) => {
+      if (ownChecks.has(String(g.id ?? ""))) return false;
       const holder = predicateHolds.get(String(g.id ?? ""));
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
       { const why = crossNodeLeaseSkip(g, nowMs, pickNode, GAP_COMPOSE_COOLDOWN_MS); if (why) { crossNodeLines.push(`${String(g.id)}: ${why}`); return false; } }

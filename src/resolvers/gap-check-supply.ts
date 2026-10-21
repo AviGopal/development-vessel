@@ -72,6 +72,7 @@ import {
   EDIT_SITE_IS_OWN_CHECK,
   editSiteIsOwnCheck,
   gapEditSite,
+  ownCheckUnarmMeta,
   isAwaitingLandVerification,
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
@@ -1020,7 +1021,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     touched.add(id);
     unarmedOwnCheck.push(id);
     console.log(`[check-supply] un-armed ${id}: ${EDIT_SITE_IS_OWN_CHECK} (${own.site})`);
-    if (!pointer.dry_run) await writeMeta(row, { own_check_unarmed: { at: nowIso, site: own.site, check: own.check, reason: EDIT_SITE_IS_OWN_CHECK } });
+    if (!pointer.dry_run) await writeMeta(row, ownCheckUnarmMeta(own, nowIso));
   }
 
   // A row marked needs_localization that something else has since armed: release the hold.

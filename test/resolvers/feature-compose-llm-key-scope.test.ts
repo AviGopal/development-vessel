@@ -9,22 +9,25 @@
 //   - an overlay hop through this node's own federation egress keeps the key, as before: the transport's same-authority
 //     peer list decides whether it goes further (control);
 //   - a same-host endpoint keeps the key (control).
-// The verdict, and so its line, is worked out once per endpoint per process: each case below touches its endpoint first.
-// No real key: a dummy is set before the module loads (config.ts freezes the key at import, self-auth.ts reads it at use).
-// No real address either: hosts are localhost or an .invalid name, which never resolves.
-import { afterAll, beforeEach, describe, expect, it } from "bun:test";
+//
+// EACH CASE RUNS IN ITS OWN CHILD PROCESS. In one bun process with the rest of the suite the overlay control went red
+// while it was green alone: the key the module sends is config.ts' value frozen at its first import, and the module
+// graph (config, self-auth, feature-compose, global fetch) is shared with every other file of that process, so what this
+// file set before its import was not what the module held. A child with an explicit env (isolatedChildEnv plus the
+// values below) imports a fresh graph, stubs fetch, runs one failover and prints what each request carried; the parent
+// asserts on that JSON only. Every value is this file's own: a dummy key, localhost, and an .invalid name that never
+// resolves. No real key, no real address.
+import { afterAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isolatedChildEnv } from "./isolated-gap-store-run.js";
 
 const DUMMY = `dummy-node-key-${Math.random().toString(36).slice(2, 10)}`;
-const savedKey = process.env["METABOB_API_KEY"];
-const savedEgress = process.env["FED_TRANSPORT_EGRESS"];
-process.env["METABOB_API_KEY"] = DUMMY;
-process.env["FED_TRANSPORT_EGRESS"] = "http://localhost:8401";
-
-const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
-// THE OVERLAY HOP SENDS THE KEY config.ts FROZE AT ITS FIRST IMPORT, exactly as llmCall did before the strip; the same-host
-// guard reads process.env at use. Alone they are the same dummy. In one process with the rest of the suite, config.ts may
-// have loaded first under another value, so the overlay control expects the module's own loaded key, not the dummy.
-const { METABOB_API_KEY: LOADED_KEY } = (await import("../../src/config.js")) as { METABOB_API_KEY: string };
+const FC = join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts");
+const VESSEL = join(import.meta.dir, "..", "..");
+const ROOT = mkdtempSync(join(tmpdir(), "llm-key-scope-"));
+afterAll(() => { rmSync(ROOT, { recursive: true, force: true }); });
 
 const LOCAL = "http://localhost:18110/resolve";
 const FAR_TARGET = "/dns4/far-hub.invalid/tcp/4001/p2p/12D3KooWDummyRelay/p2p-circuit/p2p/12D3KooWDummyDest";
@@ -32,67 +35,61 @@ const EGRESS = `http://localhost:8401/egress/resolve?target=${encodeURIComponent
 const OFFHOST = "http://far-arm.invalid:18100/resolve";
 
 type Call = { url: string; auth: string | null };
-let calls: Call[] = [];
-let warned: string[] = [];
-const ORIGINAL_FETCH = globalThis.fetch;
-const origWarn = console.warn;
-const origLog = console.log;
+type ChildOut = { exported: boolean; result?: string; error?: string; calls: Call[]; warned: string[] };
 
-/** A fetch stub: each URL in `answers` returns its status (200 answers "OK"); any other URL answers 503. */
-function stub(answers: Record<string, number>): void {
-  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : String((input as { url?: string })?.url ?? input);
-    const h = new Headers(init?.headers);
-    calls.push({ url, auth: h.get("authorization") });
-    const status = answers[url] ?? 503;
-    return status === 200 ? Response.json({ content: "OK", resolved: true }) : new Response("unavailable (test)", { status });
-  }) as unknown as typeof fetch;
+/** One failover over `endpoints` in a fresh child process. Each URL in `answers` returns its status (200 answers "OK");
+ *  any other URL answers 503. */
+function failoverInChild(endpoints: string[], answers: Record<string, number>): ChildOut {
+  const code = [
+    `const calls = [], warned = [];`,
+    `console.warn = (...a) => { warned.push(a.map(String).join(" ")); };`,
+    `console.log = () => {}; console.error = () => {};`,
+    `const answers = ${JSON.stringify(answers)};`,
+    `globalThis.fetch = async (input, init) => {`,
+    `  const url = typeof input === "string" ? input : String(input?.url ?? input);`,
+    `  calls.push({ url, auth: new Headers(init?.headers).get("authorization") });`,
+    `  const status = answers[url] ?? 503;`,
+    `  return status === 200 ? Response.json({ content: "OK", resolved: true }) : new Response("unavailable (test)", { status });`,
+    `};`,
+    `const fc = await import(${JSON.stringify(FC)});`,
+    `const out = { exported: typeof fc.llmCallWithFailover === "function", calls, warned };`,
+    `if (out.exported) {`,
+    `  try { out.result = await fc.llmCallWithFailover(${JSON.stringify(endpoints)}, "prompt", "auto"); }`,
+    `  catch (e) { out.error = String(e?.message ?? e); }`,
+    `}`,
+    `process.stdout.write("CHILD_RESULT " + JSON.stringify(out) + "\\n");`,
+  ].join("\n");
+  const env = isolatedChildEnv(ROOT, { METABOB_API_KEY: DUMMY, FED_TRANSPORT_EGRESS: "http://localhost:8401", NODE_ENV: "test", TZ: "UTC" });
+  const p = Bun.spawnSync([process.execPath, "-e", code], { env, cwd: VESSEL, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+  const stdout = new TextDecoder().decode(p.stdout);
+  const line = stdout.split("\n").find((l) => l.startsWith("CHILD_RESULT "));
+  if (!line) throw new Error(`child printed no result (exit ${p.exitCode}): ${new TextDecoder().decode(p.stderr).slice(-600)}`);
+  return JSON.parse(line.slice("CHILD_RESULT ".length)) as ChildOut;
 }
 
-beforeEach(() => {
-  calls = [];
-  warned = [];
-  console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
-  console.log = () => {};
-});
-afterAll(() => {
-  globalThis.fetch = ORIGINAL_FETCH;
-  console.warn = origWarn;
-  console.log = origLog;
-  if (savedKey === undefined) delete process.env["METABOB_API_KEY"]; else process.env["METABOB_API_KEY"] = savedKey;
-  if (savedEgress === undefined) delete process.env["FED_TRANSPORT_EGRESS"]; else process.env["FED_TRANSPORT_EGRESS"] = savedEgress;
-});
-const restore = (): void => { globalThis.fetch = ORIGINAL_FETCH; console.warn = origWarn; console.log = origLog; };
-
 describe("feature-compose llmCallWithFailover: the node key's scope", () => {
-  it("CONTROL: over [local arm, overlay egress hop] both carry the node key; the transport decides past the hop", async () => {
-    expect(typeof fc.llmCallWithFailover).toBe("function");
-    stub({ [EGRESS]: 200 }); // the local arm is down (503), so the call spills to the egress hop
-    try {
-      expect(await fc.llmCallWithFailover([LOCAL, EGRESS], "prompt", "auto")).toBe("OK");
-    } finally { restore(); }
-    expect(calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }, { url: EGRESS, auth: `ApiKey ${LOADED_KEY}` }]);
-    expect(warned).toEqual([]);
-  });
+  it("CONTROL: over [local arm, overlay egress hop] both carry the node key; the transport decides past the hop", () => {
+    const r = failoverInChild([LOCAL, EGRESS], { [EGRESS]: 200 }); // the local arm is down (503), so the call spills to the egress hop
+    expect(r.exported).toBe(true);
+    expect(r.result).toBe("OK");
+    expect(r.calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }, { url: EGRESS, auth: `ApiKey ${DUMMY}` }]);
+    expect(r.warned.filter((w) => w.startsWith("[cross-node-key]"))).toEqual([]);
+  }, 60_000);
 
-  it("CONTROL: a same-host arm still receives the node key, and nothing is logged", async () => {
-    expect(typeof fc.llmCallWithFailover).toBe("function");
-    stub({ [LOCAL]: 200 });
-    try {
-      expect(await fc.llmCallWithFailover([LOCAL], "prompt", "auto")).toBe("OK");
-    } finally { restore(); }
-    expect(calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }]);
-    expect(warned).toEqual([]);
-  });
+  it("CONTROL: a same-host arm still receives the node key, and nothing is logged", () => {
+    const r = failoverInChild([LOCAL], { [LOCAL]: 200 });
+    expect(r.exported).toBe(true);
+    expect(r.result).toBe("OK");
+    expect(r.calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }]);
+    expect(r.warned.filter((w) => w.startsWith("[cross-node-key]"))).toEqual([]);
+  }, 60_000);
 
-  it("MUST-FAIL: an endpoint off this machine is called without the key; the next endpoint still gets it", async () => {
-    expect(typeof fc.llmCallWithFailover).toBe("function");
-    stub({ [LOCAL]: 200 }); // the off-machine arm answers 503, so the call moves on to the local arm
-    try {
-      expect(await fc.llmCallWithFailover([OFFHOST, LOCAL], "prompt", "auto")).toBe("OK");
-    } finally { restore(); }
-    expect(calls).toEqual([{ url: OFFHOST, auth: null }, { url: LOCAL, auth: `ApiKey ${DUMMY}` }]);
-    expect(warned).toEqual(["[cross-node-key] refused non-local far-arm.invalid"]);
-    expect(warned.some((w) => w.includes(DUMMY))).toBe(false);
-  });
+  it("MUST-FAIL: an endpoint off this machine is called without the key; the next endpoint still gets it", () => {
+    const r = failoverInChild([OFFHOST, LOCAL], { [LOCAL]: 200 }); // the off-machine arm answers 503, so the call moves on to the local arm
+    expect(r.exported).toBe(true);
+    expect(r.result).toBe("OK");
+    expect(r.calls).toEqual([{ url: OFFHOST, auth: null }, { url: LOCAL, auth: `ApiKey ${DUMMY}` }]);
+    expect(r.warned.filter((w) => w.startsWith("[cross-node-key]"))).toEqual(["[cross-node-key] refused non-local far-arm.invalid"]);
+    expect(r.warned.some((w) => w.includes(DUMMY))).toBe(false);
+  }, 60_000);
 });

@@ -2312,7 +2312,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       {
         try {
           // Same host only (self-auth.ts crossNodeKeyHeaders), checked again at the send: findComposeOwner asks no other.
-          const auth = await crossNodeKeyHeaders(owner.url);
+          const auth = await crossNodeKeyHeaders(owner.url, { id: owner.vesselId });
           if (!auth) throw new Error(`${owner.vesselId} is not on this host: not forwarded`);
           const res = await fetch(owner.url, {
             method: "POST",

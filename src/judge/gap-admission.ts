@@ -832,14 +832,15 @@ export async function findComposeOwner(vessel: string): Promise<{ vesselId: stri
       body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "feature_compose" } }),
       signal: AbortSignal.timeout(5_000),
     });
-    const dj = await dr.json() as { content?: { vessels?: Array<{ vesselId?: string; endpoint?: string; resolve_endpoint?: string }> } };
+    const dj = await dr.json() as { content?: { vessels?: Array<{ vesselId?: string; endpoint?: string; resolve_endpoint?: string; protocol?: string; origin?: string }> } };
     const rows = dj.content?.vessels ?? [];
     const owners: Array<{ vesselId: string; url: string }> = [];
     await Promise.all(rows.map(async (r) => {
       const ep = String(r.resolve_endpoint ?? "/v2/impulses/resolve");
       const url = ep.startsWith("http") ? ep : `${String(r.endpoint ?? "").replace(/\/+$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
       // Same host only (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no read, so claims nothing.
-      const auth = await crossNodeKeyHeaders(url);
+      // An overlay row (a libp2p facade through this node's own federation egress) is refused from its metadata.
+      const auth = await crossNodeKeyHeaders(url, { id: r.vesselId, protocol: r.protocol, origin: r.origin });
       if (!auth) return;
       try {
         const res = await fetch(url, {

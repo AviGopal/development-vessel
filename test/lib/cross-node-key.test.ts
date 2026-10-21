@@ -1,7 +1,7 @@
 // crossNodeKeyHeaders: the node key is attached only to a host on this machine (self-auth.ts; "same-host peers only").
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { networkInterfaces } from "node:os";
-import { crossNodeKeyHeaders, hostIsThisMachine, CROSS_NODE_KEY_SCOPE } from "../../src/lib/self-auth.js";
+import { crossNodeKeyHeaders, hostIsThisMachine, overlayHopReason, CROSS_NODE_KEY_SCOPE } from "../../src/lib/self-auth.js";
 
 const saved = process.env["METABOB_API_KEY"];
 const KEY = `synthetic-node-key-${Math.random().toString(36).slice(2, 10)}`;
@@ -44,6 +44,31 @@ describe("crossNodeKeyHeaders", () => {
       expect(warned).toEqual([`[cross-node-key] refused non-local ${h}`]);
     }
     expect(warned.some((w) => w.includes(KEY))).toBe(false);
+  });
+
+  it("refuses an overlay hop on loopback: from the row's metadata, and from the URL alone as a backstop", async () => {
+    const savedEgress = process.env["FED_TRANSPORT_EGRESS"];
+    process.env["FED_TRANSPORT_EGRESS"] = "http://127.0.0.1:8401"; // the egress port is read at use time
+    try {
+    const egress = "http://127.0.0.1:8401/egress/resolve?target=%2Fip4%2F203.0.113.5%2Ftcp%2F4001";
+    for (const [u, row, why] of [
+      ["http://127.0.0.1:18401/v2/impulses/resolve", { id: "development-vessel-local@far", protocol: "libp2p" }, "protocol libp2p"],
+      ["http://127.0.0.1:18401/v2/impulses/resolve", { id: "x", origin: "overlay" }, "origin overlay"],
+      ["http://127.0.0.1:18401/v2/impulses/resolve", { id: "development-vessel-local@far" }, "overlay facade id"],
+      [egress, {}, "federation egress path"],
+      ["http://127.0.0.1:18990/v2/impulses/resolve?target=%2Fip4%2F203.0.113.5", {}, "federation hop target"],
+      ["http://127.0.0.1:8401/v2/impulses/resolve", {}, "federation egress port"],
+    ] as const) {
+      expect(overlayHopReason(u, row)).toBe(why);
+      warned = [];
+      expect(await crossNodeKeyHeaders(u, row)).toBeNull();
+      expect(warned.length).toBe(1);
+      expect(warned[0]!.startsWith("[cross-node-key] refused overlay ")).toBe(true);
+    }
+    expect(warned.some((w) => w.includes(KEY))).toBe(false);
+    // a same-host HTTP row (peer origin, plain id, ordinary port) is not an overlay hop
+    expect(overlayHopReason("http://127.0.0.1:28090/v2/impulses/resolve", { id: "development-vessel-local", origin: "peer:http://127.0.0.1:28100" })).toBeNull();
+    } finally { if (savedEgress === undefined) delete process.env["FED_TRANSPORT_EGRESS"]; else process.env["FED_TRANSPORT_EGRESS"] = savedEgress; }
   });
 
   it("with no node key, a local target gets no header but is not refused", async () => {

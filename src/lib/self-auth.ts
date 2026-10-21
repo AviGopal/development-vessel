@@ -129,12 +129,50 @@ export async function hostIsThisMachine(host: string): Promise<boolean> {
   }
 }
 
+// AN OVERLAY HOP IS NOT A SAME-HOST PEER. A libp2p overlay row (a facade id `<vessel>@<substrate>`, protocol libp2p,
+// origin "overlay") resolves through THIS node's own federation egress on loopback, and the egress carries the request,
+// with whatever Authorization it was handed, to ANOTHER substrate. Its host passes the same-host test by construction,
+// so it is refused first: from the row's own metadata (protocol, origin, the `@` facade id) and, as a backstop when a
+// caller holds only a URL, from the URL (an /egress/ path, a target= hop parameter, or the federation egress port on
+// loopback). Same refusal as off-host: no key, no call, one line naming the row.
+/** What a caller knows about the discovery row behind a URL (all optional: a URL alone gets the URL backstop only). */
+export interface CrossNodeRow { id?: string; protocol?: string; origin?: string }
+const FED_EGRESS_DEFAULT = "http://127.0.0.1:8401";
+function federationEgressPort(): string {
+  try {
+    const u = new URL(process.env["FED_TRANSPORT_EGRESS"] ?? FED_EGRESS_DEFAULT);
+    return u.port || (u.protocol === "https:" ? "443" : "80");
+  } catch { return "8401"; }
+}
+/** Why `url` (and its row) is a federation overlay hop, or null when it is not one. */
+export function overlayHopReason(url: string, row: CrossNodeRow = {}): string | null {
+  if (String(row.protocol ?? "").toLowerCase() === "libp2p") return "protocol libp2p";
+  if (String(row.origin ?? "") === "overlay") return "origin overlay";
+  if (String(row.id ?? "").includes("@")) return "overlay facade id";
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  if (/(^|\/)egress(\/|$)/.test(u.pathname)) return "federation egress path";
+  if (u.searchParams.has("target")) return "federation hop target";
+  if (isLoopbackAddress(u.hostname) || u.hostname.toLowerCase() === "localhost") {
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    if (port === federationEgressPort()) return "federation egress port";
+  }
+  return null;
+}
+
 /**
  * The headers for a CROSS-NODE call to a discovery-supplied `url`: `{ Authorization: "ApiKey <node key>" }` (or `{}`
- * with no key) when its host is this machine, otherwise null, logged once per refusal by host. A null means: make
- * no call at all. The key is read at use time, as selfAuthKey reads it.
+ * with no key) when it is not an overlay hop and its host is this machine, otherwise null, logged once per refusal. A
+ * null means: make no call at all. `row` is the discovery row's metadata when the caller has it. The key is read at
+ * use time, as selfAuthKey reads it.
  */
-export async function crossNodeKeyHeaders(url: string): Promise<Record<string, string> | null> {
+export async function crossNodeKeyHeaders(url: string, row: CrossNodeRow = {}): Promise<Record<string, string> | null> {
+  if (overlayHopReason(url, row) !== null) {
+    let host = "";
+    try { host = new URL(url).hostname; } catch { /* named by id below */ }
+    console.warn(`[cross-node-key] refused overlay ${row.id || host || "(unparseable url)"}`);
+    return null;
+  }
   let host = "";
   try { host = new URL(url).hostname; } catch { /* unparseable: refused below */ }
   if (!host || !(await hostIsThisMachine(host))) {

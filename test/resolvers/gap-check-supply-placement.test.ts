@@ -21,7 +21,8 @@
 //   [MUST-FAIL] a placed dispatch nobody here can read settles by the dispatch timeout, not the foreign bound.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
+import { promises as dns } from "node:dns";
 import { join } from "node:path";
 import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
@@ -66,7 +67,7 @@ const loopbackUrl = (name: string): string => {
   if (!peerPorts.has(name)) peerPorts.set(name, 18_900 + peerPorts.size);
   return `http://127.0.0.1:${peerPorts.get(name)}`;
 };
-const peerAt = (name: string, over: Partial<Peer> = {}): Peer => ({ id: `development-vessel@${name}`, url: loopbackUrl(name), node: name, owns: [VESSEL], free: 1, visible: true, excludes: [], ...over });
+const peerAt = (name: string, over: Partial<Peer> = {}): Peer => ({ id: `development-vessel-peer-${name}`, url: loopbackUrl(name), node: name, owns: [VESSEL], free: 1, visible: true, excludes: [], ...over });
 
 const originalFetch = globalThis.fetch;
 const origLog = console.log;
@@ -132,7 +133,7 @@ beforeAll(() => {
       if (cap.shape === "composeOwnership") {
         return Response.json({ content: { vessels: [
           { vesselId: "development-vessel-self", endpoint: "http://127.0.0.1:8090", resolve_endpoint: "http://127.0.0.1:8090/v2/impulses/resolve", origin: "local" },
-          ...peers.map((p) => ({ vesselId: p.id, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve`, origin: p.origin ?? "overlay" })),
+          ...peers.map((p) => ({ vesselId: p.id, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve`, origin: p.origin ?? "peer:http://127.0.0.1:28100" })),
         ] } });
       }
       if (cap.shape === "poolImpulse") return Response.json({ content: { vessels: [{ vesselId: "pool-self", endpoint: "http://pool.self.test", resolve_endpoint: "http://pool.self.test/v2/impulses/resolve", origin: "local" }] } });
@@ -269,8 +270,8 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     expect(peerGoalsFor(id).length).toBe(0);
     expect(localGoalsFor(id).length).toBe(1);
     expect(ledgerOf(await storeRow(id))["dispatch_node"]).toBe(LOCAL);
-    expect(warned.some((w) => w.includes("[compose-placement]") && w.includes("development-vessel@node-b") && w.includes("ECONNREFUSED"))).toBe(true);
-    expect(warned.some((w) => w.includes("[compose-placement]") && w.includes("development-vessel@node-c") && w.includes("HTTP 500"))).toBe(true);
+    expect(warned.some((w) => w.includes("[compose-placement]") && w.includes("development-vessel-peer-node-b") && w.includes("ECONNREFUSED"))).toBe(true);
+    expect(warned.some((w) => w.includes("[compose-placement]") && w.includes("development-vessel-peer-node-c") && w.includes("HTTP 500"))).toBe(true);
   });
 
   it("[CONTROL] a peer that does not own the vessel, does not see the row, or whose scope excludes a target is never chosen", async () => {
@@ -351,6 +352,41 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     const l = ledgerOf(await storeRow(id));
     expect(l["dispatch_node"]).toBe(LOCAL);
     expect(l["placed_by"]).toBeUndefined();
+  });
+
+  it("[MUST-FAIL] a libp2p overlay row on this node's own loopback egress gets no key and no call: never asked, never placed", async () => {
+    // A federation facade (id <vessel>@<substrate>, origin overlay) resolves through this node's own egress on loopback,
+    // which would carry the key to ANOTHER substrate. Idle and able in every other respect.
+    const id = T("gcs-overlay");
+    await seed(id, "overlay row");
+    setLocalBusy(true);
+    peers = [peerAt("far-substrate", { id: "development-vessel-local@far-substrate", url: "http://127.0.0.1:8401", origin: "overlay" })];
+    await tick(Date.now());
+    expect(peerReads.length).toBe(0);
+    expect(peerGoals.length).toBe(0);
+    expect(warned.some((w) => w.includes("[cross-node-key] refused overlay development-vessel-local@far-substrate"))).toBe(true);
+    expect(warned.some((w) => w.includes(NODE_KEY))).toBe(false);
+    expect(localGoalsFor(id).length).toBe(1);
+    expect(ledgerOf(await storeRow(id))["dispatch_node"]).toBe(LOCAL);
+  });
+
+  it("[CONTROL] a same-host HTTP peer row named by container name (resolving on the shared bridge) is asked with the key", async () => {
+    // The container's own name resolves to its address on the bridge sibling containers share: an HTTP peer row from a
+    // peer's own registry under this node's id, not an overlay. Skipped only where the name does not resolve.
+    const name = hostname();
+    let resolves = false;
+    try { resolves = (await dns.lookup(name, { all: true })).length > 0; } catch { resolves = false; }
+    if (!resolves) return;
+    const id = T("gcs-bridge");
+    await seed(id, "bridge peer row");
+    setLocalBusy(true);
+    process.env["METABOB_API_KEY"] = NODE_KEY;
+    peers = [peerAt("node-b", { id: "development-vessel-self", url: `http://${name}:18998`, origin: "peer:http://127.0.0.1:28100" })];
+    await tick(Date.now());
+    const ask = peerReads.find((r) => r.pointer["gap_id"] === id);
+    expect(ask?.auth).toBe(`ApiKey ${NODE_KEY}`);
+    expect(peerGoalsFor(id).length).toBe(1);
+    expect(peerGoalsFor(id)[0]!.auth).toBe(`ApiKey ${NODE_KEY}`);
   });
 
   it("[CONTROL] a loopback producer on another port is still asked and placed, with the node key", async () => {

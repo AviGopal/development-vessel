@@ -26,14 +26,16 @@
  * The capacity read is not a reservation: the peer's own admission (eligibility, the supply ledger, scope, the landing
  * lease, the O_EXCL slot claim) still decides, and its refusal comes back as the same classified outcome.
  *
- * NOT OWN-SUBSTRATE-FILTERED, ON PURPOSE. Peer compose producers reach discovery as federated overlay rows, which
- * isOwnSubstrateProducer rejects because it guards POLICY READS (a peer must never set this node's scope or spend
+ * NOT OWN-SUBSTRATE-FILTERED, ON PURPOSE. A same-host peer node's producer reaches discovery as a peer-origin row
+ * (composeOwnership is declared node-distinct), which isOwnSubstrateProducer may reject because it guards POLICY READS (a peer must never set this node's scope or spend
  * envelope). Placement reads no policy from a peer: it hands the peer work that the peer admits through its own gates
  * and the shared store's ledger, and row visibility excludes a peer that does not share the store.
  *
  * SAME HOST ONLY (user ruling). Both the placement read and the placed send carry this node's key, so each goes only
  * to an endpoint on this machine (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no call, and
- * is no candidate.
+ * is no candidate. A libp2p OVERLAY row (a facade `<vessel>@<substrate>` through this node's own federation egress on
+ * loopback) is refused too, before its loopback host is even considered: the egress would carry the key to another
+ * substrate.
  */
 import { lookupShape, describeLookup } from "../config.js";
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
@@ -131,7 +133,8 @@ export async function placeCompose(q: { gap_id: string; vessel: string; targets:
   const pointer = { type: "composeOwnership", gap_id: q.gap_id, targets: q.targets, armed: q.armed };
   const answers = await Promise.all(asks.map(async (p) => {
     // Same host only (self-auth.ts crossNodeKeyHeaders): a producer elsewhere gets no key and no read, so is no candidate.
-    const auth = await crossNodeKeyHeaders(p.resolveEndpoint);
+    // An overlay row (a libp2p facade through this node's own federation egress) is refused from its metadata.
+    const auth = await crossNodeKeyHeaders(p.resolveEndpoint, { id: p.id, origin: p.origin, protocol: (p as { protocol?: string }).protocol });
     if (!auth) return null;
     try {
       const r = await fetch(p.resolveEndpoint, {

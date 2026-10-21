@@ -6,6 +6,7 @@
 //
 //   [MUST-FAIL] a loopback owner and an off-host owner both claim the vessel: the off-host one is never called, so the
 //               loopback one is the single owner (before: both asked, two claims, no owner).
+//   [MUST-FAIL] a libp2p overlay row (a facade id on this node's own loopback egress) is never called either.
 //   [CONTROL]   the local-only path: this node's own producer alone is asked, with the key, and owns the vessel.
 //   [CONTROL]   a loopback producer on another port is asked, with the key.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -27,7 +28,7 @@ process.env["METABOB_API_KEY"] = NODE_KEY;
 const { findComposeOwner } = await import("../../src/judge/gap-admission.js");
 
 const VESSEL = "local-tools-vessel";
-type Producer = { vesselId: string; url: string; owns: string[] };
+type Producer = { vesselId: string; url: string; owns: string[]; protocol?: string; origin?: string };
 let producers: Producer[] = [];
 let calls: Array<{ url: string; auth: string | null }> = [];
 let warned: string[] = [];
@@ -39,7 +40,7 @@ beforeAll(() => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (body?.pointer?.type === "vesselCapability") {
-      return Response.json({ content: { vessels: producers.map((p) => ({ vesselId: p.vesselId, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve` })) } });
+      return Response.json({ content: { vessels: producers.map((p) => ({ vesselId: p.vesselId, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve`, ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.origin ? { origin: p.origin } : {}) })) } });
     }
     const p = producers.find((x) => url.startsWith(x.url));
     if (p && body?.impulse?.pointer?.type === "composeOwnership") {
@@ -61,13 +62,27 @@ beforeEach(() => { producers = []; calls = []; warned = []; process.env["METABOB
 describe("findComposeOwner: the node key goes only to producers on this host", () => {
   it("[MUST-FAIL] an off-host producer claiming the vessel is never called, so the loopback owner is the one owner", async () => {
     producers = [
-      { vesselId: "development-vessel@here", url: "http://127.0.0.1:18951", owns: [VESSEL] },
-      { vesselId: "development-vessel@elsewhere", url: "http://203.0.113.9:8090", owns: [VESSEL] },
+      { vesselId: "development-vessel-here", url: "http://127.0.0.1:18951", owns: [VESSEL] },
+      { vesselId: "development-vessel-elsewhere", url: "http://203.0.113.9:8090", owns: [VESSEL] },
     ];
     const owner = await findComposeOwner(VESSEL);
     expect(calls.map((c) => c.url)).toEqual(["http://127.0.0.1:18951/v2/impulses/resolve"]);
-    expect(owner?.vesselId).toBe("development-vessel@here");
+    expect(owner?.vesselId).toBe("development-vessel-here");
     expect(warned.some((w) => w.includes("[cross-node-key] refused non-local 203.0.113.9"))).toBe(true);
+    expect(warned.some((w) => w.includes(NODE_KEY))).toBe(false);
+  });
+
+  it("[MUST-FAIL] a libp2p overlay row on this node's own loopback egress is never called, though its host is loopback", async () => {
+    // A federation facade: id <vessel>@<substrate>, protocol libp2p, endpoint this node's own egress, which would carry
+    // the key to ANOTHER substrate.
+    producers = [
+      { vesselId: "development-vessel-here", url: "http://127.0.0.1:18953", owns: [VESSEL] },
+      { vesselId: "development-vessel-local@far-substrate", url: "http://127.0.0.1:8401", owns: [VESSEL], protocol: "libp2p", origin: "overlay" },
+    ];
+    const owner = await findComposeOwner(VESSEL);
+    expect(calls.map((c) => c.url)).toEqual(["http://127.0.0.1:18953/v2/impulses/resolve"]);
+    expect(owner?.vesselId).toBe("development-vessel-here");
+    expect(warned.some((w) => w.includes("[cross-node-key] refused overlay development-vessel-local@far-substrate"))).toBe(true);
     expect(warned.some((w) => w.includes(NODE_KEY))).toBe(false);
   });
 
@@ -82,10 +97,10 @@ describe("findComposeOwner: the node key goes only to producers on this host", (
   it("[CONTROL] a loopback producer on another port is asked, with the key", async () => {
     producers = [
       { vesselId: "development-vessel-local", url: "http://127.0.0.1:8090", owns: ["some-other-vessel"] },
-      { vesselId: "development-vessel@here", url: "http://127.0.0.1:18952", owns: [VESSEL] },
+      { vesselId: "development-vessel-here", url: "http://127.0.0.1:18952", owns: [VESSEL] },
     ];
     const owner = await findComposeOwner(VESSEL);
-    expect(owner?.vesselId).toBe("development-vessel@here");
+    expect(owner?.vesselId).toBe("development-vessel-here");
     expect(calls.find((c) => c.url.startsWith("http://127.0.0.1:18952"))?.auth).toBe(`ApiKey ${NODE_KEY}`);
   });
 });

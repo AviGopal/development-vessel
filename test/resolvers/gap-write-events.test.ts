@@ -16,7 +16,7 @@
 // identity, all on a scratch store (no GAP_STORE_ENDPOINT).
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
@@ -214,6 +214,76 @@ describe("every gap write leaves exactly one names-only event", () => {
       expect(kept.length).toBeLessThan(12);
       expect(kept.at(-1)!.status_from).toBe("open");
     } finally { setCap(null); }
+  });
+});
+
+// A RETENTION REWRITE HOLDS THE APPENDS MADE WHILE IT RUNS (substrate-gap.ts GAP-WRITE EVENTS). The rewrite is paused
+// inside, once appends are held, by the tests-only hook; writes made then return with their events in memory only
+// (debt (a)), and the events land after the rewrite: in the new file after the kept half, or, when the rewrite fails,
+// in the old file after everything it held, in order either way.
+describe("a retention rewrite keeps every append made while it runs", () => {
+  const N = 5;
+  async function heldRun(id: string, failRewrite: boolean): Promise<{ snapshot: string[]; heldIds: string[]; cap: number; inMemoryDuringHold: number }> {
+    const setCap = gapMod["__setGapWriteEventsMaxBytesForTests"] as (n: number | null) => void;
+    const setHook = gapMod["__setGapWriteEventsRewriteHookForTests"] as (fn: ((path: string) => Promise<void>) | null) => void;
+    for (let i = 0; i < 6; i++) await writeAndCollect(id, { gap: base(id, { summary: `${SUMMARY} pre ${i}` }) });
+    const cap = Math.floor(Buffer.byteLength(fileText()) / 2); // the next append puts the file over it
+    let entered!: () => void;
+    const enteredP = new Promise<void>((r) => { entered = r; });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let snapshot: string[] = [];
+    setHook(async (path) => {
+      snapshot = readFileSync(path, "utf-8").split("\n").filter(Boolean);
+      entered();
+      await gate;
+      if (failRewrite) throw new Error("fixture: the rewrite fails");
+    });
+    setCap(cap);
+    const heldIds = Array.from({ length: N }, (_, k) => `${id}-held-${k}`);
+    let inMemoryDuringHold = 0;
+    try {
+      await write({ type: "substrateGap_write", gap: base(id, { summary: `${SUMMARY} trigger` }) }, { vocabulary: null });
+      await enteredP;
+      for (const h of heldIds) {
+        const r = await write({ type: "substrateGap_write", gap: base(h) }, { vocabulary: null });
+        expect(r.shape).toBe("substrateGapWriteResult");
+        if (eventsFor(h).length === 0) inMemoryDuringHold++;
+      }
+      release();
+      await settle();
+    } finally {
+      release();
+      setHook(null);
+      setCap(null);
+    }
+    return { snapshot, heldIds, cap, inMemoryDuringHold };
+  }
+
+  it("[UNIT] appends made during a rewrite land in the new file, after the kept half, in order", async () => {
+    const { snapshot, heldIds, cap, inMemoryDuringHold } = await heldRun(`${ROW}-held`, false);
+    expect(inMemoryDuringHold).toBe(N); // debt (a): returned writes whose events are not on disk yet
+    const lines = fileText().split("\n").filter(Boolean);
+    expect(lines.slice(-N).map((l) => (JSON.parse(l) as Ev).gap_id)).toEqual(heldIds);
+    const kept = lines.slice(0, -N);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(snapshot.length);
+    expect(snapshot.slice(-kept.length)).toEqual(kept); // the kept half is the newest suffix of what the rewrite read
+    expect(Buffer.byteLength(kept.map((l) => l + "\n").join(""))).toBeLessThanOrEqual(Math.floor(cap / 2));
+    expect(readdirSync(join(STORE_ROOT, "gaps")).filter((f) => f.startsWith("gap-write-events.jsonl.") && f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("[UNIT] when the rewrite fails, the held appends land in the old file after everything it held, in order", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    let run: Awaited<ReturnType<typeof heldRun>>;
+    try { run = await heldRun(`${ROW}-heldfail`, true); } finally { spy.mockRestore(); }
+    const { snapshot, heldIds } = run!;
+    expect(lines.some((l) => l.includes("[gap-write-event] retention compaction failed"))).toBe(true);
+    const after = fileText().split("\n").filter(Boolean);
+    expect(after).toEqual([...snapshot, ...after.slice(snapshot.length)]); // nothing the old file held was dropped
+    expect(after.slice(snapshot.length).map((l) => (JSON.parse(l) as Ev).gap_id)).toEqual(heldIds);
+    expect(readdirSync(join(STORE_ROOT, "gaps")).filter((f) => f.startsWith("gap-write-events.jsonl.") && f.endsWith(".tmp"))).toEqual([]);
   });
 });
 

@@ -661,6 +661,19 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 // While a retention rewrite runs, appends are held in memory and written into the new file just before its rename,
 // in one synchronous step, so none is lost or reordered.
 //
+// TWO KNOWN DEBTS (recorded, not fixed):
+//   (a) HELD IS NOT DURABLE. While a rewrite runs, a write that has returned has its event in memory only: a
+//       gapWriteEvent read in that window misses it, and a crash in that window loses it. The window is one rewrite
+//       (read, trim, write of a file at the cap), which happens once per half-cap of events.
+//   (b) ONE PROCESS. The holding covers this process only. An append by ANOTHER process during a rewrite lands in
+//       the old inode and is lost at the rename. Searched (dv src, super-repo scripts and units at origin/dev, the
+//       other vessels' src): no other process appends gap-write-events.jsonl; dv's resolveSubstrateGapWrite is its
+//       only writer, one dv unit per node. Other writers of the STORE exist and leave no event:
+//       scripts/substrate/typecheck-scenario-gen.ts (typecheck-scenario-gen.timer, every 45 min) writes GAPS_PATH,
+//       default /workspace/gaps/gaps.json, with a plain writeFile that bypasses saveGaps (it reaches the live store
+//       only if its environment points GAPS_PATH there); and inside dv, the landing-lease op, stampBirthVerdict and
+//       the reclassify / birth re-evaluation ticks call saveGaps without passing through resolveSubstrateGapWrite.
+//
 // RETENTION: past the tuning row gap_write_events.max_bytes (activity-api tuning-params; absent means
 // GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT) the file is rewritten to its newest half. The row is read only when the
 // file is over the cap, at most once per GAP_WRITE_EVENTS_CAP_READ_MS, and never from a scratch store.
@@ -690,6 +703,9 @@ let gapWriteEventsCapReadAt = Number.NEGATIVE_INFINITY;
 /** Non-null while a retention rewrite runs: the event lines appended meanwhile, written into the new file. */
 let gapWriteEventsHeld: string[] | null = null;
 let __gapEventCompaction: Promise<void> = Promise.resolve();
+/** Tests only: awaited inside a retention rewrite once appends are held (a rejection takes the failure path). */
+let __gapEventRewriteHook: ((path: string) => Promise<void>) | null = null;
+export function __setGapWriteEventsRewriteHookForTests(fn: ((path: string) => Promise<void>) | null): void { __gapEventRewriteHook = fn; }
 let gapWriteEventsEnabled = true;
 /** Tests only: the retention cap in bytes (null restores the default), and the event layer on or off (the control). */
 export function __setGapWriteEventsMaxBytesForTests(n: number | null): void { gapWriteEventsMaxBytes = n ?? GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT; gapWriteEventsCapReadAt = n === null ? Number.NEGATIVE_INFINITY : Date.now(); }
@@ -776,6 +792,7 @@ async function compactGapWriteEventsIfOver(): Promise<void> {
   gapWriteEventsHeld = held; // from here every append is held until the rename (or the failure flush) below
   const tmp = `${path}.${process.pid}.${__gapEventTmpCounter++}.tmp`;
   try {
+    if (__gapEventRewriteHook) await __gapEventRewriteHook(path);
     const lines = (await readFile(path, "utf-8")).split("\n").filter((l) => l.length > 0);
     const keepBytes = Math.floor(gapWriteEventsMaxBytes / 2);
     let i = lines.length, bytes = 0;

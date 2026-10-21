@@ -151,16 +151,61 @@ export function isAwaitingLandVerification(gap: Record<string, unknown>): boolea
   return true;
 }
 
+/** The stage, compose skip reason and falsifier_unresolvable_reason prefix of a gap whose edit site is its own check. */
+export const EDIT_SITE_IS_OWN_CHECK = "edit_site_is_own_check";
+/**
+ * A path as one vessel's repo-relative file: `:line` and backslashes dropped, leading "./" and "/" stripped, and a
+ * repos/<vessel>/ prefix (or an absolute clone path ending in repos/<vessel>/ or vessels/<vessel>/) taken off and
+ * kept as the vessel. Case is kept as stored. null for an empty path.
+ */
+export function vesselFileOf(path: unknown, vesselHint?: unknown): { vessel: string | null; rel: string } | null {
+  if (typeof path !== "string" || !path.trim()) return null;
+  let s = path.trim().replace(/\\/g, "/").replace(/:\d+.*$/, "");
+  let vessel: string | null = null;
+  const m = /^(?:\/?(?:[^/]+\/)*?)(?:repos|vessels)\/([^/]+)\/(.+)$/.exec(s.replace(/^(?:\.\/)+/, ""));
+  if (m && /^(?:src|test|tests|scripts)\//.test(m[2]!)) { vessel = m[1]!; s = m[2]!; }
+  s = s.replace(/^(?:\.\/)+/, "").replace(/^\/+/, "");
+  if (!vessel && typeof vesselHint === "string" && vesselHint.trim()) vessel = vesselHint.trim().replace(/^repos\//, "").replace(/\/+$/, "") || null;
+  return s ? { vessel, rel: s } : null;
+}
+/**
+ * A GAP WHOSE EDIT SITE IS ITS OWN CHECK CAN ONLY BE CLOSED BY SELF-CERTIFICATION. When the file the lane edits is the
+ * test file its check runs (evidence_resolve test_suite's input.test_file, or the supply's check_supply.test_file),
+ * the only edit that greens the check is editing the check. The semantic gate vetoes that edit every time, so the row
+ * loops until its lineage cap (recommit-route-edit-7ffa6330-step-2-*: edit_site == test_file ==
+ * src/resolvers/substrate-gap.test.ts, about 5 composes in 2 h on two nodes). Paths are compared repo-relative after
+ * vesselFileOf; two named vessels that differ are different files. Returns the site and the check it equals, or null.
+ */
+export function editSiteIsOwnCheck(row: Record<string, unknown>): { site: string; check: string } | null {
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  const rawSite = gapEditSite(row, meta);
+  const site = vesselFileOf(rawSite);
+  if (!site || !rawSite) return null;
+  const checks: Array<{ path: unknown; vessel: unknown }> = [];
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
+  if (er && typeof er === "object" && er.shape === "test_suite" && er.input && typeof er.input === "object") checks.push({ path: er.input.test_file, vessel: er.input.vessel });
+  const ledger = meta["check_supply"] as { test_file?: unknown; vessel?: unknown } | null | undefined;
+  if (ledger && typeof ledger === "object") checks.push({ path: ledger.test_file, vessel: ledger.vessel });
+  for (const c of checks) {
+    const f = vesselFileOf(c.path, c.vessel);
+    if (f && f.rel === site.rel && (!f.vessel || !site.vessel || f.vessel === site.vessel)) return { site: rawSite, check: String(c.path) };
+  }
+  return null;
+}
+
 /** Why a gap row is not compose work, or null when it is: THE ONE ELIGIBILITY PREDICATE shared by the autonomous
  *  picker's admission, the drain observer's compose nudge and the gap-write path's compose nudge, so a nudge never
  *  fires for a gap the picker cannot take and the two cannot drift. Eligible = open, armed (falsifier class1/class2,
  *  as a string or {class}), naming an edit site (edit_site, file_path, change_site, suspected_real_location or a
- *  row-level file_path), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
-export type ComposeEligibilitySkipReason = "not_open" | "unarmed" | "no_edit_site" | "held";
+ *  row-level file_path) that is not its own check (editSiteIsOwnCheck), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
+export type ComposeEligibilitySkipReason = "not_open" | "edit_site_is_own_check" | "unarmed" | "no_edit_site" | "held";
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
   if (String(row["status"] ?? "open") !== "open") return "not_open";
   const rawMeta = row["classification_metadata"] ?? row["metadata"];
   const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  // Before "unarmed": an own-check site is never compose work, armed or not, and an un-armed one keeps saying why.
+  if (editSiteIsOwnCheck(row)) return "edit_site_is_own_check";
   const rawFalsifier = meta["falsifier"];
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";

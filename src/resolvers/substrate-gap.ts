@@ -46,6 +46,7 @@ import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 import { countLiteralOnEvaluatorTree, evaluatorEditSite } from "../lib/evaluator-tree.js";
+import { EDIT_SITE_IS_OWN_CHECK, editSiteIsOwnCheck } from "../judge/gap-eligibility.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -1414,6 +1415,18 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
     };
   }
 }
+  // A CHECK WHOSE TEST FILE IS THE GAP'S OWN EDIT SITE ARMS NOTHING (gap-eligibility editSiteIsOwnCheck): the only edit
+  // that greens it is editing the check, so it is labelled unresolvable with the named reason, here at every write of
+  // the row (an armed row is un-armed on its next write; gap-check-supply's tick writes the ones nothing else does).
+  const ownCheck = editSiteIsOwnCheck({ classification_metadata: m });
+  if (ownCheck) {
+    return {
+      falsifier: "unresolvable",
+      predicate_position: "edit_site",
+      unresolvable_reason: `${EDIT_SITE_IS_OWN_CHECK}: the edit site ${ownCheck.site} is the test file its check runs (${ownCheck.check}), so only editing the check can green it (self-certification)`,
+      classified_at: at,
+    };
+  }
   const evidenceObj =
     evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evidenceResolve)
       ? (evidenceResolve as Record<string, unknown>)

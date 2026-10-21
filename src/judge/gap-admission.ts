@@ -22,7 +22,7 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
@@ -787,12 +787,15 @@ export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: C
   const rawFalsifier = meta.falsifier as unknown;
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   const reason =
-    skip === "unarmed" ? `needs_information(falsifier=${falsifierClass || "unset"})`
+    skip === "edit_site_is_own_check" ? `edit_site_is_own_check(${editSiteIsOwnCheck(g)?.site ?? ""})`
+    : skip === "unarmed" ? `needs_information(falsifier=${falsifierClass || "unset"})`
     : skip === "no_edit_site" ? `needs_information(no_edit_site; falsifier=${falsifierClass})`
     : skip === "not_open" ? `not_open(${String(g.status ?? "")})`
     : meta.operator_hold === true ? "operator_hold"
     : isParkingDisposition(meta.disposition) || meta.disposition === CHECK_SUPPLY_DISPOSITION ? `disposition(${String(meta.disposition)})`
     : "disposition(pending_verification)";
+  // One line per refusal, so its effect can be counted after it lands.
+  if (skip === "edit_site_is_own_check") console.log(`[check-supply] refused ${id}: ${reason.replace("(", " (")}`);
   return { skip, reason };
 }
 

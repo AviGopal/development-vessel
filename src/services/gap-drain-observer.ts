@@ -30,7 +30,9 @@ export const DRAIN_REMEDY_ALLOWLIST: ReadonlySet<string> = new Set(["gap_to_feat
 export type ComposeNudgeSkipReason = ComposeEligibilitySkipReason | "not_found" | "read_failed";
 const NUDGE_ROW_TTL_MS = 60_000;
 const NUDGE_SUMMARY_WINDOW_MS = 60_000;
-const emptySkipCounts = (): Record<ComposeNudgeSkipReason, number> => ({ not_found: 0, not_open: 0, unarmed: 0, no_edit_site: 0, held: 0, read_failed: 0 });
+// edit_site_is_own_check is carried only once counted, so a window that saw none reads exactly as before.
+type SkipCounts = Record<Exclude<ComposeNudgeSkipReason, "edit_site_is_own_check">, number> & { edit_site_is_own_check?: number };
+const emptySkipCounts = (): SkipCounts => ({ not_found: 0, not_open: 0, unarmed: 0, no_edit_site: 0, held: 0, read_failed: 0 });
 // One read per distinct gap per TTL window; a burst of writes for one id reuses the in-flight read.
 const nudgeRowCache = new Map<string, { at: number; row: Promise<Record<string, unknown> | null> }>();
 let nudgeSkipCounts = emptySkipCounts();
@@ -142,7 +144,7 @@ export async function composeNudgeSkipReason(gapId: string): Promise<ComposeNudg
 }
 
 function countNudgeSkip(reason: ComposeNudgeSkipReason): void {
-  nudgeSkipCounts[reason] += 1;
+  nudgeSkipCounts[reason] = (nudgeSkipCounts[reason] ?? 0) + 1;
 }
 
 /** The gap-write path's compose nudge skips into the SAME per-window summary as this observer (one drain-log line
@@ -152,7 +154,7 @@ export function countComposeNudgeSkip(reason: ComposeNudgeSkipReason): void {
   flushNudgeSkipSummary(appendDrainLine);
 }
 
-export function __composeNudgeSkipCountsForTests(): Record<ComposeNudgeSkipReason, number> {
+export function __composeNudgeSkipCountsForTests(): SkipCounts {
   return { ...nudgeSkipCounts };
 }
 
@@ -161,7 +163,7 @@ function flushNudgeSkipSummary(write: (entry: Record<string, unknown>) => void, 
   const now = Date.now();
   if (!force && now - nudgeSkipWindowStart < NUDGE_SUMMARY_WINDOW_MS) return;
   const counts = nudgeSkipCounts;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const total = Object.values(counts).reduce((a: number, b: number | undefined) => a + (b ?? 0), 0);
   const windowMs = now - nudgeSkipWindowStart;
   nudgeSkipCounts = emptySkipCounts();
   nudgeSkipWindowStart = now;

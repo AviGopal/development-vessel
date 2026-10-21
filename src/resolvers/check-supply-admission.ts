@@ -18,7 +18,7 @@
  * The supply writes its ledger AFTER goal-host's 202, so a compose can read the store before the write lands (on a
  * retry it then reads the previous attempt's dispatch id). The marked path re-reads, bounded, before refusing.
  */
-import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "../judge/gap-eligibility.js";
+import { CHECK_SUPPLY_DISPOSITION, EDIT_SITE_IS_OWN_CHECK, isAwaitingLandVerification, isParkingDisposition } from "../judge/gap-eligibility.js";
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type TS from "typescript";
@@ -186,7 +186,20 @@ export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[
  *     through `reader`; a check that only reads the template's literals is refused (test_writing_check_reads_literals_only).
  *     Without a reader a config site is refused (fail closed). Non-config sites are judged exactly as before.
  */
-export type EditSiteImport = { ok: true; edit_site: string } | { ok: false; stage: "edit_site_not_importable" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only"; reason: string; edit_site: string | null };
+export type EditSiteImport = { ok: true; edit_site: string } | { ok: false; stage: "edit_site_not_importable" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | typeof EDIT_SITE_IS_OWN_CHECK; reason: string; edit_site: string | null };
+
+/**
+ * THE EDIT SITE MAY NOT BE A TEST. A gap sited at the check file itself, or at any test or check file (test/**, or a
+ * *.test / *.spec / *.check module anywhere), can only be closed by editing a test until it passes: self-certification,
+ * which the semantic gate vetoes on every attempt, so the gap loops until its lineage cap. Refused, never re-sited:
+ * which src module the check means to test is not decidable from its imports alone (gap-eligibility editSiteIsOwnCheck is
+ * the same rule over a stored row). null = the site is not a test.
+ */
+const TEST_FILE_RE = /^(?:test|tests)\/|\.(?:test|spec|check)\.[cm]?[jt]sx?$/;
+export function ownCheckSiteRefusal(siteRel: string, checkRel: string): Extract<EditSiteImport, { ok: false }> | null {
+  if (siteRel !== checkRel && !TEST_FILE_RE.test(siteRel)) return null;
+  return { ok: false, stage: EDIT_SITE_IS_OWN_CHECK, edit_site: siteRel, reason: `the edit site ${siteRel} is ${siteRel === checkRel ? "the check file itself" : "a test file"}, so the only edit that greens the check is editing a test (self-certification); the gap needs the src module under test as its site` };
+}
 
 /**
  * A READ-ONLY VIEW OF ONE VESSEL'S SOURCE TREE (vessel-relative paths), so the config-site rules below can read the edit
@@ -356,6 +369,8 @@ export async function checkImportsEditSite(source: string, checkRel: string, edi
     if (rel.split("/").includes("..") || !IMPORTABLE_RE.test(rel) || /\.d\.[cm]?ts$/.test(rel)) {
       return { ok: false, stage: "edit_site_not_importable", edit_site: rel, reason: `the gap's edit site ${rel} is not an importable TS/JS module, so no check can import it; a test-writing compose cannot reproduce it (the gap needs a different check)` };
     }
+    const own = ownCheckSiteRefusal(rel, checkRel);
+    if (own) return own;
     if (!testImportsFile(source, checkRel, rel, { runtimeOnly: true })) {
       return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: rel, reason: `the check does not import the edit site ${rel}: import it (e.g. import * as mod from "${posixRelative(checkRel, rel)}") and assert on what it does` };
     }
@@ -366,7 +381,7 @@ export async function checkImportsEditSite(source: string, checkRel: string, edi
     const resolved = posixJoin(checkRel, m[2]!).replace(/\.(?:[cm]?[jt]sx?)$/, "");
     if (!resolved.startsWith("src/")) continue;
     for (const cand of [`${resolved}.ts`, `${resolved}.tsx`, `${resolved}.js`, `${resolved}/index.ts`, `${resolved}.mts`]) {
-      if (srcExists(cand) && testImportsFile(source, checkRel, cand, { runtimeOnly: true })) return configSiteCheckRefusal(source, checkRel, cand, reader) ?? { ok: true, edit_site: cand };
+      if (srcExists(cand) && testImportsFile(source, checkRel, cand, { runtimeOnly: true })) return ownCheckSiteRefusal(cand, checkRel) ?? configSiteCheckRefusal(source, checkRel, cand, reader) ?? { ok: true, edit_site: cand };
     }
   }
   return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: null, reason: "the gap names no edit site and the check imports no existing src/ module of its vessel: import the module the defect lives in and assert on it" };
@@ -918,7 +933,7 @@ export const TEST_WRITING_CHECK_RUNS = 3;
 
 export type TestWritingJudgement = {
   ok: boolean;
-  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof MISSING_EXPORT_STAGE | typeof CONTRACT_MISMATCH_STAGE;
+  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof EDIT_SITE_IS_OWN_CHECK | typeof MISSING_EXPORT_STAGE | typeof CONTRACT_MISMATCH_STAGE;
   cause?: string;
   reason: string;
   /** Set when the missing-export guard could not run (EXPORT_GUARD_UNAVAILABLE): it decided nothing. */
@@ -949,7 +964,10 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   try { source = existsSync(abs) ? readFileSync(abs, "utf8") : null; } catch { source = null; }
   if (source === null) return out("test_writing_check_not_red", `the check file ${checkRel} was not written in this vessel: the supply's goal asks for exactly that file`);
   const site = await checkImportsEditSite(source, checkRel, input.editSite, (rel) => existsSync(`${input.vesselRoot}/${rel}`), srcReaderAt(input.vesselRoot));
-  if (!site.ok) return out(site.stage, site.reason, { edit_site: site.edit_site });
+  if (!site.ok) {
+    if (site.stage === EDIT_SITE_IS_OWN_CHECK) console.log(`[check-supply] refused ${input.gapId}: ${EDIT_SITE_IS_OWN_CHECK} (${site.edit_site})`);
+    return out(site.stage, site.reason, { edit_site: site.edit_site });
+  }
   const raws: string[] = [];
   const n = Math.max(1, Math.floor(input.runs ?? TEST_WRITING_CHECK_RUNS));
   // THE BUDGET (qa): each run is `timeout 180` inside a compose capped at 900 s, so only an ASSERTION red earns the

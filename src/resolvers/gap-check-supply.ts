@@ -69,6 +69,8 @@ import { birthTreeMoved, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapS
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
+  EDIT_SITE_IS_OWN_CHECK,
+  editSiteIsOwnCheck,
   gapEditSite,
   isAwaitingLandVerification,
   isParkingDisposition,
@@ -851,6 +853,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)), vesselReader);
     const editSite = site.ok ? `repos/${vesselDir}/${site.edit_site}` : null;
     const why = onlyTestsProblem(titles)?.detail ?? (site.ok ? null : `${site.stage}: ${site.reason}`);
+    if (!site.ok && site.stage === EDIT_SITE_IS_OWN_CHECK) console.log(`[check-supply] refused ${id}: ${EDIT_SITE_IS_OWN_CHECK} (${site.edit_site})`);
     if (why) {
       refused += 1;
       notArmed.push({ id, reason: why });
@@ -1004,6 +1007,20 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     // The same tick's dispatch step sees the settled ledger (a due retry may be sent now).
     (meta as Row)["check_supply"] = next;
+  }
+
+  // AN ARMED ROW WHOSE EDIT SITE IS ITS OWN CHECK IS UN-ARMED (gap-eligibility editSiteIsOwnCheck). No pick or compose
+  // takes it (edit_site_is_own_check), but a row nothing else writes would stay labelled class2; this write lets the
+  // write seam re-label its check unresolvable with the named reason, and records the decision on the row.
+  const unarmedOwnCheck: string[] = [];
+  for (const row of open) {
+    const id = String(row["id"]);
+    const own = touched.has(id) || falsifierClassOf(metaOf(row)) !== "class2" ? null : editSiteIsOwnCheck(row);
+    if (!own) continue;
+    touched.add(id);
+    unarmedOwnCheck.push(id);
+    console.log(`[check-supply] un-armed ${id}: ${EDIT_SITE_IS_OWN_CHECK} (${own.site})`);
+    if (!pointer.dry_run) await writeMeta(row, { own_check_unarmed: { at: nowIso, site: own.site, check: own.check, reason: EDIT_SITE_IS_OWN_CHECK } });
   }
 
   // A row marked needs_localization that something else has since armed: release the hold.
@@ -1247,6 +1264,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       exhausted,
       control_marked: controlMarked,
       localized,
+      ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
       outcomes,
       ...(scopeUnread ? { scope_unread: scopeUnread } : {}),
       arms,

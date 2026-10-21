@@ -8,7 +8,8 @@
 // none had run since the push. So the rows stayed class2 and unnamed.
 //
 // THE CONTRACT: the auto-pick checks editSiteIsOwnCheck over every open row before the lease, hold, lineage-cap and
-// backoff filters; it logs `[check-supply] refused <id>: edit_site_is_own_check (<site>)` for each; it writes the
+// backoff filters; it logs `[check-supply] refused <id>: edit_site_is_own_check (<site>)` once per row (only while the
+// row lacks own_check_unarmed, and once per process), and `[check-supply] own-check refused: N` on every pass; it writes the
 // un-arm (own_check_unarmed, the same record the supply writes) for each class2 one, and the write seam re-labels it
 // unresolvable on that write, so the next pass writes nothing; and an own-check row never holds a lineage's predicate.
 // The rows are planted with the live rows' stored field values (no seam re-classification), as they sit in the store.
@@ -110,6 +111,7 @@ describe("the auto-pick names and un-arms a row sited at its own check (the live
     expect(lines).toContain(`[check-supply] refused ${ID}: edit_site_is_own_check (${SITE})`);
     expect(lines).toContain(`[check-supply] refused ${CHILD}: edit_site_is_own_check (${SITE})`);
     expect(lines.some((l) => l.includes(`refused ${CONTROL}`))).toBe(false);
+    expect(lines).toContain("[check-supply] own-check refused: 2");
     // an own-check row holds nothing: the control is not "predicate held by" either live row
     expect(lines.some((l) => l.includes("predicate hold excluded") && (l.includes(`predicate held by ${ID}`) || l.includes(`predicate held by ${CHILD}`)))).toBe(false);
   });
@@ -125,7 +127,9 @@ describe("the auto-pick names and un-arms a row sited at its own check (the live
     const at = (m["own_check_unarmed"] as Row)["at"];
     const second = await pick();
     expect(second.filter((l) => l.startsWith(`[check-supply] un-armed ${ID}:`))).toEqual([]);
-    expect(second).toContain(`[check-supply] refused ${ID}: edit_site_is_own_check (${SITE})`);
+    // un-armed, so the per-row line is not said again; the pass still counts it
+    expect(second.filter((l) => l.startsWith(`[check-supply] refused ${ID}:`) || l.startsWith(`[check-supply] refused ${CHILD}:`))).toEqual([]);
+    expect(second).toContain("[check-supply] own-check refused: 2");
     expect((metaOf(stored(ID))["own_check_unarmed"] as Row)["at"]).toBe(at);
   });
 

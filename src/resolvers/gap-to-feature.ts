@@ -1965,6 +1965,9 @@ export function pickPoolForCapacity<T extends Record<string, unknown>>(admitted:
   return { rows: armed };
 }
 
+/** Own-check rows whose refusal this process has named (the auto-pick's once-per-row line, for a row it cannot un-arm). */
+const OWN_CHECK_REFUSAL_LOGGED = new Set<string>();
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   const attempt: { id?: string; gap?: Record<string, unknown>; inFlightGapId?: string } = {};
   let result: ResolverResult;
@@ -2213,6 +2216,8 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // un-arms them runs only when its rhythm is due. The pick reads every open row on every pass, so it refuses each one
     // here, un-arms an armed one once (the seam re-labels it on that write, so the next pass writes nothing), and never
     // elects one as a lineage's predicate holder (it can never work, so it may not park a sibling).
+    // The per-row line is said once: on the pass that un-arms the row (it then carries own_check_unarmed), or once per
+    // process for a row this pass cannot un-arm (class1, a refused write). Every pass with any says how many: one line.
     const ownChecks = new Map<string, { site: string; check: string }>();
     if (!pointer.gap_id) {
       for (const g of gaps) {
@@ -2220,14 +2225,18 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
         if (!own) continue;
         const id = String(g.id ?? "");
         ownChecks.set(id, own);
-        console.log(`[check-supply] refused ${id}: edit_site_is_own_check (${own.site})`);
         const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+        if (!meta.own_check_unarmed && !OWN_CHECK_REFUSAL_LOGGED.has(id)) {
+          OWN_CHECK_REFUSAL_LOGGED.add(id);
+          console.log(`[check-supply] refused ${id}: edit_site_is_own_check (${own.site})`);
+        }
         const f = meta.falsifier as unknown;
         const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
         if (cls !== "class2" || pointer.dry_run) continue;
         const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: String(g.status ?? "open"), classification_metadata: ownCheckUnarmMeta(own, new Date(nowMs).toISOString()) } } as never).catch((e: unknown) => ({ shape: "structuredError", body: { error: String(e) } }));
         console.log(w.shape === "structuredError" ? `[check-supply] un-arm of ${id} refused: ${JSON.stringify(w.body).slice(0, 200)}` : `[check-supply] un-armed ${id}: edit_site_is_own_check (${own.site})`);
       }
+      if (ownChecks.size > 0) console.log(`[check-supply] own-check refused: ${ownChecks.size}`);
     }
     let cappedHolderCandidates = 0;
     const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps, (g) => { if (ownChecks.has(String(g.id ?? ""))) return false; const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; });

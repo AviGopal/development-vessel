@@ -21,6 +21,10 @@ process.env["METABOB_API_KEY"] = DUMMY;
 process.env["FED_TRANSPORT_EGRESS"] = "http://localhost:8401";
 
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+// THE OVERLAY HOP SENDS THE KEY config.ts FROZE AT ITS FIRST IMPORT, exactly as llmCall did before the strip; the same-host
+// guard reads process.env at use. Alone they are the same dummy. In one process with the rest of the suite, config.ts may
+// have loaded first under another value, so the overlay control expects the module's own loaded key, not the dummy.
+const { METABOB_API_KEY: LOADED_KEY } = (await import("../../src/config.js")) as { METABOB_API_KEY: string };
 
 const LOCAL = "http://localhost:18110/resolve";
 const FAR_TARGET = "/dns4/far-hub.invalid/tcp/4001/p2p/12D3KooWDummyRelay/p2p-circuit/p2p/12D3KooWDummyDest";
@@ -67,7 +71,7 @@ describe("feature-compose llmCallWithFailover: the node key's scope", () => {
     try {
       expect(await fc.llmCallWithFailover([LOCAL, EGRESS], "prompt", "auto")).toBe("OK");
     } finally { restore(); }
-    expect(calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }, { url: EGRESS, auth: `ApiKey ${DUMMY}` }]);
+    expect(calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }, { url: EGRESS, auth: `ApiKey ${LOADED_KEY}` }]);
     expect(warned).toEqual([]);
   });
 

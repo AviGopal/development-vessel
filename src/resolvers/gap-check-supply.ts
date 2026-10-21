@@ -55,9 +55,9 @@
  * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no DISPATCH (the
  * bookkeeping, ARM, OUTCOME, the own-check un-arm and the hold release, runs on every pass, at most once per shaped
  * bookkeeping_min_interval_s when undue), and the per-tick bound, backoff and attempt cap come from the same impulse's
- * body. The rhythm conductor fires the family through FAMILY_RESOLVERS and leaves it PENDING; this resolver settles
- * its family from its REPORT when it completes (checkSupplySettlementLeg), whichever entry ran it, so no exit is ever
- * credited as success.
+ * body. The rhythm conductor fires the family through FAMILY_RESOLVERS and leaves it PENDING, and on its other passes
+ * asks for the bookkeeping alone through FAMILY_BOOKKEEPING (bookkeeping_only); this resolver settles its family from
+ * its REPORT when it completes (checkSupplySettlementLeg), whichever entry ran it, so no exit is ever credited as success.
  *
  * MEASURES (counters on the report, not traces): of the armed gaps whose check was born in the window, the
  * share whose check the system wrote (predicate_source gap_check_supply), and of those the share verified red

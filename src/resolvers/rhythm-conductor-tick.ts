@@ -215,6 +215,20 @@ export const FAMILY_RESOLVERS: Record<string, Record<string, unknown>> = {
 };
 
 /**
+ * A family's CHEAP PHASE, asked for on every pass that does not fire the family, whatever its due-ness (2026-10-21).
+ *
+ * A resolver that gates itself on its own rhythm gated its bookkeeping with its dispatch: gap-check-supply read back no
+ * dispatched outcome, armed no landed check and un-armed nothing while its family was undue, so a family whose
+ * posterior sank under debits left those rows unsettled for 18 to 50 hours. The entry is the pointer sent; it must ask its resolver for
+ * the bookkeeping alone, never a dispatch. The call is not a fire: nothing is scored or settled from it here (the
+ * resolver writes its own debits), a failed or unanswered call is logged and the pass goes on, and a paused family
+ * (rhythmPausedBy) is not asked.
+ */
+export const FAMILY_BOOKKEEPING: Record<string, Record<string, unknown>> = {
+  "gap-check-supply": { type: "gap_check_supply_tick", bookkeeping_only: true },
+};
+
+/**
  * How the conductor settles a resolver-backed family after its direct call. A family whose resolver settles by
  * its own REPORT is left PENDING here (no alpha, no beta): the call may outlive this wait (an arm step runs a test
  * suite for minutes) and returning is not success (REALIGNMENT §2.2, exit-graded credit). Every other direct
@@ -569,6 +583,7 @@ export async function resolveRhythmConductorTick(
 
   const enqueued: Array<{ family: string; goal: string; due_score: number; settlement?: string }> = [];
   const skipped: Array<{ family: string; reason: string }> = [];
+  const firedFamilies = new Set<string>();
   let picked = 0;
 
 
@@ -823,6 +838,7 @@ export async function resolveRhythmConductorTick(
     // member would make a family whose work is split across five goals decay
     // five times as fast as an identical family expressed as one goal, which
     // penalises the decomposition rather than the behaviour.
+    if (firedThisFamily) firedFamilies.add(r.family);
     if (firedThisFamily && !pointer.dry_run) {
       // A direct-resolver family's resolve returned its outcome synchronously; an enqueued
       // goal's outcome is settled later by the outcome pass, so a fire only answers staleness.
@@ -915,12 +931,33 @@ export async function resolveRhythmConductorTick(
     ? 0
     : await drainBoredomQueue(pointer.queue_path ?? DEFAULT_QUEUE_PATH, pointer.max_enqueue ?? 2);
 
+  // 6. BOOKKEEPING (FAMILY_BOOKKEEPING): every family that declares a cheap phase and was not fired above is asked for
+  // it, due or not, affordable or not, envelope open or not (it settles; it does not spend on goals). Not on a dry run,
+  // as the direct call is not. NOT AWAITED: a pass that is not floored can run for minutes (a whole gap-store read,
+  // outcome probes, the arm judge's suite) and the timer's caller gives this whole pass 30 s; the resolver runs one pass
+  // at a time and floors an undue one, so an unawaited call never piles up work. A failure is logged when it settles.
+  const bookkeeping: Array<{ family: string; asked: boolean }> = [];
+  if (pointer.dry_run !== true) {
+    const asked = new Set<string>();
+    for (const r of scored) {
+      const spec = FAMILY_BOOKKEEPING[r.family];
+      if (!spec || asked.has(r.family) || firedFamilies.has(r.family) || rhythmPausedBy(r.body)) continue;
+      asked.add(r.family);
+      const family = r.family;
+      void fetchJson(endpoint, { method: "POST", headers: selfHeaders, body: JSON.stringify({ impulse: { pointer: spec } }) }, 60_000).then((resp) => {
+        if (resp === null) console.log(`[rhythm-conductor] bookkeeping for ${family} failed or did not answer within 60 s; the pass goes on`);
+      }).catch((err) => console.log(`[rhythm-conductor] bookkeeping for ${family} failed: ${String((err as Error)?.message ?? err).slice(0, 160)}; the pass goes on`));
+      bookkeeping.push({ family, asked: true });
+    }
+  }
+
   return {
     shape: "rhythmConductorReport",
     body: {
       enqueued,
       skipped,
       drained,
+      bookkeeping,
       spend_envelope: envelope.reason,
       bucket_load: bucketLoad,
       load_source: pinned ? "pointer" : afford!.source,

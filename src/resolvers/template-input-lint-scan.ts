@@ -51,6 +51,8 @@ export interface TemplateInputLintScanPointer {
   maxEmits?: number;
   /** Test hook: lint this template set instead of SEED_TEMPLATES. */
   _templates?: TemplateLike[];
+  /** Single-template harness hook: lint this template and return a compact result shape. */
+  template?: { id?: unknown; input_variables?: unknown; tasks?: unknown };
 }
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -88,6 +90,29 @@ export async function resolveTemplateInputLintScan(
     try { idRe = new RegExp(pointer.idPattern); } catch { idRe = null; }
   }
 
+  // Harness mode: a compact single-template lint path used by checks.
+  const tHarness = (pointer as { template?: unknown }).template;
+  if (tHarness && typeof tHarness === "object" && !Array.isArray(tHarness)) {
+    const th = tHarness as { id?: unknown; input_variables?: unknown; tasks?: unknown };
+    const id = typeof th.id === "string" ? th.id : "";
+    const declaredInputs = asStringArray((th as { input_variables?: unknown }).input_variables);
+    const tasks = Array.isArray(th.tasks) ? (th.tasks as TaskLike[]) : [];
+    const consumedShapes = new Set<string>();
+    let allRefs = "";
+    for (const task of tasks) {
+      for (const s of [...asStringArray(task.inputShapes), ...asStringArray(task.input_shapes)]) consumedShapes.add(s);
+      allRefs += taskReferenceBlob(task);
+    }
+    const unusedInputs = declaredInputs.filter((s) => !consumedShapes.has(s) && !allRefs.includes(`{{${s}`));
+    return {
+      shape: "template_input_lint_issues",
+      body: {
+        templateId: id,
+        unusedInputs,
+      },
+    };
+  }
+
   const apiKey = process.env["METABOB_API_KEY"];
   const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
 
@@ -104,9 +129,14 @@ export async function resolveTemplateInputLintScan(
     inScope += 1;
 
     const declaredInputs = [...asStringArray(t.inputShapes), ...asStringArray(t.input_shapes)];
-    const declaredVars = Array.isArray(t.variables)
-      ? (t.variables as Array<{ name?: unknown }>).map((v) => (typeof v?.name === "string" ? v.name : "")).filter(Boolean)
-      : [];
+    const declaredVars = [
+      ...(Array.isArray(t.variables)
+        ? (t.variables as Array<{ name?: unknown }>).map((v) => (typeof v?.name === "string" ? v.name : "")).filter(Boolean)
+        : []
+      ),
+      ...asStringArray((t as { inputVariables?: unknown }).inputVariables),
+      ...asStringArray((t as { input_variables?: unknown }).input_variables),
+    ];
     if (declaredInputs.length === 0 && declaredVars.length === 0) continue;
 
     const tasks = Array.isArray(t.tasks) ? (t.tasks as TaskLike[]) : [];

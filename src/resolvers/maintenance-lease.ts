@@ -34,9 +34,13 @@
  * full principal beside the holder; an acquire re-enters a live hold only when both match, so knowing a holder
  * name no longer takes its lease over. The status read never returns the principal.
  *
- * SYSTEM LEASES ARE NODE-SELF'S. The holds the node's own lanes take and read (SYSTEM_LEASE_NAMES, and the unnamed
- * global hold, which excludes every name and pauses the trace-store readers in http-retry.ts) are acquired,
- * renewed and released only by node-self; any other principal gets `system_lease_requires_node_self`.
+ * SYSTEM LEASES ARE NODE-SELF'S. The named holds the node's own lanes take and read (SYSTEM_LEASE_NAMES) are
+ * acquired, renewed and released only by node-self; any other principal gets `system_lease_requires_node_self`.
+ * The unnamed global hold (it excludes every name and pauses the trace-store readers in http-retry.ts) is also an
+ * operator's: node-self or a key whose stamp says `admin` (the route reads the "admin" scope off the credential its
+ * write gate validated) takes it; anyone else gets `global_lease_requires_node_self_or_admin`. An operator's DB work
+ * is then recorded as the operator's, not as a system act: every hold records principal_kind (in-process,
+ * node-self, key) and, for a key, its key_id prefix.
  *
  * A HOLD HAS A TOTAL BOUND. Renewals extend a hold up to its acquired_at plus the tuning row
  * maintenance_lease.max_total_hold_s (activity-api tuning-params; absent or unreadable means
@@ -58,6 +62,9 @@ export interface MaintenanceLease {
   expires_at: string;
   /** The principal that took the hold (see WHO HOLDS A LEASE). Absent on a hold written before it was recorded. */
   principal?: string;
+  principal_kind?: "in-process" | "node-self" | "key";
+  /** A key's id prefix (6 characters, as the gap-write events record it); null for node-self and in-process. */
+  key_id?: string | null;
 }
 
 export interface MaintenanceLeaseReadPointer {
@@ -74,7 +81,7 @@ export interface MaintenanceLeaseWritePointer {
   ttl_ms?: number;
   /** Stamped by the resolve routes from the credential their write gate validated (routes/impulses.ts), never by a
    *  client; absent on an in-process call. */
-  _route_caller?: { auth?: unknown; remote?: unknown };
+  _route_caller?: { auth?: unknown; remote?: unknown; admin?: unknown };
 }
 
 const DEFAULT_TTL_MS = 900_000; // 15 min
@@ -118,14 +125,16 @@ function totalHoldBoundMs(extending: boolean): number {
 /** Who is writing (see WHO HOLDS A LEASE): the full principal, the holder label it holds under, whether it is
  *  node-self, and whether it is identifiable enough to re-enter its own hold (a caller identity named by scopes
  *  alone is not: two keys can share them). null when the stamp names no authenticated caller. */
-function leasePrincipal(pointer: MaintenanceLeaseWritePointer): { principal: string; label: string; node_self: boolean; reentrant: boolean } | null {
+type LeasePrincipal = { principal: string; label: string; node_self: boolean; admin: boolean; reentrant: boolean; kind: "in-process" | "node-self" | "key"; key_id: string | null };
+function leasePrincipal(pointer: MaintenanceLeaseWritePointer): LeasePrincipal | null {
   const rc = pointer._route_caller;
-  if (rc === undefined) return { principal: "node-self", label: pointer.holder ?? "", node_self: true, reentrant: true };
+  if (rc === undefined) return { principal: "node-self", label: pointer.holder ?? "", node_self: true, admin: false, reentrant: true, kind: "in-process", key_id: null };
   const auth = rc && typeof rc === "object" && typeof rc.auth === "string" ? rc.auth : "unauthenticated";
-  if (auth === "authenticated:node-self") return { principal: "node-self", label: "node-self", node_self: true, reentrant: true };
+  if (auth === "authenticated:node-self") return { principal: "node-self", label: "node-self", node_self: true, admin: false, reentrant: true, kind: "node-self", key_id: null };
   if (auth !== "authenticated" && !auth.startsWith("authenticated:")) return null;
   const key = /^authenticated:key_id:(.+)$/.exec(auth);
-  return { principal: auth, label: key ? `key_id:${key[1]!.slice(0, 6)}` : auth, node_self: false, reentrant: key !== null };
+  const key_id = key ? key[1]!.slice(0, 6) : null;
+  return { principal: auth, label: key_id ? `key_id:${key_id}` : auth, node_self: false, admin: rc.admin === true, reentrant: key !== null, kind: "key", key_id };
 }
 
 /**
@@ -252,11 +261,11 @@ export async function resolveMaintenanceLeaseWrite(
     };
   }
   const refuseSystem = (name: string | undefined): ResolverResult | null => {
-    if (who.node_self || (name && !SYSTEM_LEASE_NAMES.has(name))) return null;
-    console.warn(`[maintenance-lease] REFUSED ${pointer.op} of system lease ${name ?? "(unnamed global)"} by ${who.label}: only node-self holds it`);
+    if (who.node_self || (name ? !SYSTEM_LEASE_NAMES.has(name) : who.admin)) return null;
+    console.warn(`[maintenance-lease] REFUSED ${pointer.op} of ${name ? `system lease ${name}` : "the unnamed global hold"} by ${who.label}: only node-self${name ? "" : " or an admin key"} holds it`);
     return {
       shape: "structuredError",
-      body: { resolver: "maintenanceLease_write", error: "system_lease_requires_node_self", op: pointer.op ?? null, name: name ?? null, caller: who.label },
+      body: { resolver: "maintenanceLease_write", error: name ? "system_lease_requires_node_self" : "global_lease_requires_node_self_or_admin", op: pointer.op ?? null, name: name ?? null, caller: who.label },
     };
   };
   // A release without a name finds its hold by token, so its system check waits for the hold it names.
@@ -302,7 +311,7 @@ export async function resolveMaintenanceLeaseWrite(
     // A re-entering acquire continues the hold it re-enters: its total-hold bound counts from the first acquire.
     const acquired_at = existing && !isExpired(existing) ? existing.acquired_at : now.toISOString();
     const expires_at = new Date(Math.min(now.getTime() + clampTtl(pointer.ttl_ms), new Date(acquired_at).getTime() + boundMs)).toISOString();
-    await writeLease({ holder, token, acquired_at, expires_at, principal: who.principal }, pointer.name);
+    await writeLease({ holder, token, acquired_at, expires_at, principal: who.principal, principal_kind: who.kind, key_id: who.key_id }, pointer.name);
     return {
       shape: "maintenanceLeaseWriteResult",
       body: { acquired: true, token, holder, expires_at, name: pointer.name ?? null },

@@ -47,7 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
-import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
+import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, ADMIN_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
@@ -1126,6 +1126,19 @@ export const impulsesRouter = new Hono();
  * a refused key, and an unreachable identity are all refusals. Reads are not gated here.
  * Returns the refusal response, or null when the call may proceed.
  */
+/** The caller stamp on a maintenanceLease_write (resolvers/maintenance-lease.ts): the gap-write stamp's identity and
+ *  remote, plus `admin`, true only when the credential this route's write gate validated is a key identity answered
+ *  with the "admin" scope (CallerCredential.scopes, from identity-vessel's /v1/auth/resolve data.scopes), never
+ *  node-self. The whole stamp is overwritten, so a client cannot carry one in. */
+function leaseCallerStamp(c: Context, cred: CallerCredential | null): Record<string, unknown> {
+  const nodeSelf = isNodeSelfCredential(cred);
+  return {
+    auth: callerAuthLabel(cred ? { authenticated: cred.authenticated, node_self: nodeSelf, key_id: cred.keyId, scopes: cred.scopes } : undefined),
+    remote: routeRemote(c),
+    admin: cred?.authenticated === true && !nodeSelf && Array.isArray(cred.scopes) && cred.scopes.includes(ADMIN_SCOPE),
+  };
+}
+
 /** The socket remote address the server wrapper stamped (x-dv-remote-addr, overwritten on every inbound
  *  request in index.ts), or the socket's own; "unknown" when neither is available. */
 function routeRemote(c: Context): string {
@@ -1232,9 +1245,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
     const pointer = { ...(body.config ?? {}), type: resolverName };
     // A lease's holder is the principal this gate validated (maintenance-lease.ts): stamped here as on the resolve
     // route, overwriting any _route_caller the config carried.
-    if (resolverName === "maintenanceLease_write") {
-      (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
-    }
+    if (resolverName === "maintenanceLease_write") (pointer as Record<string, unknown>)["_route_caller"] = leaseCallerStamp(c, writeCred);
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
@@ -1324,10 +1335,12 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   // digest or prefix): only the identity that validated the request (callerAuthLabel): the write gate's
   // credential above, named by its key id when identity's answer carries one, else by its scopes. Plus the
   // remote address the server wrapper stamped from the socket (x-dv-remote-addr), or the socket's own.
-  // A maintenanceLease_write is stamped the same way: its holder is this principal, never the body's (maintenance-lease.ts).
-  if ((pointerType === "substrateGap_write" || pointerType === "maintenanceLease_write") && pointer && typeof pointer === "object") {
+  if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
     (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
   }
+  // A maintenanceLease_write is stamped the same way, plus whether the credential is admin: its holder is this
+  // principal, never the body's (maintenance-lease.ts).
+  if (pointerType === "maintenanceLease_write" && pointer && typeof pointer === "object") (pointer as Record<string, unknown>)["_route_caller"] = leaseCallerStamp(c, writeCred);
 
   // OPERATOR-DIRECTED (lib/operator-direct.ts): a feature_compose carrying the operator's own credential in
   // X-Operator-Authorization runs under a grant when identity says that key has "operator:direct" (or "admin");

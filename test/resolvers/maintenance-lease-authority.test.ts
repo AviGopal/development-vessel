@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, readdirSync } from "node:fs";
+import { rmSync, readdirSync, readFileSync } from "node:fs";
 import * as mod from "../../src/resolvers/maintenance-lease.js";
 import { __resetMaintenanceLeaseCacheForTests } from "../../src/resolvers/http-retry.js";
 
@@ -15,6 +15,10 @@ process.env["MAINTENANCE_LEASE_PATH"] = join(dir, "maintenance.json");
 const KEY_A = { auth: "authenticated:key_id:aaaaaa111111", remote: "test" };
 const KEY_B = { auth: "authenticated:key_id:bbbbbb222222", remote: "test" };
 const NODE = { auth: "authenticated:node-self", remote: "test" };
+// The route's lease stamp (routes/impulses.ts leaseCallerStamp) says admin only for a key identity answered with the
+// "admin" scope. KEY_A and KEY_B are ordinary read+write keys.
+const KEY_RW = { auth: "authenticated:key_id:dddddd444444", remote: "test", admin: false };
+const KEY_ADMIN = { auth: "authenticated:key_id:cccccc333333", remote: "test", admin: true };
 
 // The clock and the bound's tuning read, injected where the module offers them (no network).
 let clock = Date.now();
@@ -38,10 +42,11 @@ const status = async (name: string): Promise<Body> => (await mod.resolveMaintena
 describe("maintenanceLease_write: the holder is the credential", () => {
   it("a body-supplied holder does not become the holder of a stamped call", async () => {
     const r = await write({ op: "acquire", name: "ops_window_a", holder: "cutover:goal-host-vessel", _route_caller: KEY_A });
+    const held = (await status("ops_window_a"))["holder"];
+    await write({ op: "release", name: "ops_window_a", token: r.body["token"], _route_caller: KEY_A }); // before asserting: a left hold blocks the unnamed acquires below
     expect(r.body["acquired"]).toBe(true);
     expect(r.body["holder"]).toBe("key_id:aaaaaa");
-    expect((await status("ops_window_a"))["holder"]).toBe("key_id:aaaaaa");
-    await write({ op: "release", name: "ops_window_a", token: r.body["token"], _route_caller: KEY_A });
+    expect(held).toBe("key_id:aaaaaa");
   });
 
   it("knowing a hold's holder name does not take it over: another key naming it is refused and gets no token", async () => {
@@ -81,10 +86,29 @@ describe("maintenanceLease_write: system leases are node-self's", () => {
     expect(held).toBe(true);
   });
 
-  it("a key cannot take the unnamed global hold, which excludes every name", async () => {
-    const r = await write({ op: "acquire", holder: "manual-db-work", _route_caller: KEY_A });
+  it("a read+write key that is not admin cannot take the unnamed global hold, which excludes every name", async () => {
+    const r = await write({ op: "acquire", holder: "manual-db-work", _route_caller: KEY_RW });
     if (r.body["token"]) await write({ op: "release", token: r.body["token"] });
+    expect(r.body["error"]).toBe("global_lease_requires_node_self_or_admin");
+  });
+
+  it("an admin key is still refused a named system lease", async () => {
+    const r = await write({ op: "acquire", name: "change_window", holder: "manual-db-work", _route_caller: KEY_ADMIN });
+    if (r.body["token"]) await write({ op: "release", name: "change_window", token: r.body["token"] });
     expect(r.body["error"]).toBe("system_lease_requires_node_self");
+  });
+});
+
+describe("maintenanceLease_write: an operator's hold is recorded as the operator's", () => {
+  it("an admin key's unnamed global hold records principal_kind key and its key_id prefix, not a system act", async () => {
+    const own = await write({ op: "acquire", holder: "manual-db-work", ttl_ms: 600_000, _route_caller: KEY_ADMIN });
+    let file: Record<string, unknown> = {};
+    try { file = JSON.parse(readFileSync(join(dir, "maintenance.json"), "utf-8")) as Record<string, unknown>; } catch { /* no hold written */ }
+    if (own.body["token"]) await write({ op: "release", token: own.body["token"], _route_caller: KEY_ADMIN });
+    expect(own.body["acquired"]).toBe(true);
+    expect(file["principal_kind"]).toBe("key");
+    expect(file["key_id"]).toBe("cccccc");
+    expect(file["holder"]).toBe("key_id:cccccc");
   });
 });
 
@@ -160,6 +184,14 @@ describe("maintenanceLease_write: controls", () => {
     expect((await status("trace_store"))["held"]).toBe(true);
     expect((await write({ op: "release", name: "trace_store", token: own.body["token"], _route_caller: NODE })).body["released"]).toBe(true);
     expect((await status("trace_store"))["held"]).toBe(false);
+  });
+
+  it("an admin key takes and releases the unnamed global hold", async () => {
+    const own = await write({ op: "acquire", holder: "manual-db-work", ttl_ms: 600_000, _route_caller: KEY_ADMIN });
+    expect(own.body["acquired"]).toBe(true);
+    expect((await mod.resolveMaintenanceLease({ type: "maintenanceLease" })).body["held"]).toBe(true);
+    expect((await write({ op: "release", token: own.body["token"], _route_caller: KEY_ADMIN })).body["released"]).toBe(true);
+    expect((await mod.resolveMaintenanceLease({ type: "maintenanceLease" })).body["held"]).toBe(false);
   });
 
   it("an authenticated key takes, renews and releases a non-system lease, and another key is refused it meanwhile", async () => {

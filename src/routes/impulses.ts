@@ -1127,15 +1127,25 @@ export const impulsesRouter = new Hono();
  * Returns the refusal response, or null when the call may proceed.
  */
 /** The caller stamp on a maintenanceLease_write (resolvers/maintenance-lease.ts): the gap-write stamp's identity and
- *  remote, plus `admin`, true only when the credential this route's write gate validated is a key identity answered
- *  with the "admin" scope (CallerCredential.scopes, from identity-vessel's /v1/auth/resolve data.scopes), never
- *  node-self. The whole stamp is overwritten, so a client cannot carry one in. */
-function leaseCallerStamp(c: Context, cred: CallerCredential | null): Record<string, unknown> {
+ *  remote, plus `admin`, which admits a key to the unnamed global hold. ADMIN IS ASKED FRESH: revocation must bite at
+ *  once on a coordination primitive, so `admin` is true only when identity-vessel, asked again with cache:false (as
+ *  pool-impulse's trust-root check asks), answers this request's key authenticated with the "admin" scope
+ *  (CallerCredential.scopes, from /v1/auth/resolve data.scopes), never node-self. Identity is asked only for an
+ *  unnamed write by a key whose validated credential already carries the scope; every other write is admin:false
+ *  without a call, and the write gate's own cached validation is unchanged. The whole stamp is overwritten, so a
+ *  client cannot carry one in. */
+async function leaseCallerStamp(c: Context, cred: CallerCredential | null, pointer: unknown): Promise<Record<string, unknown>> {
   const nodeSelf = isNodeSelfCredential(cred);
+  const unnamed = !(pointer as { name?: unknown } | null)?.name;
+  let admin = false;
+  if (unnamed && cred?.authenticated === true && !nodeSelf && Array.isArray(cred.scopes) && cred.scopes.includes(ADMIN_SCOPE)) {
+    const fresh = await identityCredential(c.req.header("Authorization"), { cache: false });
+    admin = fresh.authenticated === true && !isNodeSelfCredential(fresh) && fresh.scopes.includes(ADMIN_SCOPE);
+  }
   return {
     auth: callerAuthLabel(cred ? { authenticated: cred.authenticated, node_self: nodeSelf, key_id: cred.keyId, scopes: cred.scopes } : undefined),
     remote: routeRemote(c),
-    admin: cred?.authenticated === true && !nodeSelf && Array.isArray(cred.scopes) && cred.scopes.includes(ADMIN_SCOPE),
+    admin,
   };
 }
 
@@ -1245,7 +1255,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
     const pointer = { ...(body.config ?? {}), type: resolverName };
     // A lease's holder is the principal this gate validated (maintenance-lease.ts): stamped here as on the resolve
     // route, overwriting any _route_caller the config carried.
-    if (resolverName === "maintenanceLease_write") (pointer as Record<string, unknown>)["_route_caller"] = leaseCallerStamp(c, writeCred);
+    if (resolverName === "maintenanceLease_write") (pointer as Record<string, unknown>)["_route_caller"] = await leaseCallerStamp(c, writeCred, pointer);
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
@@ -1340,7 +1350,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   }
   // A maintenanceLease_write is stamped the same way, plus whether the credential is admin: its holder is this
   // principal, never the body's (maintenance-lease.ts).
-  if (pointerType === "maintenanceLease_write" && pointer && typeof pointer === "object") (pointer as Record<string, unknown>)["_route_caller"] = leaseCallerStamp(c, writeCred);
+  if (pointerType === "maintenanceLease_write" && pointer && typeof pointer === "object") (pointer as Record<string, unknown>)["_route_caller"] = await leaseCallerStamp(c, writeCred, pointer);
 
   // OPERATOR-DIRECTED (lib/operator-direct.ts): a feature_compose carrying the operator's own credential in
   // X-Operator-Authorization runs under a grant when identity says that key has "operator:direct" (or "admin");

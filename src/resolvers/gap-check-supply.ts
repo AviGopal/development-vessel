@@ -52,10 +52,12 @@
  * peer as dispatch_node (placed_by this node); unread here, it settles by arming or, unsettled, by dispatch_timeout_hours.
  *
  * CADENCE IS A RHYTHM (law 5). The family's timeShapedRhythm impulse is read at use time: no rhythm means no
- * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no work, and
- * the per-tick bound, backoff and attempt cap come from the same impulse's body. The rhythm conductor fires the
- * family through FAMILY_RESOLVERS and leaves it PENDING; this resolver settles its family from its REPORT when it
- * completes (checkSupplySettlementLeg), whichever entry ran it, so no exit is ever credited as success.
+ * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no DISPATCH (the
+ * bookkeeping, ARM, OUTCOME, the own-check un-arm and the hold release, runs on every pass, at most once per shaped
+ * bookkeeping_min_interval_s when undue), and the per-tick bound, backoff and attempt cap come from the same impulse's
+ * body. The rhythm conductor fires the family through FAMILY_RESOLVERS and leaves it PENDING; this resolver settles
+ * its family from its REPORT when it completes (checkSupplySettlementLeg), whichever entry ran it, so no exit is ever
+ * credited as success.
  *
  * MEASURES (counters on the report, not traces): of the armed gaps whose check was born in the window, the
  * share whose check the system wrote (predicate_source gap_check_supply), and of those the share verified red
@@ -149,6 +151,9 @@ export interface GapCheckSupplyTickPointer {
   now_ms?: number;
   /** Carried by the conductor's FAMILY_RESOLVERS entry ("report"): this resolver settles its family by its report. */
   settled_by?: string;
+  /** Carried by the conductor's FAMILY_BOOKKEEPING entry: the bookkeeping steps only (arm, outcome, un-arm, hold
+   *  release), never a dispatch, whatever the rhythm's due-ness. */
+  bookkeeping_only?: boolean;
   dry_run?: boolean;
 }
 
@@ -771,7 +776,24 @@ async function localizeForSupply(row: Row, vessel: string, site: string | null):
   return { file: loc.file, method: loc.method, evidence: [{ read: loc.method, why: loc.description }] };
 }
 
+// ONE PASS AT A TIME IN THIS PROCESS, AND AN UNDUE PASS AT MOST ONCE PER bookkeeping_min_interval_s. The conductor
+// asks for the bookkeeping on every pass (a heartbeat drives it about twice a minute), and two overlapping passes
+// would read the same settled_attempts and debit one attempt twice. Kept in process memory, never on the rhythm row:
+// any write there resets the age its due score is measured from.
+let passInFlight = false;
+let lastBookkeepingAt: number | null = null;
+
 export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPointer): Promise<ResolverResult> {
+  if (passInFlight) return { shape: "gapCheckSupplyReport", body: { fired: false, reason: "in_progress", family: CHECK_SUPPLY_FAMILY } };
+  passInFlight = true;
+  try {
+    return await supplyPass(pointer);
+  } finally {
+    passInFlight = false;
+  }
+}
+
+async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverResult> {
   const now = typeof pointer.now_ms === "number" ? pointer.now_ms : Date.now();
   const nowIso = new Date(now).toISOString();
 
@@ -781,9 +803,20 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   if (!rhythm) return { shape: "gapCheckSupplyReport", body: { fired: false, reason: "no_rhythm", family: CHECK_SUPPLY_FAMILY } };
   const due = rhythmDueScore(rhythm.body, rhythm.updated_at, now);
   const threshold = posNum(rhythm.body["due_threshold"], 1);
-  if (due.due_score < threshold) {
-    return { shape: "gapCheckSupplyReport", body: { fired: false, reason: "not_due", due_score: due.due_score, due_threshold: threshold } };
+  // THE RHYTHM PACES THE DISPATCH, NOT THE BOOKKEEPING. Gated as a whole, an undue family read back no outcome, armed
+  // no landed check and un-armed nothing until it came due again, so a family whose posterior sank under debits held a
+  // failed goal at goal_dispatched for 18 to 50 hours, and the repair its outcome should have triggered waited with it. So ARM, OUTCOME, the
+  // own-check un-arm and the hold release run on every pass; DISPATCH, localization and placement only when due. An
+  // undue pass is not a fire: no credit, no staleness answered (a debit is still written, as the beta leg it is).
+  // A PAUSED family does nothing at all, as before: the pause is a hold, and the arm step writes checks and runs suites.
+  const dispatchDue = pointer.bookkeeping_only !== true && due.due_score >= threshold;
+  const notDue = { fired: false, reason: "not_due", due_score: due.due_score, due_threshold: threshold };
+  if (due.paused_by) return { shape: "gapCheckSupplyReport", body: { ...notDue, paused_by: due.paused_by } };
+  const floorMs = posNum(rhythm.body["bookkeeping_min_interval_s"], 600) * 1000;
+  if (!dispatchDue && lastBookkeepingAt !== null && now >= lastBookkeepingAt && now - lastBookkeepingAt < floorMs) {
+    return { shape: "gapCheckSupplyReport", body: { ...notDue, bookkeeping: `skipped: the last pass was ${Math.round((now - lastBookkeepingAt) / 1000)} s ago (floor ${floorMs / 1000} s)` } };
   }
+  lastBookkeepingAt = now;
   const perTick = Math.floor(posNum(rhythm.body["max_per_tick"], 1));
   const backoffMs = posNum(rhythm.body["backoff_hours"], 24) * 3600_000;
   const maxAttempts = Math.floor(posNum(rhythm.body["max_attempts"], 3));
@@ -807,6 +840,13 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const localNode = checkSupplyNode();
 
   const read = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
+  // AN UNREADABLE STORE IS NOT AN EMPTY ONE. On a node that forwards its gap store, a holder that did not answer read as
+  // zero rows, and the pass would say "0 due": a pass marker for a pass that read nothing. Said by its own line instead.
+  if (read.shape !== "substrateGap") {
+    const detail = String(((read.body ?? {}) as Row)["detail"] ?? "").slice(0, 200);
+    console.log(`[check-supply] bookkeeping: store_unreadable dispatch=${dispatchDue ? "due" : "undue"} node=${localNode} (${detail})`);
+    return { shape: "gapCheckSupplyReport", body: { ...notDue, reason: "store_unreadable", dispatch: dispatchDue ? "due" : "undue", detail } };
+  }
   const rows = (((read.body ?? {}) as { gaps?: Row[] }).gaps ?? []).filter((r) => typeof r["id"] === "string");
   const open = rows.filter((r) => String(r["status"] ?? "open") === "open");
   const touched = new Set<string>();
@@ -1009,6 +1049,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // The same tick's dispatch step sees the settled ledger (a due retry may be sent now).
     (meta as Row)["check_supply"] = next;
   }
+  const outcomesSettled = outcomes.failed.length + outcomes.lost.length + outcomes.not_attempts.length;
 
   // AN ARMED ROW WHOSE EDIT SITE IS ITS OWN CHECK IS UN-ARMED (gap-eligibility editSiteIsOwnCheck). No pick or compose
   // takes it (edit_site_is_own_check), but a row nothing else writes would stay labelled class2; this write lets the
@@ -1025,6 +1066,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   }
 
   // A row marked needs_localization that something else has since armed: release the hold.
+  let released = 0;
   for (const row of open) {
     const meta = metaOf(row);
     if (meta["disposition"] !== CHECK_SUPPLY_DISPOSITION || touched.has(String(row["id"]))) continue;
@@ -1032,8 +1074,40 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // A check not yet measured present (a handed-off one still pending at the holder) has not armed the row.
     if ((cls === "class1" || cls === "class2") && predicateSuspect(meta) === null && !pointer.dry_run) {
       touched.add(String(row["id"]));
+      released += 1;
       await writeMeta(row, { disposition: "" });
     }
+  }
+  const keep = Math.floor(posNum(rhythm.body["settled_attempts_kept"], 200));
+  const settledKeys = (): Row => (settledNow.length > 0 ? { settled_attempts: [...settledAttemptsOf(rhythm.body), ...settledNow].slice(-keep) } : {});
+  const bookkeepingLine = (dispatch: "due" | "undue"): void => {
+    const counts = `armed=${armed.length} outcomes=${outcomesSettled} unarmed=${unarmedOwnCheck.length} released=${released}`;
+    // THE PASS MARKER: exactly one per pass that ran (a floored, in-progress, paused or rhythm-less call logs none).
+    console.log(`[check-supply] bookkeeping: ${armed.length + outcomesSettled + unarmedOwnCheck.length + released === 0 ? "0 due " : ""}${counts} waiting=${outcomes.waiting.length} dispatch=${dispatch} node=${localNode}`);
+  };
+  if (!dispatchDue) {
+    // NOT DUE: the bookkeeping is the whole pass. Its debits (a refused check, a failed or lost goal, once per attempt
+    // by settled_attempts) are written as today's beta leg, which persists the accrued staleness, so the family's due
+    // clock moves only by the debit itself; an arm earns no credit here (credit and staleness are answered by a fire).
+    const leg = refused > 0 ? "beta" : null;
+    if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys());
+    bookkeepingLine("undue");
+    return {
+      shape: "gapCheckSupplyReport",
+      body: {
+        ...notDue,
+        dispatch: "undue",
+        settlement: leg ?? "none",
+        armed,
+        not_armed: notArmed,
+        refused,
+        ...(resettled.length ? { resettled } : {}),
+        ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
+        released,
+        outcomes,
+        dry_run: pointer.dry_run === true,
+      },
+    };
   }
 
   // 3. DISPATCH: one test-writing goal per treatment-arm needs-localization gap, fewest attempts and oldest first.
@@ -1237,9 +1311,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
 
   // A localized gap is work done this tick (I1), graded as a dispatch is.
   const leg = checkSupplySettlementLeg({ dispatched: dispatched.length + localized.length, armed: armed.length, refused });
-  const keep = Math.floor(posNum(rhythm.body["settled_attempts_kept"], 200));
-  const settledKeys = settledNow.length > 0 ? { settled_attempts: [...settledAttemptsOf(rhythm.body), ...settledNow].slice(-keep) } : {};
-  if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys);
+  if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys());
+  bookkeepingLine("due");
 
   const after = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
   const afterRows = ((after.body ?? {}) as { gaps?: Row[] }).gaps ?? [];

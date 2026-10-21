@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { resolveGapToScenarioBridge } from "../../src/resolvers/gap-to-scenario-bridge.js";
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from "fs";
 import { tmpdir } from "os";
@@ -21,9 +21,28 @@ afterAll(() => {
   rmSync(testRoot, { recursive: true, force: true });
 });
 
+// NO LIVE DISPATCH. A vessel-authoring gap makes the resolver POST `${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`; unstubbed,
+// every run of this file sent a real scaffold dispatch to whatever goal-host the env named (the live one, by default).
+// fetch is stubbed for every test and restored after it, and the vessel-authoring tests assert on the request it would
+// have sent instead.
+type SentRequest = { url: string; method: string; body: Record<string, unknown> };
+let sent: SentRequest[] = [];
+let realFetch: typeof fetch = globalThis.fetch;
+
 describe("gap_to_scenario_bridge resolver", () => {
   beforeEach(() => {
     seed([]);
+    sent = [];
+    realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      sent.push({ url, method: String(init?.method ?? "GET"), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
   });
 
   it("writes scenarios for open operator_seed + substrate_detected gaps", async () => {
@@ -101,6 +120,8 @@ describe("gap_to_scenario_bridge resolver", () => {
     const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
     const body = r.body as { scenarios: Array<{ gap_id: string }> };
     expect(body.scenarios.map((s) => s.gap_id)).toEqual(["open-ok"]);
+    // CONTROL: no vessel-authoring gap, no dispatch
+    expect(sent).toHaveLength(0);
   });
 
   it("honors limit", async () => {
@@ -196,6 +217,15 @@ describe("gap_to_scenario_bridge resolver", () => {
     const drift = JSON.parse(readFileSync(join(scenariosDir, "drift-1.json"), "utf-8"));
     expect(drift.routing_class).toBe("recombination");
     expect(drift.target_template_id).toBe("development-vessel:draft-gap-closing-activity");
+
+    // the one dispatch it would send: the capability gap's scaffold goal, to goal-host's /run-goal (stubbed, never sent)
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toEndWith("/run-goal");
+    expect(sent[0]!.method).toBe("POST");
+    expect(sent[0]!.body).toEqual({
+      targetTemplateId: "development-vessel:scaffold-and-publish-vessel",
+      variables: { scenario_id: capId, capability_shape: "conceptGraph" },
+    });
   });
 
   it("is idempotent for vessel-authoring gaps too", async () => {
@@ -214,6 +244,8 @@ describe("gap_to_scenario_bridge resolver", () => {
     const body = second.body as { vessel_authoring_scenarios_written: number; gaps_skipped_existing: number };
     expect(body.vessel_authoring_scenarios_written).toBe(0);
     expect(body.gaps_skipped_existing).toBe(1);
+    // dispatched once, on the first run only (the second skips the existing scenario)
+    expect(sent.map((r) => (r.body["variables"] as Record<string, unknown>)["capability_shape"])).toEqual(["foo"]);
   });
 
   it("returns empty result when gaps file is missing", async () => {

@@ -20,6 +20,19 @@
  * Constitutional principle (concept_9ldsmRgqSTd5): every observed bug class is
  * an opportunity to author a detection. Here the bug class is "we have no
  * detector for this bug class."
+ *
+ * EVERY ROW CARRIES THE READING IT WAS FILED ON (classification_metadata.detector_reading,
+ * the form substrate-gap.ts detectorReadingCheck reads). A filed row names no check, no
+ * edit site and no file, so without it the row is born unarmable. The reading is this
+ * resolver re-read under the row's own scope: input.gap_class limits the answer to that one
+ * class, the window/limit/recurrence/threshold are the ones the filing run used, and
+ * emit_gap is false because the judge resolves the check live and a check must never file.
+ * Its field, uncovered_clusters, is 1 at filing and 0 once something other than the row
+ * itself cites the class's traces (or it stops recurring), so the core arms it as a
+ * zero_field. A scoped read does not count the row's own failure_examples as coverage: the
+ * filing cites the traces it found, and counting that would read the class covered the moment
+ * it was filed. A run that could not read the trace store says measured:false, which the
+ * judge reads as unknown, so an outage never reads as the defect gone.
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
@@ -39,6 +52,32 @@ export interface DetectorCoverageScanPointer {
   emit_gap?: boolean;
   metabobEndpoint?: string;
   devVesselImpulsesUrl?: string;
+  /** Scope the answer to one problem class (a row's gap_class): the row's own re-read. */
+  gap_class?: string;
+}
+
+/** The id of the row this scan files for a class: one row per class. */
+function coverageGapId(gapClass: string): string {
+  return `detector-coverage-gap-${gapClass}`;
+}
+
+/** The parameters a filing run used: the input its rows' readings re-read the scan with. */
+export interface ScanParams {
+  window_hours: number;
+  trace_limit: number;
+  min_recurrence: number;
+  coverage_threshold: number;
+}
+
+/** The reading a row is filed on (substrate-gap.ts detectorReadingCheck): this scan, scoped to the row's class, with
+ *  the filing run's parameters and emit_gap false; uncovered_clusters is 1 when the class is filed. */
+export function uncoveredClassReading(gapClass: string, params: ScanParams): Record<string, unknown> {
+  return {
+    shape: "detector_coverage_scan",
+    input: { gap_class: gapClass, ...params, emit_gap: false },
+    field: "uncovered_clusters",
+    value: 1,
+  };
 }
 
 interface ExecutionTrace {
@@ -97,7 +136,7 @@ interface CoverageStats {
  *  clusters already have a detector watching them) AND the detection-coverage
  *  metric (§9.4): how many detector_coverage_gaps are open vs closed — the
  *  autonomous-closure signal for the detector-authoring recursion. */
-async function fetchCoverageStats(emitUrl: string, apiKey: string): Promise<CoverageStats> {
+async function fetchCoverageStats(emitUrl: string, apiKey: string, ownRowId: string | null = null): Promise<CoverageStats> {
   const stats: CoverageStats = { cited: new Set(), detector_coverage_gaps_open: 0, detector_coverage_gaps_closed: 0 };
   const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
@@ -108,10 +147,11 @@ async function fetchCoverageStats(emitUrl: string, apiKey: string): Promise<Cove
       signal: AbortSignal.timeout(10_000),
     });
     if (!r.ok) return stats;
-    const j = await r.json() as { body?: { gaps?: Array<{ category?: string; status?: string; classification_metadata?: Record<string, unknown> }> } };
+    const j = await r.json() as { body?: { gaps?: Array<{ id?: string; category?: string; status?: string; classification_metadata?: Record<string, unknown> }> } };
     for (const g of j.body?.gaps ?? []) {
       const m = g.classification_metadata ?? {};
-      for (const key of ["failure_examples", "exemplar_trace_ids", "trace_ids", "examples"]) {
+      // a scoped re-read: the row's own failure_examples are its filing, not a detector covering the class
+      if (!(ownRowId !== null && g.id === ownRowId)) for (const key of ["failure_examples", "exemplar_trace_ids", "trace_ids", "examples"]) {
         const v = m[key];
         if (Array.isArray(v)) for (const id of v) if (typeof id === "string") stats.cited.add(id);
       }
@@ -140,13 +180,14 @@ async function fetchAuthoredDetectorCount(endpoint: string, apiKey: string): Pro
   } catch { return 0; }
 }
 
-async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, minRecurrence: number): Promise<boolean> {
+async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, params: ScanParams): Promise<boolean> {
+  const minRecurrence = params.min_recurrence;
   const body = {
     impulse: {
       pointer: {
         type: "substrateGap_write",
         gap: {
-          id: `detector-coverage-gap-${c.gap_class}`,
+          id: coverageGapId(c.gap_class),
           category: "detector_coverage_gap",
           source: "substrate_detected",
           summary: `Recurring problem class "${c.gap_class}" observed ${c.count}× (${c.cited_count} cited by existing detectors) — no detector covers it. Author detect-${c.gap_class}.`,
@@ -185,6 +226,7 @@ async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, minRe
             failure_examples: c.trace_ids.slice(0, 8),
             evidence_snippets: c.example_reasons.slice(0, 3),
             suggested_remediation: "Dispatch draft-detector-activity against this gap to author detect-" + c.gap_class + " (binds signature_cluster_scan to target_signature).",
+            detector_reading: uncoveredClassReading(c.gap_class, params),
           },
         },
       },
@@ -206,16 +248,20 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
   const coverageThreshold = pointer.coverage_threshold ?? 0.2;
   const emit = pointer.emit_gap !== false;
   const apiKey = process.env["METABOB_API_KEY"] ?? METABOB_API_KEY;
+  const scope = typeof pointer.gap_class === "string" && pointer.gap_class.trim() !== "" ? pointer.gap_class.trim() : null;
+  const params: ScanParams = { window_hours: windowHours, trace_limit: traceLimit, min_recurrence: minRecurrence, coverage_threshold: coverageThreshold };
 
   // The key goes only to the configured activity-api (lib/self-auth.ts), never to an overridden endpoint.
   const headers: Record<string, string> = selfAuthHeaders(endpoint, METABOB_ENDPOINT);
   let traces: ExecutionTrace[] = [];
+  // A read that failed is not a read of zero failures: reported as measured:false.
+  let tracesRead = false;
   try {
     const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, { headers, signal: AbortSignal.timeout(20_000) });
-    if (r.ok) { const j = await r.json() as { executions?: ExecutionTrace[] }; traces = j.executions ?? []; }
+    if (r.ok) { const j = await r.json() as { executions?: ExecutionTrace[] }; traces = j.executions ?? []; tracesRead = true; }
   } catch { /* tolerant */ }
 
-  const coverageStats = await fetchCoverageStats(emitUrl, apiKey);
+  const coverageStats = await fetchCoverageStats(emitUrl, apiKey, scope !== null ? coverageGapId(scope) : null);
   const cited = coverageStats.cited;
   const authoredDetectorCount = await fetchAuthoredDetectorCount(endpoint, selfAuthKey(endpoint, METABOB_ENDPOINT));
 
@@ -243,17 +289,19 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
     if (reason && g.example_reasons.length < 5 && !g.example_reasons.includes(reason)) g.example_reasons.push(reason);
   }
 
-  const clusters = Array.from(groups.values());
+  const clusters = Array.from(groups.values()).filter((c) => scope === null || c.gap_class === scope);
   const uncovered = clusters
     .filter((c) => c.count >= minRecurrence && (c.cited_count / Math.max(1, c.count)) < coverageThreshold)
     .sort((a, b) => b.count - a.count);
 
   let gaps_emitted = 0;
-  if (emit) for (const c of uncovered) { if (await emitGap(emitUrl, apiKey, c, minRecurrence)) gaps_emitted += 1; }
+  if (emit) for (const c of uncovered) { if (await emitGap(emitUrl, apiKey, c, params)) gaps_emitted += 1; }
 
   return {
     shape: "detectorCoverageReport",
     body: {
+      measured: tracesRead,
+      ...(scope !== null ? { gap_class: scope } : {}),
       window_hours: windowHours,
       traces_examined: traces.length,
       failures_examined: failures.length,

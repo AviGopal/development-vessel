@@ -97,9 +97,12 @@ describe("testChildEnv: learned state resolves under the scratch root", () => {
     const names = await derivedNames();
     // every key the child gets is the passthrough, the fixed pair, the root, or a derived redirect, whose credential-
     // shaped names (after their _PATH/_DIR suffix) are only the signing-key PATH, a scratch path here
-    for (const k of Object.keys(env)) expect(["HOME", "PATH", "NODE_ENV", "TZ", "WORKSPACE_ROOT", ...names]).toContain(k);
+    // (and the endpoint names, each the fixed discard address, never a parent value: test-child-env-endpoints.test.ts)
+    const endpoints = (h!["endpointNames"] as (() => string[]) | undefined)?.() ?? [];
+    for (const k of endpoints) expect(env[k], k).toBe(h!["TEST_CHILD_DISCARD_ENDPOINT"] as string);
+    for (const k of Object.keys(env)) expect(["HOME", "PATH", "NODE_ENV", "TZ", "WORKSPACE_ROOT", ...names, ...endpoints]).toContain(k);
     const base = ["HOME", "PATH", "NODE_ENV", "TZ", "WORKSPACE_ROOT"]; // pinned above / in the protected allowlist test
-    const shaped = Object.keys(env).filter((k) => !base.includes(k) && CREDENTIAL_SHAPED.test(k.replace(/_(PATH|DIR)$/, "")));
+    const shaped = Object.keys(env).filter((k) => !base.includes(k) && !endpoints.includes(k) && CREDENTIAL_SHAPED.test(k.replace(/_(PATH|DIR)$/, "")));
     expect(shaped.filter((k) => k !== "VESSEL_IDENTITY_KEY_PATH")).toEqual([]);
     if (env["VESSEL_IDENTITY_KEY_PATH"]) expect(under(env["VESSEL_IDENTITY_KEY_PATH"], root)).toBe(true);
   });

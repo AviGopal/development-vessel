@@ -35,8 +35,23 @@ const LEARNED_STATE_NAMES = [
   "OBSIDIAN_RENDER_BOARD", "PARKED_LANDINGS_DIR", "PROPOSALS_DIR", "PUSH_POLICY_PATH", "QUIESCE_DIR", "QUIESCE_MARKER",
   "RESTART_BREADCRUMB_DIR", "SUBSTRATE_HEARTBEAT_PATH", "SUBSTRATE_RUN_DIR", "VESSELS_INVENTORY", "VESSEL_IDENTITY_KEY_PATH",
 ];
+/** The endpoint names a scrubbed child carries (2026-10-21), each FIXED to the discard address, never the parent's value:
+ *  pull-sync's scrubbed-env fleet list plus every name src reads with a URL default. Pinned literally AND checked equal to
+ *  the helper's list, so a new URL default in src reddens this protected file on purpose. */
+const ENDPOINT_NAMES = [
+  "ACTIVITY_API_ENDPOINT", "ACTIVITY_API_URL", "CONCEPT_DB_CLUSTER_ENDPOINT", "CONCEPT_DB_EMBED_ENDPOINT", "CONCEPT_DB_ENDPOINT",
+  "CONCEPT_DB_URL", "DEVELOPMENT_VESSEL_ENDPOINT", "DEV_VESSEL_ENDPOINT", "DEV_VESSEL_IMPULSES_URL", "DEV_VESSEL_SELF_ENDPOINT",
+  "DISCOVERY_ENDPOINT", "DISCOVERY_VESSEL_ENDPOINT", "EVENT_BUS_ENDPOINT", "FEATURE_COMPOSE_ENDPOINT", "FED_TRANSPORT_EGRESS",
+  "GAP_STORE_ENDPOINT", "GOAL_HOST_ENDPOINT", "GOAL_HOST_VESSEL_ENDPOINT", "HUMAN_SURFACE_ENDPOINT", "IDENTITY_VESSEL_URL",
+  "LIGHT_DISPATCH_ENDPOINT", "LIGHT_DISPATCH_URL", "LIGHT_DISPATCH_VESSEL_ENDPOINT", "LLM_RESOLVER_VESSEL_ENDPOINT",
+  "LLM_ROUTER_API_ENDPOINT", "LLM_TOOL_DISPATCH_ENDPOINT", "LLM_VESSEL_ENDPOINT", "METABOB_ENDPOINT", "OBSIDIAN_ENDPOINT",
+  "OBSIDIAN_LEARN_ENDPOINT", "OBSIDIAN_PLUGIN_ENDPOINT", "OBSIDIAN_PROBE_ENDPOINT", "PEER_DISCOVERY_ENDPOINT",
+  "PRODUCER_DISCOVERY_ENDPOINT", "RELEVANCE_SINK_ENDPOINT", "SELF_ENDPOINT", "SELF_RESOLVE_ENDPOINT", "STATEFUL_UI_VESSEL_ENDPOINT",
+  "SUBSTRATE_API_URL", "SURREALDB_URL", "TEST_API_URL", "TRANSPORT_VESSEL_ENDPOINT", "TUNING_PARAM_ENDPOINT",
+];
+const DISCARD_ENDPOINT = "http://127.0.0.1:9";
 /** The ONLY keys a scrubbed child env may carry. */
-const ALLOWED_KEYS = ["HOME", "NODE_ENV", "PATH", "TZ", "WORKSPACE_ROOT", ...LEARNED_STATE_NAMES];
+const ALLOWED_KEYS = ["HOME", "NODE_ENV", "PATH", "TZ", "WORKSPACE_ROOT", ...LEARNED_STATE_NAMES, ...ENDPOINT_NAMES];
 /** A redirect name that looks like a credential once its path suffix is set aside (the qa ruling's shapes, plus JWT and
  *  COOKIE). `_PATH` is stripped because `PAT` is a substring of it. */
 const REDIRECT_CREDENTIAL_SHAPED = /KEY|TOKEN|SECRET|PASS|PAT|CRED|AUTH|JWT|COOKIE/i;
@@ -134,6 +149,22 @@ describe("test-child-env: the allowlist", () => {
     // without a scratch root no redirect is set (and none is inherited)
     const bare = helper!.testChildEnv(fx) as Record<string, string>;
     for (const n of derived) expect(bare[n]).toBeUndefined();
+  });
+
+  test("[MUST-FAIL] the endpoint names are exactly the helper's list, each the discard address in both renderers, none inherited", async () => {
+    const helper = await import(HELPER).catch(() => null);
+    expect(helper).not.toBeNull();
+    expect(typeof helper!.endpointNames).toBe("function");
+    expect([...(helper!.endpointNames() as string[])].sort()).toEqual([...ENDPOINT_NAMES].sort());
+    expect(helper!.TEST_CHILD_DISCARD_ENDPOINT).toBe(DISCARD_ENDPOINT);
+    const fx: Record<string, string> = { ...credentialFixture("/home/fixture") };
+    for (const n of ENDPOINT_NAMES) fx[n] = `http://${FAKE}.invalid:8210`;
+    for (const env of [helper!.testChildEnv(fx), helper!.testChildEnv(fx, { workspaceRoot: mkScratch("ep-ws") })] as Array<Record<string, string>>) {
+      for (const n of ENDPOINT_NAMES) expect(env[n], n).toBe(DISCARD_ENDPOINT);
+      expect(JSON.stringify(env)).not.toContain(FAKE);
+    }
+    const prefix = helper!.testChildEnvShellPrefix() as string;
+    for (const n of ENDPOINT_NAMES) expect(prefix).toContain(` ${n}=${DISCARD_ENDPOINT} `);
   });
 
   test("[MUST-FAIL] the exported allowlist is exactly PATH+HOME passthrough and NODE_ENV=test, TZ=UTC fixed; no name is credential-shaped", async () => {

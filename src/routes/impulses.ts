@@ -1225,10 +1225,16 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
     return c.json({ error: "resolver field is required" }, 400);
   }
 
-  { const { refused } = await refuseUnauthenticatedWrite(c, String(resolverName)); if (refused) return refused; }
+  const { refused, cred: writeCred } = await refuseUnauthenticatedWrite(c, String(resolverName));
+  if (refused) return refused;
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
+    // A lease's holder is the principal this gate validated (maintenance-lease.ts): stamped here as on the resolve
+    // route, overwriting any _route_caller the config carried.
+    if (resolverName === "maintenanceLease_write") {
+      (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
+    }
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
@@ -1318,7 +1324,8 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   // digest or prefix): only the identity that validated the request (callerAuthLabel): the write gate's
   // credential above, named by its key id when identity's answer carries one, else by its scopes. Plus the
   // remote address the server wrapper stamped from the socket (x-dv-remote-addr), or the socket's own.
-  if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
+  // A maintenanceLease_write is stamped the same way: its holder is this principal, never the body's (maintenance-lease.ts).
+  if ((pointerType === "substrateGap_write" || pointerType === "maintenanceLease_write") && pointer && typeof pointer === "object") {
     (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
   }
 

@@ -564,41 +564,31 @@ type Json = Record<string, unknown>;
 // Removed rather than satisfied at the call site: a parameter no code reads is
 // not a flag, and leaving it would keep a landmine for the next caller.
 //
-// THE NODE KEY GOES ONLY TO THIS NODE'S OWN ARMS (self-auth.ts crossNodeKeyHeaders, "same-host peers only").
-// The endpoint list is discovery's: local arms, overlay rows routed through the federation egress, and the trailing
-// target-pinned egress URLs to arms on PEER substrates (federated-llm-egress.ts). Every one of them used to get the node
-// key. An egress URL is this node's own transport on loopback, but it carries the request to another substrate, which
-// validates against its own identity, not ours. So:
-//   - an overlay hop is still called, WITHOUT the key. /egress/resolve accepts a request with no Authorization and the
-//     transport never substitutes its own key for a missing one, so the hub spill keeps working where the far side asks
-//     for no credential of ours. One line names the hop (its vessel and substrate, never the target address);
-//   - any other endpoint goes through crossNodeKeyHeaders: this machine gets the key; anywhere else is called WITHOUT it
-//     (crossNodeKeyHeaders logs its own names-only line). Its null means "no key" here, not "no call": an arm elsewhere
-//     answers or refuses on its own, and the failover moves on either way.
+// A DIRECT ARM ELSEWHERE GETS NO NODE KEY (self-auth.ts crossNodeKeyHeaders, "same-host peers only"; user ruling
+// "Narrow: direct off-host only (Recommended)", 2026-10-21T10:22:11Z).
+// The endpoint list is discovery's: local arms, overlay rows routed through the federation egress, the trailing
+// target-pinned egress URLs to arms on PEER substrates (federated-llm-egress.ts), and any plain HTTP row a registrant or
+// a federated peer wrote. Every one of them got the node key. So:
+//   - an overlay hop (overlayHopReason: the egress path, a target= hop, the egress port) keeps the key, as before. It is
+//     this node's own transport, and the transport hands a caller's key on only to a same-authority destination peer
+//     (fedIngressAuthPolicy same_authority_peers), decided per dial;
+//   - any other endpoint goes through crossNodeKeyHeaders: this machine gets the key; a direct arm anywhere else has no
+//     transport in front of it, so it is called WITHOUT the key (crossNodeKeyHeaders logs its own names-only line). Its
+//     null means "no key" here, not "no call": that arm answers or refuses on its own, and the failover moves on.
 // ONE VERDICT PER ENDPOINT PER PROCESS. The predicate's answer for a URL does not change while this process runs, but it can
 // cost a DNS lookup up to its budget for a name that does not resolve, and a compose makes several calls to the same
 // endpoints (plan, refine, judge, refuter, repairs). So the headers are worked out once per endpoint, and its line is
 // logged once. The key is no staler than before: llmCall sent the key config.ts froze at module load.
 const llmEndpointAuthMemo = new Map<string, Promise<Record<string, string>>>();
-function overlayHopName(endpoint: string): string {
-  try {
-    const u = new URL(endpoint);
-    const vessel = u.searchParams.get("vessel"), sub = u.searchParams.get("expect_substrate");
-    return (vessel ? (sub ? `${vessel}@${sub}` : vessel) : u.hostname).replace(/[^\w.@:-]/g, "?").slice(0, 120);
-  } catch { return "(unparseable url)"; }
-}
-/** The Authorization headers for an LLM endpoint: the node key on this machine, `{}` (called without it) anywhere else. */
+/** The Authorization headers for an LLM endpoint: the node key on this machine or through its own transport, `{}` (called
+ *  without it) for a direct arm anywhere else. */
 function llmEndpointAuth(endpoint: string): Promise<Record<string, string>> {
   let auth = llmEndpointAuthMemo.get(endpoint);
   if (!auth) { auth = llmEndpointAuthOnce(endpoint); llmEndpointAuthMemo.set(endpoint, auth); }
   return auth;
 }
 async function llmEndpointAuthOnce(endpoint: string): Promise<Record<string, string>> {
-  const overlay = overlayHopReason(endpoint);
-  if (overlay !== null) {
-    console.warn(`[cross-node-key] no key to overlay ${overlayHopName(endpoint)} (${overlay}); called without it`);
-    return {};
-  }
+  if (overlayHopReason(endpoint) !== null) return { Authorization: `ApiKey ${METABOB_API_KEY}` };
   return (await crossNodeKeyHeaders(endpoint)) ?? {};
 }
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {

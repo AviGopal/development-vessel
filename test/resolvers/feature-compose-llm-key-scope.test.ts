@@ -1,12 +1,15 @@
-// THE LLM FAILOVER SENDS THE NODE KEY ONLY TO THIS NODE'S OWN ARMS (self-auth.ts, "same-host peers only").
+// A DIRECT LLM ARM OFF THIS MACHINE GETS NO NODE KEY (self-auth.ts, "same-host peers only"; user ruling
+// "Narrow: direct off-host only (Recommended)", 2026-10-21T10:22:11Z).
 //
-// feature-compose's llmCall used to put `Authorization: ApiKey <node key>` on every endpoint of its failover list. That
-// list ends with target-pinned federation egress URLs (federated-llm-egress.ts) and carries overlay rows routed through
-// the same egress: this node's own transport on loopback, which carries the request on to ANOTHER substrate. Expected:
-//   - an overlay hop is still called, with no Authorization at all, and one line names it by vessel and substrate only;
-//   - a same-host endpoint keeps the key (the control);
-//   - an endpoint off this machine is called WITHOUT the key (it answers or refuses on its own), with one names-only line.
-// The verdict, and so its line, is worked out once per endpoint per process: each case below touches its stripped endpoint first.
+// feature-compose's llmCall used to put `Authorization: ApiKey <node key>` on every endpoint of its failover list,
+// including a plain HTTP row on another host, which has no transport in front of it to decide who may hold the key.
+// Expected:
+//   - a direct endpoint off this machine is called WITHOUT the key (it answers or refuses on its own), with one
+//     names-only line (the must-fail);
+//   - an overlay hop through this node's own federation egress keeps the key, as before: the transport's same-authority
+//     peer list decides whether it goes further (control);
+//   - a same-host endpoint keeps the key (control).
+// The verdict, and so its line, is worked out once per endpoint per process: each case below touches its endpoint first.
 // No real key: a dummy is set before the module loads (config.ts freezes the key at import, self-auth.ts reads it at use).
 // No real address either: hosts are localhost or an .invalid name, which never resolves.
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
@@ -58,18 +61,14 @@ afterAll(() => {
 const restore = (): void => { globalThis.fetch = ORIGINAL_FETCH; console.warn = origWarn; console.log = origLog; };
 
 describe("feature-compose llmCallWithFailover: the node key's scope", () => {
-  it("MUST-FAIL: over [local arm, overlay egress hop] the key goes to the local arm only; the egress request carries none", async () => {
+  it("CONTROL: over [local arm, overlay egress hop] both carry the node key; the transport decides past the hop", async () => {
     expect(typeof fc.llmCallWithFailover).toBe("function");
     stub({ [EGRESS]: 200 }); // the local arm is down (503), so the call spills to the egress hop
     try {
       expect(await fc.llmCallWithFailover([LOCAL, EGRESS], "prompt", "auto")).toBe("OK");
     } finally { restore(); }
-    expect(calls.map((c) => c.url)).toEqual([LOCAL, EGRESS]);
-    expect(calls[0]!.auth).toBe(`ApiKey ${DUMMY}`);
-    expect(calls[1]!.auth).toBeNull();
-    // One names-only line for the stripped hop: its vessel and substrate, never the target address or the key.
-    expect(warned).toEqual(["[cross-node-key] no key to overlay llm-resolver-dummy@far-substrate (federation egress path); called without it"]);
-    expect(warned.some((w) => w.includes(DUMMY) || w.includes("far-hub.invalid") || w.includes("12D3KooW"))).toBe(false);
+    expect(calls).toEqual([{ url: LOCAL, auth: `ApiKey ${DUMMY}` }, { url: EGRESS, auth: `ApiKey ${DUMMY}` }]);
+    expect(warned).toEqual([]);
   });
 
   it("CONTROL: a same-host arm still receives the node key, and nothing is logged", async () => {

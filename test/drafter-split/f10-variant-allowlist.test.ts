@@ -111,3 +111,19 @@ describe("F10: a compose loads only what the allowlist names", () => {
     }
   }, 120_000);
 });
+
+// c2b (NEW cases): the shipped module's own id, named explicitly, drafts exactly as an absent drafter_variant does.
+// Seen red on 2005997b, where "drafter-v1" resolved to src/drafter/variants/drafter-v1/ (absent) and drafted with the
+// floor (import_failed). MUTANT (seen red): the site's default branch dropped.
+describe("F10: an explicit drafter-v1 is the shipped module, not the floor", () => {
+  it('drafter_variant "drafter-v1" loads src/drafter/index.ts, fell_back null, with the same draft context as absent', async () => {
+    const absent = await compose(undefined, { omit: true });
+    const named = await compose("drafter-v1");
+    expect(named.calls.def).toBeGreaterThan(0);
+    expect(named.calls.variant).toBe(0);
+    expect({ variant: named.body.drafter?.variant, version: named.body.drafter?.version, fell_back: named.body.drafter?.fell_back }).toEqual({ variant: "drafter-v1", version: "drafter-v1", fell_back: null });
+    expect(named.prompt.length).toBeGreaterThan(0);
+    expect(named.prompt).toBe(absent.prompt);
+    expect(named.verdict).toBe(absent.verdict);
+  }, 120_000);
+});

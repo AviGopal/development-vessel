@@ -309,7 +309,7 @@ describe("F3 over src/drafter/variants/: one site, computed only through the all
     expect(edgeOffenders(swap(CORE, mutate("export function drafterVariantAllowlisted(id: string): string {", "export function drafterVariantAllowlistedX(id: string): string {"))).join("; ")).toMatch(/0 top-level declaration\(s\) of drafterVariantAllowlisted/);
   });
   it("MUTANT the conditional's literal branch pointing outside src/drafter/ is red", () => {
-    expect(edgeOffenders(swap(CORE, mutate('named === null ? "../drafter/index.js" :', 'named === null ? "../resolvers/x.js" :'))).join("; ")).toMatch(/non-literal specifier/);
+    expect(edgeOffenders(swap(CORE, mutate('named === null || named === DRAFTER_DEFAULT_VARIANT ? "../drafter/index.js" :', 'named === null || named === DRAFTER_DEFAULT_VARIANT ? "../resolvers/x.js" :'))).join("; ")).toMatch(/non-literal specifier/);
   });
   it("MUTANT a third destructured symbol on the computed site is red (VERSION visible)", () => {
     expect(edgeOffenders(swap(CORE, mutate("const { planDrafterReads, assembleDrafterContext } = await import(", "const { planDrafterReads, assembleDrafterContext, VERSION } = await import("))).join("; ")).toMatch(/VERSION/);

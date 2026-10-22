@@ -527,8 +527,8 @@ export interface FeatureComposePointer {
   /** The gap_to_feature pick's approach decision id (dec-…). Recorded on the attempt intent so a landing's
    *  Attempt-Id trailer maps back to the decision its outcome belongs to. */
   decision_id?: string;
-  /** Which drafter assembly drafts this compose (drafting-as-activities 1.2; see drafterVariantChoice). Absent: the
-   *  shipped module (src/drafter/index.ts). "floor": the core's own floor, no module loaded. An id on the allowlist
+  /** Which drafter assembly drafts this compose (drafting-as-activities 1.2; see drafterVariantChoice). Absent, or
+   *  DRAFTER_DEFAULT_VARIANT ("drafter-v1") named explicitly: the shipped module (src/drafter/index.ts). "floor": the core's own floor, no module loaded. An id on the allowlist
    *  (DRAFTER_VARIANT_ID): src/drafter/variants/<id>/index.ts. Anything else: the floor, fell_back "unknown_variant". */
   drafter_variant?: string;
 }
@@ -7619,9 +7619,10 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       variant: variantChoice.variant,
       mode: variantChoice.mode,
       load: async () => {
-        // ONE import site (F3): the shipped module, or an allowlisted variant under src/drafter/variants/.
+        // ONE import site (F3): the shipped module (absent, or its own id "drafter-v1" named back, as a sampler that
+        // feeds the recorded id does), or an allowlisted variant under src/drafter/variants/.
         const named = variantChoice.mode === "named" ? variantChoice.variant : null;
-        const { planDrafterReads, assembleDrafterContext } = await import(named === null ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);
+        const { planDrafterReads, assembleDrafterContext } = await import(named === null || named === DRAFTER_DEFAULT_VARIANT ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);
         return { planDrafterReads, assembleDrafterContext } as unknown as { planDrafterReads: (f: unknown) => unknown; assembleDrafterContext: (f: unknown) => unknown };
       },
     });

@@ -22,7 +22,7 @@ const ANCHORS = {
   render: "const r = renderAdmissionRefusal(admissionInput, admission.refusal);",
   lease: "      landingLeaseGap = _gapIdForSlot;\n      admittedCapture = (draftingStarted) => admissionCapture(",
   envelope: 'const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");',
-  drafter: 'const { planDrafterReads, assembleDrafterContext } = await import("../drafter/index.js");',
+  drafter: 'const { planDrafterReads, assembleDrafterContext } = await import(named === null || named === DRAFTER_DEFAULT_VARIANT ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);',
 };
 /** The floor's refusals as they were inline. None may come back as a local copy beside the core. */
 const MOVED = [

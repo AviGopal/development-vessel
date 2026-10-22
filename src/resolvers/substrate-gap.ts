@@ -642,6 +642,8 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 // characters of the identity-issued key id when the route's label names one, the route's remote, and whether
 // the marker was present. Never a field value, the summary, a refusal's detail (it can quote the summary), or
 // anything derived from a presented key (the route stamps none; see routes/caller-identity.ts).
+// `route` names the door that stamped the write: "impulses" (/v2/impulses/resolve), "resolvers-execute" (the
+// vessel-proxy /resolvers/execute), or "in-process" when no route stamped it (counted as the system's own).
 //
 // fields_changed: for a write SAVED here (even one whose call threw after the save), the top-level and
 // classification_metadata keys whose value differs between the stored row before the write and the row saved
@@ -679,6 +681,11 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 // GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT) the file is rewritten to its newest half. The row is read only when the
 // file is over the cap, at most once per GAP_WRITE_EVENTS_CAP_READ_MS, and never from a scratch store.
 export type GapWritePrincipalKind = "node-self" | "key" | "jwt" | "unauthenticated" | "in-process";
+/** The door that stamped a write (routes/impulses.ts stampRouteCaller): the resolve route, the vessel-proxy route, or
+ *  none (a write that did not come through a route, which counts as the system's own). */
+export type GapWriteRoute = "impulses" | "resolvers-execute" | "in-process";
+/** The pointer field a route stamps with its own name, beside _route_caller, and overwrites the same way. */
+export const ROUTE_NAME_FIELD = "_route";
 export type GapWriteEvent = {
   gap_id: string | null;
   fields_changed: string[];
@@ -690,6 +697,7 @@ export type GapWriteEvent = {
   principal_kind: GapWritePrincipalKind;
   key_id: string | null;
   route_caller_remote: string | null;
+  route: GapWriteRoute;
   operator_marker: boolean;
   store: "local" | "forwarded";
   ts: string;
@@ -714,19 +722,22 @@ export function __setGapWriteEventsEnabledForTests(on: boolean): void { gapWrite
 /** Tests only: settle a running retention rewrite. */
 export async function __settleGapWriteEventsForTests(): Promise<void> { await __gapEventCompaction; }
 
-/** The principal of a write, from the route's _route_caller stamp (routes/caller-identity.ts callerAuthLabel). */
-export function gapWritePrincipal(pointer: unknown): { kind: GapWritePrincipalKind; key_id: string | null; remote: string | null } {
+/** The principal of a write, from the route's _route_caller stamp (routes/caller-identity.ts callerAuthLabel), and
+ *  the door that stamped it (ROUTE_NAME_FIELD; "in-process" when no route did). */
+export function gapWritePrincipal(pointer: unknown): { kind: GapWritePrincipalKind; key_id: string | null; remote: string | null; route: GapWriteRoute } {
   const rc = (pointer as { _route_caller?: unknown } | null | undefined)?._route_caller as { auth?: unknown; remote?: unknown } | undefined;
-  if (!rc || typeof rc !== "object") return { kind: "in-process", key_id: null, remote: null };
+  if (!rc || typeof rc !== "object") return { kind: "in-process", key_id: null, remote: null, route: "in-process" };
+  const rn = (pointer as Record<string, unknown>)[ROUTE_NAME_FIELD];
+  const route: GapWriteRoute = rn === "impulses" || rn === "resolvers-execute" ? rn : "in-process";
   const remote = typeof rc.remote === "string" ? rc.remote : null;
   const auth = typeof rc.auth === "string" ? rc.auth : "unauthenticated";
-  if (auth === "authenticated:node-self") return { kind: "node-self", key_id: null, remote };
+  if (auth === "authenticated:node-self") return { kind: "node-self", key_id: null, remote, route };
   // The write door accepts an ApiKey only (lib/caller-credential.ts), so every other authenticated label is a key.
   if (auth === "authenticated" || auth.startsWith("authenticated:")) {
     const m = /^authenticated:key_id:(.+)$/.exec(auth);
-    return { kind: "key", key_id: m ? m[1]!.slice(0, 6) : null, remote };
+    return { kind: "key", key_id: m ? m[1]!.slice(0, 6) : null, remote, route };
   }
-  return { kind: "unauthenticated", key_id: null, remote };
+  return { kind: "unauthenticated", key_id: null, remote, route };
 }
 
 const sameValue = (a: unknown, b: unknown): boolean => a === b || stableStringify(a) === stableStringify(b);
@@ -2526,6 +2537,7 @@ export async function resolveSubstrateGapWrite(
         principal_kind: principal.kind,
         key_id: principal.key_id,
         route_caller_remote: principal.remote,
+        route: principal.route,
         operator_marker: marker !== null,
         store: gapStoreIsLocal() ? "local" : "forwarded",
         ts: new Date().toISOString(),

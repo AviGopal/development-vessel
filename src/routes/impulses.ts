@@ -45,7 +45,7 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent, ROUTE_NAME_FIELD, type GapWriteRoute } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
 import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, ADMIN_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
@@ -1158,6 +1158,26 @@ function routeRemote(c: Context): string {
   return remote || "unknown";
 }
 
+/**
+ * THE ROUTE STAMP, BOTH DOORS (/v2/impulses/resolve and /resolvers/execute), from the credential, never the body.
+ * Every inbound _route_caller and ROUTE_NAME_FIELD is deleted, whatever the shape: a client cannot carry either in.
+ * Then every `*_write` pointer is stamped with the identity this route's write gate validated (callerAuthLabel, as the
+ * gap-write audit names it; a maintenanceLease_write gets leaseCallerStamp, which adds `admin`) and the route's own
+ * name, so any writer that trusts the stamp (substrateGap_write's audit and events, the lease holder) sees the
+ * principal that authenticated, on either door, and never one the body chose.
+ */
+async function stampRouteCaller(c: Context, pointerType: string, pointer: unknown, cred: CallerCredential | null, route: Exclude<GapWriteRoute, "in-process">): Promise<void> {
+  if (!pointer || typeof pointer !== "object") return;
+  const p = pointer as Record<string, unknown>;
+  delete p["_route_caller"];
+  delete p[ROUTE_NAME_FIELD];
+  if (!pointerType.endsWith("_write")) return;
+  p["_route_caller"] = pointerType === "maintenanceLease_write"
+    ? await leaseCallerStamp(c, cred, pointer)
+    : { auth: callerAuthLabel(cred ? { authenticated: cred.authenticated, node_self: isNodeSelfCredential(cred), key_id: cred.keyId, scopes: cred.scopes } : undefined), remote: routeRemote(c) };
+  p[ROUTE_NAME_FIELD] = route;
+}
+
 /** The compose shapes whose pointer `directed` flag changes how the compose runs (capacity lane, spend envelope,
  *  scope checks, verbatim edits, stray-test intent). */
 export const DIRECTED_CLAIM_SHAPES: ReadonlySet<string> = new Set(["feature_compose", "gap_to_feature"]);
@@ -1253,9 +1273,9 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
-    // A lease's holder is the principal this gate validated (maintenance-lease.ts): stamped here as on the resolve
-    // route, overwriting any _route_caller the config carried.
-    if (resolverName === "maintenanceLease_write") (pointer as Record<string, unknown>)["_route_caller"] = await leaseCallerStamp(c, writeCred, pointer);
+    // The config is the client's: the route stamp (stampRouteCaller) overwrites any _route_caller it carried, for
+    // every write shape, as on the resolve route.
+    await stampRouteCaller(c, String(resolverName), pointer, writeCred, "resolvers-execute");
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
     const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
@@ -1301,6 +1321,15 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   const { refused: writeRefused, cred: writeCred } = await refuseUnauthenticatedWrite(c, pointerType, pointer);
   if (writeRefused) return writeRefused;
 
+  // CALLER IDENTITY FOR THE GAP-WRITE AUDIT (2026-10-03). Stamped by the route, never taken from the
+  // client: any inbound _route_caller is overwritten, for every write shape and before any branch below sees the
+  // pointer (stampRouteCaller). NOTHING derived from the presented key (no hash, digest or prefix): only the
+  // identity that validated the request (callerAuthLabel): the write gate's credential above, named by its key id
+  // when identity's answer carries one, else by its scopes. Plus the remote address the server wrapper stamped from
+  // the socket (x-dv-remote-addr), or the socket's own. A maintenanceLease_write's stamp also says whether the
+  // credential is admin: its holder is this principal, never the body's (maintenance-lease.ts).
+  await stampRouteCaller(c, pointerType, pointer, writeCred, "impulses");
+
   // THE VERDICT CORPUS STATUS (pool-impulse.ts, the runner grant): written only by goal-host's own principal, named by
   // the Authorization credential identity validates, never by the body. Every other caller, operators included, is a
   // 403 and a recorded refusal. Checked before the trust-root branch can see the pointer.
@@ -1339,18 +1368,6 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     if (err.startsWith("intervention_refused_foreign_overwrite")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 403);
     return c.json({ success: true, shape: result.shape, body: result.body });
   }
-
-  // CALLER IDENTITY FOR THE GAP-WRITE AUDIT (2026-10-03). Stamped by the route, never taken from the
-  // client: any inbound _route_caller is overwritten. NOTHING derived from the presented key (no hash,
-  // digest or prefix): only the identity that validated the request (callerAuthLabel): the write gate's
-  // credential above, named by its key id when identity's answer carries one, else by its scopes. Plus the
-  // remote address the server wrapper stamped from the socket (x-dv-remote-addr), or the socket's own.
-  if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
-    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
-  }
-  // A maintenanceLease_write is stamped the same way, plus whether the credential is admin: its holder is this
-  // principal, never the body's (maintenance-lease.ts).
-  if (pointerType === "maintenanceLease_write" && pointer && typeof pointer === "object") (pointer as Record<string, unknown>)["_route_caller"] = await leaseCallerStamp(c, writeCred, pointer);
 
   // OPERATOR-DIRECTED (lib/operator-direct.ts): a feature_compose carrying the operator's own credential in
   // X-Operator-Authorization runs under a grant when identity says that key has "operator:direct" (or "admin");

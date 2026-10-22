@@ -449,25 +449,68 @@ export async function resolveSubstrateHealthTick(
   // Fetch recent traces (last 30 days) to build execution counts per template.
   const traceLookbackSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   const traceCounts = new Map<string, { success: number; fail: number }>();
-  let traceOffset = 0;
-  while (traceOffset < 5000) {
-    const r = await fetchWithRetry(
-      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
+  let aggregateUsed = false;
+  // Prefer server-side aggregates over paged list reads: cheaper and window-accurate (30 days).
+  try {
+    const succRes = await fetchWithRetry(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces/aggregate?metric=success_count&group_by=activity_id&window_hours=720&limit=1000`,
       { headers: auth },
     );
-    if (!r?.ok) break;
-    const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
-    const rows = page.executions ?? [];
-    if (rows.length === 0) break;
-    for (const t of rows) {
-      const id = t.activity_id ?? "unknown";
-      const entry = traceCounts.get(id) ?? { success: 0, fail: 0 };
-      if (t.success === true || t.status === "success" || t.status === "completed") entry.success++;
-      else entry.fail++;
-      traceCounts.set(id, entry);
+    const failRes = await fetchWithRetry(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces/aggregate?metric=failure_count&group_by=activity_id&window_hours=720&limit=1000`,
+      { headers: auth },
+    );
+    if (succRes?.ok && failRes?.ok) {
+      type Bucket = { activity_id?: string; key?: string; id?: string; count?: number };
+      const succ = await succRes.json() as { rows?: Bucket[]; buckets?: Bucket[]; aggregates?: Bucket[] };
+      const fail = await failRes.json() as { rows?: Bucket[]; buckets?: Bucket[]; aggregates?: Bucket[] };
+      const srows = (succ.rows ?? succ.buckets ?? succ.aggregates ?? []) as Bucket[];
+      const frows = (fail.rows ?? fail.buckets ?? fail.aggregates ?? []) as Bucket[];
+      const keyOf = (b: Bucket): string => {
+        const k = b.activity_id ?? b.id ?? b.key ?? "";
+        return typeof k === "string" ? k : String(k ?? "");
+      };
+      for (const b of srows) {
+        const k = keyOf(b);
+        if (!k) continue;
+        const prev = traceCounts.get(k) ?? { success: 0, fail: 0 };
+        prev.success += Math.max(0, b.count ?? 0);
+        traceCounts.set(k, prev);
+      }
+      for (const b of frows) {
+        const k = keyOf(b);
+        if (!k) continue;
+        const prev = traceCounts.get(k) ?? { success: 0, fail: 0 };
+        prev.fail += Math.max(0, b.count ?? 0);
+        traceCounts.set(k, prev);
+      }
+      aggregateUsed = traceCounts.size > 0;
     }
-    traceOffset += rows.length;
-    if (rows.length < 200) break;
+  } catch { /* ignore; fall through to list paging */ }
+
+  if (!aggregateUsed) {
+    // Fallback: capped, offset-based list paging (may truncate to newest sample on some deployments).
+    let traceOffset = 0;
+    const pageSize = 100;
+    while (traceOffset < 5000) {
+      const r = await fetchWithRetry(
+        `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=${pageSize}&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
+        { headers: auth },
+      );
+      if (!r?.ok) break;
+      const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
+      const rows = page.executions ?? [];
+      if (rows.length === 0) break;
+      for (const t of rows) {
+        const id = t.activity_id ?? "unknown";
+        const entry = traceCounts.get(id) ?? { success: 0, fail: 0 };
+        if (t.success === true || t.status === "success" || t.status === "completed") entry.success++;
+        else entry.fail++;
+        traceCounts.set(id, entry);
+      }
+      traceOffset += rows.length;
+      if (rows.length < pageSize) break;
+    }
   }
 
   const variantPairs: { alpha: number; beta: number }[] = [];
@@ -502,6 +545,18 @@ export async function resolveSubstrateHealthTick(
   // have enough evidence?" — not "of all templates including untested ones."
   // Templates with no executions are excluded; they contribute nothing to evidence.
   const coveredNormIds = new Set([...traceCounts.keys()].map(normalizeId));
+  // When aggregate counts are unavailable and we fall back to list paging (which some routes cap and resort),
+  // include active templates with no observed traces as uniform priors so the window remains measurable.
+  // This avoids the newest-N truncation silently collapsing total_pairs below the confidence_min_pairs threshold.
+  if (typeof aggregateUsed === "boolean" && !aggregateUsed) {
+    for (const t of activeTemplates) {
+      const k = normalizeId(t.id);
+      if (!coveredNormIds.has(k) && !isMetaTemplate(t.id)) {
+        variantPairs.push({ alpha: 1, beta: 1 });
+        coveredNormIds.add(k);
+      }
+    }
+  }
 
   const total_pairs = variantPairs.length;
   const pairs_above_floor = variantPairs.filter(p => (p.alpha + p.beta) >= confidenceFloor).length;

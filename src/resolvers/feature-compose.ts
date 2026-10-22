@@ -3697,6 +3697,55 @@ async function consultProducers(spec: string): Promise<string> {
   } catch { return ""; }
 }
 
+// CONCEPT PRIORS AT PROMPT BUILD (law 8). The walk recalls concepts for a goal, but the edit-intent pointer carries
+// only the spec and the gap, so the drafter never saw the substrate's own drafting concepts (the discipline that every
+// identifier must exist in the grounding or be introduced by the plan among them). The concept graph's existing
+// prompt selector, concept_select_for_prompt, is asked here with the spec and the edit site as its query, routed by
+// shape to this substrate's own producer. Its selection is rendered as a bounded block; each prior carries its
+// concept id and source_type, so the drafter can cite what it applied and an outcome can be credited to exactly
+// those ids. Fails open: no producer, an unreachable store or an empty selection leaves the prompt as it was.
+const CONCEPT_PRIOR_MAX = 6;
+const CONCEPT_PRIOR_CHARS = 600;
+const CONCEPT_PRIOR_QUERY_CHARS = 600;
+const CONCEPT_PRIOR_BUDGET_TOKENS = 1500;
+/** A concept id the drafter may cite: the same allowlist gates what is rendered and what a plan's citation may name. */
+const CONCEPT_ID_RE = /^[\w:.-]{1,80}$/;
+export type ConceptPrior = { id: string; source_type: string; name: string | null; content: string };
+/** The bounded concept-priors block, or "" when nothing citable was selected. */
+export function renderConceptPriors(selected: ReadonlyArray<ConceptPrior>): string {
+  const rows = selected.filter((c) => CONCEPT_ID_RE.test(c.id) && c.content.trim().length > 0).slice(0, CONCEPT_PRIOR_MAX);
+  if (rows.length === 0) return "";
+  const line = (c: ConceptPrior) => `- [${c.id}] (source_type: ${String(c.source_type).replace(/[^\w.-]/g, "").slice(0, 40) || "unknown"})${c.name ? ` ${c.name.replace(/\s+/g, " ").trim().slice(0, 120)}:` : ""} ${c.content.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_CHARS)}`;
+  return `\nCONCEPT PRIORS (selected for this change by the substrate's concept graph, concept_select_for_prompt; each is cited by its [id]):\n${rows.map(line).join("\n")}\n`;
+}
+/** Ask concept_select_for_prompt for the priors of this change. `block` is "" and `ids` empty when it fails open. */
+export async function conceptPriorsBlock(spec: string, editSite: string | null): Promise<{ block: string; ids: string[]; why?: string }> {
+  try {
+    const query = `${editSite ? `${editSite} ` : ""}${String(spec ?? "")}`.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_QUERY_CHARS);
+    if (!query) return { block: "", ids: [], why: "empty query" };
+    const target = await ownConceptDbResolveUrl("concept_select_for_prompt");
+    if (!target.url) return { block: "", ids: [], why: target.why };
+    const res = await fetch(target.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      body: JSON.stringify({ impulse: { pointer: { type: "concept_select_for_prompt", query, budget_tokens: CONCEPT_PRIOR_BUDGET_TOKENS } } }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return { block: "", ids: [], why: `HTTP ${res.status}` };
+    const j = (await res.json()) as { body?: { selected?: unknown }; content?: { selected?: unknown } };
+    const raw = (j.body ?? j.content)?.selected;
+    const selected: ConceptPrior[] = (Array.isArray(raw) ? raw : []).flatMap((c) => {
+      const r = (c ?? {}) as Record<string, unknown>;
+      return typeof r.id === "string" && typeof r.content === "string" ? [{ id: r.id, source_type: String(r.source_type ?? ""), name: typeof r.name === "string" ? r.name : null, content: r.content }] : [];
+    });
+    const block = renderConceptPriors(selected);
+    if (!block) return { block: "", ids: [], why: "no citable concept selected" };
+    return { block, ids: selected.filter((c) => block.includes(`[${c.id}]`)).map((c) => c.id) };
+  } catch (err) {
+    return { block: "", ids: [], why: (err as Error)?.message ?? String(err) };
+  }
+}
+
 // SHAPE-GROUNDING (2026-06-28): resolve the target vessel's ACTUAL file tree
 // BEFORE planning so the plan binds edits to real paths instead of hallucinating
 // them (observed: the planner invented `registry-stats.ts`, which does not exist,
@@ -7335,6 +7384,9 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   let principles = "";
   try { principles = await consultPrinciples(pointer.spec); } catch { principles = ""; }
   try { principles += await consultProducers(pointer.spec); } catch { /* advisory */ }
+  const conceptPriors = await conceptPriorsBlock(pointer.spec, gapEditSiteOf(pointer) ?? targetFiles[0] ?? null);
+  principles += conceptPriors.block;
+  console.log(conceptPriors.block ? `[fc-concepts] concept priors shown: ${conceptPriors.ids.join(", ")}` : `[fc-concepts] concept priors skipped (${conceptPriors.why ?? "none"})`);
   // PRIOR-ATTEMPT FEEDBACK: if this gap was already rejected by the semantic gate, the
   // gate wrote suspected_real_location + semantic_gate_reason onto its metadata. Inject
   // that as explicit re-draft guidance so the drafter completes the partial fix instead

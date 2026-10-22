@@ -6301,7 +6301,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
           // An all-dropped plan carries its own class and its drops onto the attempt record.
           const droppedPaths = Array.isArray(ob["dropped_paths"]) ? (ob["dropped_paths"] as unknown[]).map(String) : null;
           const scopeAttempt: AttemptRecord | undefined = droppedPaths && droppedPaths.length > 0
-            ? { stage: "scope", edited_spans: [], dropped_paths: droppedPaths, dropped_reason: String(ob["dropped_reason"] ?? "") }
+            ? { stage: "scope", edited_spans: [], dropped_paths: droppedPaths, dropped_reason: String(ob["dropped_reason"] ?? ""), ...attemptDrafterField(ob["drafter"]) /* the report's copy of the run's drafter record: the store has closed here */ }
             : undefined;
           await appendComposeLesson(typeof ob["refuse_class"] === "string" ? String(ob["refuse_class"]) : "scope_refused", refusalReason.slice(0, 300), "", pointer.gap, scopeAttempt).catch((err) => {
             console.warn(`[compose-lessons] scope-refusal lesson NOT written gap=${String(pointer.gap?.id)} class=${String(ob["refuse_class"] ?? "scope_refused")}: ${(err as Error)?.message ?? String(err)}`);
@@ -6567,6 +6567,16 @@ export type DrafterCheckedContext = {
 export type DrafterRecord = { variant: string; version: string | null; fell_back: string | null; op_budget: number; clamped?: string; dropped?: string[] };
 /** The variant an unnamed compose drafts with: the shipped module, src/drafter/index.ts (its context declares this version). */
 export const DRAFTER_DEFAULT_VARIANT = "drafter-v1";
+/**
+ * The drafter field of a structured attempt record (1.1), from the run's drafter record or the report's copy of it;
+ * {} when there is none (the compose stopped before the drafter ran). Every attempt write spreads this.
+ */
+export function attemptDrafterField(rec: unknown): Pick<AttemptRecord, "drafter"> {
+  if (!rec || typeof rec !== "object") return {};
+  const r = rec as { variant?: unknown; version?: unknown; fell_back?: unknown };
+  if (typeof r.variant !== "string") return {};
+  return { drafter: { variant: r.variant, version: typeof r.version === "string" ? r.version : null, fell_back: typeof r.fell_back === "string" ? r.fell_back : null } };
+}
 /** The allowlist a named variant must match to be loaded, from src/drafter/variants/<id>/index.ts (1.2). */
 export const DRAFTER_VARIANT_ID = /^drafter-v[0-9]+[a-z0-9-]*$/;
 /**
@@ -10709,7 +10719,7 @@ const earlyAttempt = await Promise.race([
   }
   // Recorded on every verdict: a compose can end FAVORABLE after fc-repair had an edit refused.
   if (refusalEvidence && !refusalsRecorded) {
-    await appendComposeLesson("no_effect_region", noEffectRefusals.map((r) => `NO-EFFECT REGION REFUSED ${r.path}:${r.start}-${r.end} (locked ${r.region_start}-${r.region_end})`).join("\n"), [...touched].join(","), pointer.gap, { stage: "apply", edited_spans: [], ...refusalEvidence });
+    await appendComposeLesson("no_effect_region", noEffectRefusals.map((r) => `NO-EFFECT REGION REFUSED ${r.path}:${r.start}-${r.end} (locked ${r.region_start}-${r.region_end})`).join("\n"), [...touched].join(","), pointer.gap, { stage: "apply", edited_spans: [], ...refusalEvidence, ...attemptDrafterField(composeDrafterStore.getStore()?.record) });
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
   // OBSERVE (compose-observe.ts): none is written. goal-host's reconciler grades a landing from this file, and the

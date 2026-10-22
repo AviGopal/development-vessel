@@ -141,6 +141,10 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/goal-host-vessel/src/routing-core/corpus-runner.ts",
   "repos/development-vessel/test/routing-corpus/",
   "repos/development-vessel/src/resolvers/compose-admission-core.ts",
+  // The one reader of operator acts in a closure's provenance (qa, 10-22, TIGHTENING): self-fact-reconcile's
+  // repair_autonomy row counts a closure as the system's own only through it, so a lane edit there would move the
+  // §14 count the evaluator reports.
+  "repos/development-vessel/src/resolvers/operator-acts.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -266,6 +270,7 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/goal-host-vessel/test/routing-corpus/runner-logic.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
   "repos/goal-host-vessel/test/routing-corpus/wiring-pin.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/src/resolvers/compose-admission-core.ts": { class: "judge_trust", reason: "the compose admission floor, clamp and refusal renderer (containment)" },
+  "repos/development-vessel/src/resolvers/operator-acts.ts": { class: "judge_trust", reason: "evaluator file: feeds the §14 evaluator's operator-act count (verdict)" },
   "repos/development-vessel/src/judge-rules/": { class: "judge_trust", reason: "pre-closed until the routing opening act (admission rules)" },
   "repos/development-vessel/test/routing-corpus/": { class: "judge_trust", reason: "the development-vessel routing corpus and its admission checks (judge tests)" },
   "repos/development-vessel/test/routing-corpus/chain.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },

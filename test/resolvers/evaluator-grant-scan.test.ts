@@ -140,6 +140,8 @@ const EXCLUDED_SRC = [
   "src/resolvers/patch-with-tools.ts",
   "src/lib/operator-direct.ts",
   "src/resolvers/intervention-evaluate.ts",
+  // The §14 evaluator's operator-acts reader (qa 10-22, TIGHTENING): self-fact-reconcile's repair_autonomy imports it.
+  "src/resolvers/operator-acts.ts",
 ];
 const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
 const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];

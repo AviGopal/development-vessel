@@ -56,6 +56,8 @@ const EXCLUDED_SRC_MIRROR = [
   "src/judge/",
   "src/resolvers/attempt-ledger.ts", "src/lib/operator-hold.ts", "src/test-child-env.ts", "src/resolvers/patch-with-tools.ts",
   "src/lib/operator-direct.ts", "src/resolvers/intervention-evaluate.ts",
+  // The §14 evaluator's operator-acts reader (qa 10-22, TIGHTENING).
+  "src/resolvers/operator-acts.ts",
 ];
 /** The closed->residue edges, each by design (BOUNDARY.md 3.1), pinned exactly, by the residue SYMBOL each takes, so a
  *  new edge or a new symbol on an existing edge reddens (qa Q1: all four are routing/entry, none a judge input):

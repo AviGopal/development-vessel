@@ -130,7 +130,7 @@ export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDP
 /** The shapes whose resolvers in THIS module read or write the gap store (gaps.json, its leases and its write events):
  *  HELD data, so a router must take them to the holder's own route, never to an interchangeable peer (discovery
  *  held-shape routing). */
-export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write", "gapWriteEvent"] as const;
+export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write", "gapWriteEvent", "substrateGapMerge_write"] as const;
 
 export async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];
@@ -696,6 +696,8 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 //       default /workspace/gaps/gaps.json, with a plain writeFile that bypasses saveGaps (it reaches the live store
 //       only if its environment points GAPS_PATH there); and inside dv, the landing-lease op, stampBirthVerdict and
 //       the reclassify / birth re-evaluation ticks call saveGaps without passing through resolveSubstrateGapWrite.
+//       The gap-store merge (GAP-STORE MERGE, below) is one more: it records counts per chunk in
+//       gaps/gap-store-merges.jsonl and its losers in gaps/_previous.jsonl, not one event per row.
 //
 // RETENTION: past the tuning row gap_write_events.max_bytes (activity-api tuning-params; absent means
 // GAP_WRITE_EVENTS_MAX_BYTES_DEFAULT) the file is rewritten to its newest half. The row is read only when the
@@ -3530,4 +3532,95 @@ async function resolveSubstrateGapWriteInner(
       ...(dedupeReason ? { reason: dedupeReason } : {}),
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP-STORE MERGE (2026-10-22). When the gap store moves to another holder, the node whose store is left behind
+// pushes its rows here (resolvers/gap-store-merge-migration.ts) and this holder merges them into its own store as a
+// migration: by id, by the conflict rule in lib/gap-store-merge.ts (identical content is no conflict; else the newer
+// updated_at wins, a tie or an unparseable timestamp goes to the holder; the loser is kept in the _previous ledger
+// beside the store, gaps/_previous.jsonl, never dropped). No row is hand-edited and none passes through the write
+// gates: these rows were already admitted by the store that held them, and re-gating them would re-stamp or refuse
+// rows that are history, not new writes.
+//
+// BY EFFECT. The plan is checked before anything is written; then the losers are appended to _previous FIRST (so a
+// loser is durable before its winner replaces it), the store is saved, and BOTH files are read back from disk and
+// checked again (lib/gap-store-merge.ts verifyGapStoreMerge: the row count is before + added, every holder row keeps
+// its place, and every input row is live or kept). A failed read-back restores the store's prior rows and answers
+// merge_verification_failed. Each verified chunk appends one line (counts only) to gaps/gap-store-merges.jsonl.
+//
+// WHO MAY MERGE. A merge writes rows past every gate, so it is trust-root grade: this node's own key (node-self) or
+// an identity-validated key with the admin scope, named by the route (impulses.ts) and never by the body. A merge
+// that reaches a node that does not hold the store is refused, never relayed.
+// ─────────────────────────────────────────────────────────────────────────────
+export const GAP_STORE_MERGE_MAX_ROWS = 1000;
+const GAP_PREVIOUS_PATH = () => join(workspaceRoot(), "gaps", "_previous.jsonl");
+const GAP_STORE_MERGES_PATH = () => join(workspaceRoot(), "gaps", "gap-store-merges.jsonl");
+/** The local store's file (gaps.json under this module's store root): the merge migration reads it on a forwarder. */
+export function gapStoreFilePath(): string { return GAPS_PATH(); }
+let __gapStoreMergeAfterSaveHook: (() => Promise<void>) | null = null;
+/** Tests only: runs after the merge's save and before its read-back (a test overwrites the file to prove the check reads disk). */
+export function __setGapStoreMergeAfterSaveHookForTests(fn: (() => Promise<void>) | null): void { __gapStoreMergeAfterSaveHook = fn; }
+
+async function readKeptPreviousKeys(): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let text = "";
+  try { text = await readFile(GAP_PREVIOUS_PATH(), "utf-8"); } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return keys;
+    throw err;
+  }
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try { const e = JSON.parse(line) as { id?: unknown; content_hash?: unknown }; if (typeof e.id === "string" && typeof e.content_hash === "string") keys.add(`${e.id}:${e.content_hash}`); } catch { /* a torn last line is not a kept row */ }
+  }
+  return keys;
+}
+
+export type GapStoreMergePrincipal = { node_self?: boolean; admin?: boolean };
+export async function resolveSubstrateGapMergeWrite(pointer: Record<string, unknown>, opts: { principal?: GapStoreMergePrincipal } = {}): Promise<ResolverResult> {
+  const refuse = (failure_mode: string, detail: string, extra: Record<string, unknown> = {}): ResolverResult =>
+    ({ shape: "structuredError", body: { resolver: "substrateGapMerge_write", failure_mode, detail, ...extra } }) as ResolverResult;
+  if (!gapStoreIsLocal()) return refuse("not_the_holder", "this node does not hold the gap store (GAP_STORE_ENDPOINT is set): a merge is applied only by the holder, never relayed");
+  const pr = opts.principal;
+  if (!pr || (pr.node_self !== true && pr.admin !== true)) return refuse("merge_principal_required", "a gap-store merge writes past every gate: it needs this node's own key or an identity-validated admin key");
+  const { planGapStoreMerge, verifyGapStoreMerge, isMergeableRow } = await import("../lib/gap-store-merge.js");
+  const migrationId = pointer["migration_id"];
+  const rows = pointer["rows"];
+  if (typeof migrationId !== "string" || migrationId.length === 0 || migrationId.length > 200) return refuse("invalid_merge", "migration_id must be a non-empty string of at most 200 characters");
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > GAP_STORE_MERGE_MAX_ROWS) return refuse("invalid_merge", `rows must be an array of 1..${GAP_STORE_MERGE_MAX_ROWS} gap rows`);
+  const bad = rows.findIndex((r) => !isMergeableRow(r));
+  if (bad >= 0) return refuse("invalid_merge", `rows[${bad}] is not a gap row with a non-empty string id; nothing was merged`);
+  const source = rows as Array<Record<string, unknown> & { id: string }>;
+  const chunkIndex = typeof pointer["chunk_index"] === "number" ? pointer["chunk_index"] : null;
+  const sourceLabel = typeof pointer["source_label"] === "string" ? String(pointer["source_label"]).replace(/[^\w:.@-]/g, "").slice(0, 64) : "";
+  return withGapLock(async () => {
+    const before = (await loadGaps()) as unknown as Array<Record<string, unknown> & { id: string }>;
+    const keptBefore = await readKeptPreviousKeys();
+    const plan = planGapStoreMerge(before, source, keptBefore);
+    const keptPlanned = new Set(keptBefore);
+    for (const p of plan.previous) keptPlanned.add(`${p.id}:${p.content_hash}`);
+    const pre = verifyGapStoreMerge(before, source, plan.rows, keptPlanned);
+    if (pre.length > 0) return refuse("merge_plan_inconsistent", "the merge plan failed its own check; nothing was written", { problems: pre.slice(0, 10) });
+    const at = new Date().toISOString();
+    if (plan.previous.length > 0) {
+      await mkdir(dirname(GAP_PREVIOUS_PATH()), { recursive: true }).catch(() => undefined);
+      appendFileSync(GAP_PREVIOUS_PATH(), plan.previous.map((p) => JSON.stringify({ ...p, migration_id: migrationId, source_label: sourceLabel, kept_at: at })).join("\n") + "\n");
+    }
+    const changed = plan.counts.added + plan.counts.source_won > 0;
+    if (changed) await saveGaps(plan.rows as unknown as SubstrateGap[]);
+    if (__gapStoreMergeAfterSaveHook) await __gapStoreMergeAfterSaveHook();
+    const readBack = await loadGaps();
+    const keptBack = await readKeptPreviousKeys();
+    const post = verifyGapStoreMerge(before, source, readBack, keptBack);
+    if (post.length > 0) {
+      await saveGaps(before as unknown as SubstrateGap[]);
+      console.error(`[gap-store-merge] ${migrationId} chunk=${String(chunkIndex)}: the store read back after the merge failed the check (${post.slice(0, 3).join("; ")}); the prior rows were restored`);
+      return refuse("merge_verification_failed", "the store read back after the merge lost or moved rows; the prior rows were restored", { problems: post.slice(0, 10), restored: true });
+    }
+    const counts = { ...plan.counts, after: readBack.length, previous_kept: plan.previous.length };
+    try { appendFileSync(GAP_STORE_MERGES_PATH(), JSON.stringify({ migration_id: migrationId, source_label: sourceLabel, chunk_index: chunkIndex, counts, at }) + "\n"); }
+    catch (err) { console.error(`[gap-store-merge] ${migrationId}: ledger line NOT recorded (the merge itself is verified): ${String(err).slice(0, 200)}`); }
+    console.log(`[gap-store-merge] ${migrationId} chunk=${String(chunkIndex)} verified: before=${counts.holder_before} added=${counts.added} identical=${counts.identical} holder_won=${counts.holder_won} source_won=${counts.source_won} kept=${counts.previous_kept} after=${counts.after}`);
+    return { shape: "substrateGapMerge_write", body: { migration_id: migrationId, chunk_index: chunkIndex, verified: true, counts } } as ResolverResult;
+  });
 }

@@ -407,6 +407,12 @@ startRegistryChangeObserver();
 startConceptBridgeObserver();
 startAutocompleteConceptWriter();
 startFailureCreditObserver();
+// THE GAP-STORE MERGE MIGRATION (resolvers/gap-store-merge-migration.ts): a node that forwards to a gap-store holder
+// and still has its own old store pushes it to the holder once, verified by counts. A no-op on the holder and on a
+// node with no local rows. It never blocks start, and an incomplete merge runs again at the next start.
+void import("./resolvers/gap-store-merge-migration.js")
+  .then((m) => m.runGapStoreMergeMigration())
+  .catch((err) => console.error(`[gap-store-merge] migration did not run at start (it runs again at the next): ${String(err).slice(0, 200)}`));
 if (process.env["GAP_DRAIN_OBSERVER"] !== "0") {
   try {
     // The drain observer reads a goal-host remedy's outcome with gap-check-supply's reader, handed in here: the observer

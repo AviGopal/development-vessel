@@ -45,7 +45,7 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent, ROUTE_NAME_FIELD, type GapWriteRoute } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent, resolveSubstrateGapMergeWrite, ROUTE_NAME_FIELD, type GapWriteRoute } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
 import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, ADMIN_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
@@ -372,6 +372,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     // The gap-write events (substrate-gap.ts GAP-WRITE EVENTS): a read, held with the gap store.
     case "gapWriteEvent":
       return resolveGapWriteEvent(p as Record<string, unknown>);
+    // The route answers this shape itself, with the principal its write gate validated; dispatched without one, it is refused.
+    // @shape-dispatch:private (reached only at the holder's resolve URL: gap-store-merge-migration.ts -> forwardToGapStore -> GAP_STORE_ENDPOINT)
+    case "substrateGapMerge_write":
+      return resolveSubstrateGapMergeWrite(p as Record<string, unknown>);
     case "resolver_schema": {
       const { resolveResolverSchema } = await import("../resolvers/resolver-schema.js");
       return resolveResolverSchema(p as Record<string, unknown>);
@@ -1366,6 +1370,18 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     const err = String((result.body as Record<string, unknown> | undefined)?.["error"] ?? "");
     if (err.startsWith("intervention_refused_invalid")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 400);
     if (err.startsWith("intervention_refused_foreign_overwrite")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 403);
+    return c.json({ success: true, shape: result.shape, body: result.body });
+  }
+
+  // A GAP-STORE MERGE (substrate-gap.ts GAP-STORE MERGE) writes rows past every gate, so its principal is the one this
+  // route's write gate validated: node-self, or an admin-scoped key. Never the body's.
+  if (pointerType === "substrateGapMerge_write") {
+    const principal = { node_self: isNodeSelfCredential(writeCred), admin: !!writeCred && writeCred.authenticated && !isNodeSelfCredential(writeCred) && writeCred.scopes.includes(ADMIN_SCOPE) };
+    const result = await resolveSubstrateGapMergeWrite({ ...(pointer as Record<string, unknown>), type: pointerType }, { principal });
+    if (result.shape === "structuredError") {
+      const b = (result.body ?? {}) as Record<string, unknown>;
+      return c.json({ success: false, shape: result.shape, body: result.body, error: String(b["detail"] ?? "structuredError") }, b["failure_mode"] === "merge_principal_required" ? 403 : 200);
+    }
     return c.json({ success: true, shape: result.shape, body: result.body });
   }
 

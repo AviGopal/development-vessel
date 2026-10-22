@@ -1414,6 +1414,8 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     "unregistered_rows", "observed", "gaps_filed", "self_gap_filed", "read_errors", "claim",
     // The §14 rows' per-item judgements and their must-fail controls' own (repair_autonomy, lane_revert_within_1h).
     "judgements", "must_fail_controls",
+    // Each §14 row's 7-day trend over its persisted aggregates (self-fact-reconcile.ts aggregateTrend).
+    "trends",
   ] },
   // discovery-vessel-registry-observer.ts: the discoveryRegistryState body (error/http_status/roundtrip_ms only on some
   // answers); missing_count and missing_vessels only on a successful read with vessel_ids given (the local-registration

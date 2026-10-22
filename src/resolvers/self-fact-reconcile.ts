@@ -89,6 +89,8 @@ export interface SelfFactResult {
   readonly aggregate?: Record<string, unknown>;
   /** The must-fail controls' own judgements (fixture items, judged by the same function). */
   readonly controls?: readonly unknown[];
+  /** The row's trend over its persisted aggregates (aggregateTrend): body.trends.<fact>. */
+  readonly trend?: AggregateTrend;
 }
 
 export const SELF_FACT_RECONCILE_ID = "activity:self_fact_reconcile@development-vessel";
@@ -496,7 +498,8 @@ export const journal = { read: readJournalLines };
  * checked == expected is the row's exit: checked counts the items that met the row (counted / green), expected counts the
  * items in the ledger. Each run's aggregate is APPENDED to the ledger as a selfFactAggregate record (per row, per run,
  * keyed `<row>@<node>@<ran_at>@<planted|recheck>`), so a count rising over days is computable from the system's own
- * store (attemptLedger kind selfFactAggregate). Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
+ * store (attemptLedger kind selfFactAggregate), and each run reads that series back (aggregateTrend: rising, flat,
+ * falling or insufficient_data over 7 days; a falling share files a divergence). Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
  * planted run; only then is the row's canary reported.
  *
  * NAMED LIMITS (said in the judgements): no key class map and no oracle-label reader are served in-system, so today a
@@ -742,7 +745,7 @@ export const judgementLine = (j: { fact: string }): string => `[self-fact-judgem
 type LedgerRow = { key: string; at: string; record: Record<string, unknown> };
 // What the two rows read, injectable for tests (a fixture ledger, store, clones and scope history).
 export interface JudgementDeps {
-  ledger: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent" | "attemptRevert") => LedgerRow[];
+  ledger: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent" | "attemptRevert" | "selfFactAggregate") => LedgerRow[];
   /** Whether the ledger file of `kind` exists: an absent file is unknown, never an empty ledger. */
   ledgerPresent: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent") => boolean;
   /** The spool's landing events not yet ingested into the ledger (read only), or null when the spool is unreadable. */
@@ -972,6 +975,60 @@ function persistAggregate(deps: JudgementDeps, fact: string, ranAt: string, plan
   }
 }
 const shortKey = (s: string): string => createHash("sha1").update(s).digest("hex").slice(0, 12);
+
+/**
+ * THE 7-DAY TREND OF A §14 ROW (REALIGNMENT §14 #3: repair autonomy RISING over 7 days). The aggregates persisted
+ * above are the series; this is their reader. Per UTC day of the trailing TREND_DAYS (today included), the day's
+ * latest observed run on this node gives share = checked / expected, where expected counts every item the ledger
+ * holds and checked only the ones that met the row: an unjudged or pending item is in expected and never in checked,
+ * so an unjudged day is never read as autonomous. A day with no observed run, or with nothing expected, has no share.
+ * Fewer than TREND_DAYS days with a share is insufficient_data (no slope); otherwise the least-squares slope of share
+ * over the day index reads rising (> 0), flat (0) or falling (< 0). Pure: the records are handed in.
+ */
+export const TREND_DAYS = 7;
+export interface AggregateTrendDay { day: string; ran_at: string | null; checked: number | null; expected: number | null; share: number | null }
+export interface AggregateTrend { fact: string; window_days: number; trend: "rising" | "flat" | "falling" | "insufficient_data"; slope: number | null; days_with_share: number; days: AggregateTrendDay[]; reason: string }
+export function aggregateTrend(records: readonly LedgerRow[], fact: string, node: string, nowMs: number): AggregateTrend {
+  const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+  const latest = new Map<string, { ms: number; rec: Record<string, unknown> }>();
+  for (const r of records) {
+    const rec = r.record;
+    if (rec["fact"] !== fact || rec["node"] !== node || rec["observed"] !== true) continue;
+    const ms = isoMs(rec["ran_at"] ?? r.at);
+    if (ms === null || ms > nowMs) continue;
+    const d = dayOf(ms);
+    const prev = latest.get(d);
+    if (!prev || prev.ms <= ms) latest.set(d, { ms, rec });
+  }
+  const days: AggregateTrendDay[] = [];
+  for (let i = TREND_DAYS - 1; i >= 0; i--) {
+    const d = dayOf(nowMs - i * 86_400_000);
+    const hit = latest.get(d);
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const checked = hit ? num(hit.rec["checked"]) : null;
+    const expected = hit ? num(hit.rec["expected"]) : null;
+    days.push({ day: d, ran_at: hit ? new Date(hit.ms).toISOString() : null, checked, expected, share: checked !== null && expected !== null && expected > 0 ? checked / expected : null });
+  }
+  const pts = days.map((d, i) => ({ x: i, y: d.share })).filter((p): p is { x: number; y: number } => p.y !== null);
+  const base = { fact, window_days: TREND_DAYS, days_with_share: pts.length, days };
+  if (pts.length < TREND_DAYS) return { ...base, trend: "insufficient_data", slope: null, reason: `${pts.length} of ${TREND_DAYS} day(s) have an observed run with something expected` };
+  const mx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+  const my = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+  const sxx = pts.reduce((a, p) => a + (p.x - mx) ** 2, 0);
+  const raw = pts.reduce((a, p) => a + (p.x - mx) * (p.y - my), 0) / sxx;
+  const slope = Math.abs(raw) < 1e-12 ? 0 : raw;
+  return { ...base, trend: slope > 0 ? "rising" : slope < 0 ? "falling" : "flat", slope, reason: `least-squares slope of checked/expected per day over ${TREND_DAYS} days` };
+}
+/** The row's trend after this run's aggregate is appended, and its divergence when the share is falling. */
+function rowTrend(deps: JudgementDeps, fact: string, nowMs: number, out: SelfFactDivergence[]): AggregateTrend {
+  let records: LedgerRow[] = [];
+  try { records = deps.ledger("selfFactAggregate"); } catch (err) { noteReadError(`selfFactAggregate series for ${fact}`, err); }
+  const t = aggregateTrend(records, fact, thisNode(), nowMs);
+  if (t.trend === "falling") {
+    out.push({ fact, key: "trend-falling", source: "attemptLedger selfFactAggregate (this node's runs)", copy: `${fact} trend over ${TREND_DAYS} days`, detail: `${fact}'s checked/expected share is falling over ${TREND_DAYS} days (slope ${t.slope!.toFixed(4)} per day): ${t.days.map((d) => `${d.day} ${d.checked}/${d.expected}`).join(", ")}`, canary: false });
+  }
+  return t;
+}
 
 // ─── the facts ──────────────────────────────────────────────────────────────
 // Each returns what it read and where it diverged. `canary` tells the fact to
@@ -1597,7 +1654,7 @@ const FACTS: Record<string, FactFn> = {
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
     const out: SelfFactDivergence[] = [];
     // An unobserved run is persisted too: a gap in the series is part of the series.
-    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate }; };
+    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate, trend: rowTrend(deps, fact, nowMs, out) }; };
     const absent = (["attemptIntent", "landingEvent", "attemptSettlement"] as const).filter((k) => !deps.ledgerPresent(k));
     if (absent.length > 0) return unread(`landing ledger file(s) absent: ${absent.join(", ")} (unknown is never an empty ledger)`);
     let landings: RepairLanding[];
@@ -1692,7 +1749,8 @@ const FACTS: Record<string, FactFn> = {
         out.push({ fact, key: `${row.id}-canary`, source: REPAIR_MUST_FAIL_ID, copy: "judgeRepairClosure", detail: "must-fail control: an operator-armed gap with a verified landing read not_counted (operator_act:arm) and its system-armed twin counted", canary: true });
       }
     }
-    return { fact, source_read: true, copies_read: expectedN, divergences: out, judgements, aggregate, controls,
+    const trend = rowTrend(deps, fact, nowMs, out);
+    return { fact, source_read: true, copies_read: expectedN, divergences: out, judgements, aggregate, controls, trend,
       note: `${expectedN} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${expectedN}` };
   },
   /**
@@ -1709,7 +1767,7 @@ const FACTS: Record<string, FactFn> = {
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
     const windowStart = nowMs - hours * 3600_000;
     const out: SelfFactDivergence[] = [];
-    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate }; };
+    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate, trend: rowTrend(deps, fact, nowMs, out) }; };
     if (!deps.ledgerPresent("attemptSettlement")) return unread("landing ledger file absent: attemptSettlement (unknown is never an empty ledger)");
     let all: Map<string, RegressedSettlement>;
     let marks: LedgerRow[];
@@ -1771,7 +1829,8 @@ const FACTS: Record<string, FactFn> = {
       for (const c of controls) deps.log(judgementLine(c));
       if (cs.every((c) => c.j.verdict === c.want)) out.push({ fact, key: `${row.id}-canary`, source: LANE_REVERT_MUST_FAIL_ID, copy: "judgeLaneRevert", detail: "must-fail control: a regressed settlement with no revert read red; a timely lane revert naming the sha read green, a late, a sha-less and an expired-unreverted one red", canary: true });
     }
-    return { fact, source_read: true, copies_read: keys.size, divergences: out, judgements, aggregate, controls,
+    const trend = rowTrend(deps, fact, nowMs, out);
+    return { fact, source_read: true, copies_read: keys.size, divergences: out, judgements, aggregate, controls, trend,
       note: `${keys.size} regressed settlement(s) (${carriedKeys.size} carried open) over ${hours}h: green=${n("green")} red=${n("red")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${String(aggregate["checked"])} of expected ${expected}` };
   },
 };
@@ -2013,6 +2072,8 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       // Per-item judgements by fact (repair_autonomy, lane_revert_within_1h), and the must-fail controls' own.
       judgements: Object.fromEntries(results.filter((r) => Array.isArray(r.judgements)).map((r) => [r.fact, r.judgements])),
       must_fail_controls: Object.fromEntries(results.filter((r) => Array.isArray(r.controls) && r.controls.length > 0).map((r) => [r.fact, r.controls])),
+      // Each §14 row's 7-day trend over its persisted aggregates (aggregateTrend).
+      trends: Object.fromEntries(results.filter((r) => r.trend).map((r) => [r.fact, r.trend])),
       // A run that checked no rows, could not read its sources, or missed a canary is NOT a
       // measurement: report null so the sweep's zero_field reader reads unknown and never
       // closes a gap on it (qa review 2026-09-29: an empty run returned 0 and would close).

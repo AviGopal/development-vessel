@@ -120,12 +120,18 @@ function readInventory(path: string): InventoryRow[] | null {
 function serviceRepos(rows: InventoryRow[]): string[] {
   return [...new Set(rows.filter((r) => typeof r.repo === "string" && r.repo.length > 0 && String(r.unit ?? "").endsWith(".service")).map((r) => r.repo as string))].sort();
 }
-function git(args: string[], cwd: string): string | null {
+/** The file's one git read. Default: trimmed stdout, or null with a read error on a non-zero exit. `raw`: the exit code
+ *  and untrimmed stdout, never a read error (a caller such as merge-base --is-ancestor reads exit 1 as an answer). */
+function git(args: string[], cwd: string): string | null;
+function git(args: string[], cwd: string, opts: { raw: true; timeoutMs: number }): { code: number; out: string } | null;
+function git(args: string[], cwd: string, opts?: { raw: true; timeoutMs: number }): string | { code: number; out: string } | null {
   try {
-    const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", ...(opts ? { timeout: opts.timeoutMs } : {}) });
+    if (opts) return { code: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) };
     if (p.exitCode !== 0) return noteReadError(`git ${args[0]} in ${cwd}`, new TextDecoder().decode(p.stderr).trim() || `exit ${p.exitCode}`);
     return new TextDecoder().decode(p.stdout).trim();
   } catch (err) {
+    if (opts) return null;
     return noteReadError(`git ${args[0]} in ${cwd}`, err);
   }
 }
@@ -774,12 +780,7 @@ export interface JudgementDeps {
   now: () => number;
   log: (line: string) => void;
 }
-const gitRun = (dir: string, args: string[]): { code: number; out: string } | null => {
-  try {
-    const p = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe", timeout: 15_000 });
-    return { code: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) };
-  } catch { return null; }
-};
+const gitRun = (dir: string, args: string[]): { code: number; out: string } | null => git(args, dir, { raw: true, timeoutMs: 15_000 });
 const gitIn = (dir: string, args: string[]): string | null => { const r = gitRun(dir, args); return r && r.code === 0 ? r.out : null; };
 /** origin/dev reaches `sha` in `dir`: true / false, or null when it cannot be read. */
 const onOriginDev = (dir: string, sha: string): boolean | null => { const r = gitRun(dir, ["merge-base", "--is-ancestor", sha, "origin/dev"]); return r === null ? null : r.code === 0 ? true : r.code === 1 ? false : null; };

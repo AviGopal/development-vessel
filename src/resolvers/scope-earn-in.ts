@@ -145,6 +145,11 @@ export const EVALUATOR_FILES: readonly string[] = [
   // repair_autonomy row counts a closure as the system's own only through it, so a lane edit there would move the
   // §14 count the evaluator reports.
   "repos/development-vessel/src/resolvers/operator-acts.ts",
+  // The gap store's forwarding and merge helpers (qa, 10-22, TIGHTENING): substrate-gap.ts, an excluded file on the
+  // evaluator's import closure, imports them, so a lane edit there would reach the store the evaluator reads.
+  "repos/development-vessel/src/lib/gap-store-merge.ts",
+  "repos/development-vessel/src/lib/call-credential.ts",
+  "repos/development-vessel/src/lib/gap-forward-queue.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -271,6 +276,9 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/goal-host-vessel/test/routing-corpus/wiring-pin.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/src/resolvers/compose-admission-core.ts": { class: "judge_trust", reason: "the compose admission floor, clamp and refusal renderer (containment)" },
   "repos/development-vessel/src/resolvers/operator-acts.ts": { class: "judge_trust", reason: "evaluator file: feeds the §14 evaluator's operator-act count (verdict)" },
+  "repos/development-vessel/src/lib/gap-store-merge.ts": { class: "judge_trust", reason: "evaluator file: the gap-store merge's plan and read-back check, on the store the evaluator reads (ledger)" },
+  "repos/development-vessel/src/lib/call-credential.ts": { class: "judge_trust", reason: "evaluator file: which caller credential a forwarded gap-store call presents (credential)" },
+  "repos/development-vessel/src/lib/gap-forward-queue.ts": { class: "judge_trust", reason: "evaluator file: the durable queue of gap writes replayed to the holder (ledger)" },
   "repos/development-vessel/src/judge-rules/": { class: "judge_trust", reason: "pre-closed until the routing opening act (admission rules)" },
   "repos/development-vessel/test/routing-corpus/": { class: "judge_trust", reason: "the development-vessel routing corpus and its admission checks (judge tests)" },
   "repos/development-vessel/test/routing-corpus/chain.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },

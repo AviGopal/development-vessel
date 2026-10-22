@@ -1,0 +1,12 @@
+// EXCERPT of development-vessel src/resolvers/gap-check-supply.ts as it was at 2182d140: nonAttemptDelayMs, verbatim.
+/**
+ * The wait before re-sending after the n-th CONSECUTIVE non-attempt (CHANGE-30): the kind's base delay (a refusal's
+ * own retry_after_s when the receiver gave one) doubled per consecutive one, capped by the shaped maximum, and never
+ * shorter than what the receiver asked for. Bounded by construction: the sends a never-taking receiver gets in any
+ * window fall as the streak grows (with the defaults, 30 min doubling to a 6 h cap: at most 7 sends in 24 h).
+ */
+export function nonAttemptDelayMs(baseMs: number, streak: number, maxMs: number, receiverMinMs = 0): number {
+  const n = Math.max(1, Math.floor(streak));
+  const grown = Math.min(baseMs * 2 ** Math.min(n - 1, 30), Math.max(maxMs, baseMs));
+  return Math.max(grown, receiverMinMs);
+}

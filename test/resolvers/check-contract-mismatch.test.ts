@@ -508,3 +508,88 @@ describe("LIVE: the test_writing verify refuses a property read on a return that
     expect(j).toMatchObject({ ok: true, stage: null });
   });
 });
+
+// A CHECK THAT CALLS ITS TARGET THROUGH A CAST IS REFUSED BEFORE IT LANDS (2026-10-22, user ruling: held until a gate
+// refuses it).
+//
+// development-vessel 2182d140 landed a check calling `Number((mod as any).nonAttemptDelayMs(row))`: one row object where
+// the function declares (baseMs, streak, maxMs, receiverMinMs = 0). The cast erased the signature, so the call
+// typechecked and the check is red for the call on every tree, not for the defect. castCalleeRefusal refuses a call to
+// a src export reached through a cast to any / unknown (`check_asserts_contract_mismatch:cast_callee:<fn>`), statically;
+// the verify applies it after contractMismatchRefusal, so a check refused for its contract keeps that reason.
+//
+// FIXTURES: 2182d140's check verbatim, nonAttemptDelayMs as it was at 2182d140 (an excerpt), and a control making the
+// same assertion through the typed call.
+const GCS_REL = "src/resolvers/gap-check-supply.ts";
+const GCS_SRC = fixture("gap-check-supply.at-2182d140.excerpt.ts.txt");
+const GCS_TREE = readerOf({ [GCS_REL]: GCS_SRC });
+const CHECK_2182 = fixture("2182d140-sequencing-condition.check.ts.txt");
+const CHECK_TYPED = fixture("typed-callee.check.ts.txt");
+const REL_2182 = "test/checks/a-ruled-sequencing-condition-has-no-shaped-field-the-check-s.check.ts";
+const castRefusal = csa["castCalleeRefusal"] as undefined | ((source: string, checkRel: string, reader: Reader) => { module: string; fn: string; reason: string } | null);
+
+describe("castCalleeRefusal: a call to the target through a cast to any / unknown", () => {
+  test("[MUST-FAIL] 2182d140's check is refused: nonAttemptDelayMs reached through `(mod as any)`", () => {
+    expect(typeof castRefusal).toBe("function");
+    const r = castRefusal!(CHECK_2182, REL_2182, GCS_TREE);
+    expect(r).toMatchObject({ module: GCS_REL, fn: "nonAttemptDelayMs" });
+    expect(r!.reason).toContain("check_asserts_contract_mismatch:cast_callee:nonAttemptDelayMs");
+    expect(r!.reason).toContain("(baseMs: number, streak: number, maxMs: number, receiverMinMs = 0)");
+  });
+
+  test("[CONTROL] the typed call is not refused", () => {
+    expect(typeof castRefusal).toBe("function");
+    expect(castRefusal!(CHECK_TYPED, REL_2182, GCS_TREE)).toBeNull();
+  });
+
+  test("[MUST-FAIL] every cast form that reaches the callee is refused", () => {
+    expect(typeof castRefusal).toBe("function");
+    const call = "Number((mod as any).nonAttemptDelayMs(row))";
+    expect(CHECK_2182).toContain(call);
+    for (const form of [
+      "Number((mod as unknown as Record<string, (r: unknown) => number>)[\"nonAttemptDelayMs\"](row))",
+      "Number((mod.nonAttemptDelayMs as any)(row))",
+      "Number((<any>mod).nonAttemptDelayMs(row))",
+      "Number(((mod as unknown) as any).nonAttemptDelayMs(row))",
+      "Number((mod as unknown)[\"nonAttemptDelayMs\"](row))",
+      "Number(((mod as unknown) as { nonAttemptDelayMs: (r: unknown) => number }).nonAttemptDelayMs(row))",
+    ]) expect(castRefusal!(CHECK_2182.replace(call, form), REL_2182, GCS_TREE)?.fn).toBe("nonAttemptDelayMs");
+    const aliased = CHECK_2182.replace(`  const delayMs = ${call};`, "  const f: any = mod.nonAttemptDelayMs;\n  const delayMs = Number(f(row));");
+    expect(aliased).not.toBe(CHECK_2182);
+    expect(castRefusal!(aliased, REL_2182, GCS_TREE)?.fn).toBe("nonAttemptDelayMs");
+  });
+
+  test("[CONTROL] a cast on an argument or a result, a cast to a real type, or a module outside src decides nothing", () => {
+    expect(typeof castRefusal).toBe("function");
+    const call = "Number((mod as any).nonAttemptDelayMs(row))";
+    for (const form of [
+      "Number(mod.nonAttemptDelayMs(row as any, 1, 60_000))",
+      "(mod.nonAttemptDelayMs(0, 1, 60_000) as any)",
+      "Number((mod as typeof mod).nonAttemptDelayMs(0, 1, 60_000))",
+    ]) expect(castRefusal!(CHECK_2182.replace(call, form), REL_2182, GCS_TREE)).toBeNull();
+    expect(castRefusal!(CHECK_2182.replace("../../src/resolvers/gap-check-supply", "../helpers/gap-check-supply"), REL_2182, readerOf({ "test/helpers/gap-check-supply.ts": GCS_SRC }))).toBeNull();
+  });
+});
+
+describe("LIVE: the test_writing verify refuses a check that calls its target through a cast", () => {
+  const verdictOf = async (gapId: string, check: string): Promise<Judgement> => {
+    const root = mkdtempSync(join(tmpdir(), "contract-mismatch-cast-"));
+    for (const [rel, text] of Object.entries({ [GCS_REL]: GCS_SRC, [`test/checks/${checkFile(gapId)}`]: check })) {
+      mkdirSync(join(root, rel, ".."), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return judge({ gapId, vesselRoot: root, editSite: null, run: runner(root), runs: 3 });
+  };
+
+  test("[MUST-FAIL] 2182d140's check is refused at the verify: check_asserts_contract_mismatch:cast_callee", async () => {
+    const j = await verdictOf("contract-mismatch-cast-callee", CHECK_2182);
+    expect(j.ok).toBe(false);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("check_asserts_contract_mismatch:cast_callee:nonAttemptDelayMs");
+  });
+
+  test("[CONTROL] the typed check passes the verify", async () => {
+    const j = await verdictOf("contract-mismatch-typed-callee", CHECK_TYPED);
+    expect(j).toMatchObject({ ok: true, stage: null });
+  });
+});

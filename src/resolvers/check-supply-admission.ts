@@ -985,18 +985,14 @@ function declaredReturnKinds(ts: TsModule, sf: TS.SourceFile, fnName: string): {
 /** The named properties a value of each kind has (its prototype chain's own names); an object's are open. */
 const protoNames = (p: object): Set<string> => new Set([...Object.getOwnPropertyNames(p), ...Object.getOwnPropertyNames(Object.prototype)]);
 const VALUE_MEMBERS: Record<ValueKind, Set<string>> = { array: protoNames(Array.prototype), string: protoNames(String.prototype), number: protoNames(Number.prototype), boolean: protoNames(Boolean.prototype), null: new Set(), undefined: new Set(), object: new Set() };
-export function contractMismatchRefusal(source: string, checkRel: string, redReason: unknown, reader: SrcReader): { test: string; module: string; fn: string; reads: string; reason: string } | null {
-  const compared = (redReason as { compared?: unknown } | null | undefined)?.compared;
-  if (!Array.isArray(compared) || compared.length === 0) return null;
-  const ts = loadTs();
-  if (!ts) return null;
-  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+/** A check's module bindings (relative specifiers only): namespace imports and `const ns = await import(…)` by local
+ *  name, named imports by local name. */
+function checkBindings(ts: TsModule, sf: TS.SourceFile): { ns: Map<string, string>; named: Map<string, { spec: string; imported: string }> } {
   const unwrap = (e: TS.Expression): TS.Expression => {
     while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e) || ts.isAwaitExpression(e)) e = e.expression;
     return e;
   };
   const relSpec = (n: TS.Expression | undefined): string | null => (n && ts.isStringLiteral(n) && n.text.startsWith(".") ? n.text : null);
-  // The check's module bindings: namespace imports and `const ns = await import(…)` by local name, named imports by local name.
   const ns = new Map<string, string>();
   const named = new Map<string, { spec: string; imported: string }>();
   const bind = (n: TS.Node): void => {
@@ -1013,6 +1009,20 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     ts.forEachChild(n, bind);
   };
   bind(sf);
+  return { ns, named };
+}
+export function contractMismatchRefusal(source: string, checkRel: string, redReason: unknown, reader: SrcReader): { test: string; module: string; fn: string; reads: string; reason: string } | null {
+  const compared = (redReason as { compared?: unknown } | null | undefined)?.compared;
+  if (!Array.isArray(compared) || compared.length === 0) return null;
+  const ts = loadTs();
+  if (!ts) return null;
+  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const unwrap = (e: TS.Expression): TS.Expression => {
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e) || ts.isAwaitExpression(e)) e = e.expression;
+    return e;
+  };
+  const relSpec = (n: TS.Expression | undefined): string | null => (n && ts.isStringLiteral(n) && n.text.startsWith(".") ? n.text : null);
+  const { ns, named } = checkBindings(ts, sf);
   // Every expect(<subject>)…<matcher>(…) call: the matcher name's position is where bun's stack frame points.
   const expects: Array<{ subject: TS.Expression; line: number; col: number; matcher: string; negated: boolean; args: readonly TS.Expression[] }> = [];
   const findExpects = (n: TS.Node): void => {
@@ -1257,6 +1267,88 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
   return null;
 }
 
+/**
+ * A CHECK THAT CALLS ITS TARGET THROUGH A CAST IS NOT A FALSIFIER (user ruling: held until a gate refuses it). 2182d140
+ * called `Number((mod as any).nonAttemptDelayMs(row))` on a function declared (baseMs, streak, maxMs, receiverMinMs = 0):
+ * one row object where four numbers belong. The cast erased the signature, so the call typechecked, ran, and was red on
+ * every tree for the call, not for the defect. A call whose callee is an export of a src module of the check's vessel,
+ * reached through a cast to `any` or `unknown` (`x as any`, `x as unknown`, `x as unknown as T`, `<any>x`), is refused,
+ * `check_asserts_contract_mismatch:cast_callee:<fn>`: on the namespace (`(ns as any).fn(…)`, `(ns as unknown as T)["fn"](…)`),
+ * on the member or a named import (`(ns.fn as any)(…)`, `(fn as any)(…)`), or through a local holding one of those or
+ * declared `: any` / `: unknown` (`const f: any = ns.fn; f(…)`). A cast on an ARGUMENT, or on a result, is not a callee
+ * cast. Static, over the check alone; a caller applies it after contractMismatchRefusal (so a check refused for its
+ * contract keeps that reason): the verify of a test_writing compose (judgeTestWritingCheck) does. null = no refusal.
+ */
+export function castCalleeRefusal(source: string, checkRel: string, reader: SrcReader): { module: string; fn: string; reason: string } | null {
+  const ts = loadTs();
+  if (!ts) return null;
+  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const { ns, named } = checkBindings(ts, sf);
+  const bare = (e: TS.Expression): TS.Expression => { while (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression; return e; };
+  const erasing = (t: TS.TypeNode): boolean => t.kind === ts.SyntaxKind.AnyKeyword || t.kind === ts.SyntaxKind.UnknownKeyword;
+  /** The expression under a chain of casts one of which erases its type (to any / unknown, `as unknown as T`), else null. */
+  const erased = (raw: TS.Expression): TS.Expression | null => {
+    let e = bare(raw), erases = false;
+    while (ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)) { erases ||= erasing(e.type); e = bare(e.expression); }
+    return erases ? e : null;
+  };
+  /** The module export an expression names: a named import, or a member of a namespace binding. */
+  const exportOf = (raw: TS.Expression): { spec: string; fn: string } | null => {
+    const e = bare(raw);
+    if (ts.isIdentifier(e) && named.has(e.text)) return { spec: named.get(e.text)!.spec, fn: named.get(e.text)!.imported };
+    const obj = ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) ? bare(e.expression) : null;
+    if (!obj || !ts.isIdentifier(obj) || !ns.has(obj.text)) return null;
+    if (ts.isPropertyAccessExpression(e)) return { spec: ns.get(obj.text)!, fn: e.name.text };
+    if (!ts.isElementAccessExpression(e)) return null;
+    return ts.isStringLiteral(e.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(e.argumentExpression) ? { spec: ns.get(obj.text)!, fn: e.argumentExpression.text } : null;
+  };
+  /** A callee reached through an erasing cast: the export it names, or null. */
+  const castCallee = (raw: TS.Expression): { spec: string; fn: string } | null => {
+    const inner = erased(raw);
+    if (inner) return exportOf(inner);
+    const e = bare(raw);
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+      const obj = erased(e.expression);
+      if (!obj || !ts.isIdentifier(obj) || !ns.has(obj.text)) return null;
+      if (ts.isPropertyAccessExpression(e)) return { spec: ns.get(obj.text)!, fn: e.name.text };
+      return ts.isStringLiteral(e.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(e.argumentExpression) ? { spec: ns.get(obj.text)!, fn: e.argumentExpression.text } : null;
+    }
+    return null;
+  };
+  /** The declaration of a local `name` in scope at `from`. */
+  const declOf = (from: TS.Node, name: string): TS.VariableDeclaration | null => {
+    for (let a: TS.Node | undefined = from.parent; a; a = a.parent) {
+      if (!ts.isBlock(a) && !ts.isSourceFile(a)) continue;
+      for (const s of a.statements) if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && d.name.text === name && d.initializer) return d;
+    }
+    return null;
+  };
+  let found: { spec: string; fn: string; call: TS.CallExpression } | null = null;
+  const visit = (n: TS.Node): void => {
+    if (found) return;
+    if (ts.isCallExpression(n)) {
+      let hit = castCallee(n.expression);
+      const callee = bare(n.expression);
+      if (!hit && ts.isIdentifier(callee) && !named.has(callee.text)) {
+        const d = declOf(n, callee.text);
+        if (d?.initializer) hit = castCallee(d.initializer) ?? (d.type && erasing(d.type) ? exportOf(d.initializer) : null);
+      }
+      if (hit) found = { ...hit, call: n };
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  if (!found) return null;
+  const { spec, fn, call } = found as { spec: string; fn: string; call: TS.CallExpression };
+  const mod = resolveModule(checkRel, spec, reader);
+  if (!mod || !mod.rel.startsWith("src/")) return null;
+  const msf = ts.createSourceFile(mod.rel, mod.source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(mod.rel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const decl = topLevelFunction(ts, msf, fn);
+  const params = decl ? decl.parameters.map((p) => p.getText(msf)).join(", ") : null;
+  const text = call.getText(sf).replace(/\s+/g, " ").slice(0, 120);
+  return { module: mod.rel, fn, reason: `${CONTRACT_MISMATCH_STAGE}:cast_callee:${fn}: the check calls ${fn} from ${mod.rel} through a cast to any / unknown (\`${text}\`), which erases the signature the call must match${params !== null ? ` (${fn} declares (${params.slice(0, 160)}))` : ""}, so a call that does not fit the contract typechecks and its red is not the defect's: call the typed export` };
+}
+
 /** W1: how many times the verify runs the check (every run must be the same assertion red). */
 export const TEST_WRITING_CHECK_RUNS = 3;
 
@@ -1278,8 +1370,9 @@ export type TestWritingJudgement = {
  * up to `runs` times through `run` (feature_compose's shell; the caller supplies the command; stopping at the first run
  * that is not an assertion red), be the same assertion red every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier),
  * and require no export its module lacks (missingExportRefusal, the attach guard: a red on a missing name is red on every
- * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify) and assert no contract its
- * target lacks (contractMismatchRefusal, applied at the arm step too). The static checks run
+ * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify), assert no contract its
+ * target lacks (contractMismatchRefusal, applied at the arm step too) and call no target through a cast that erases its
+ * signature (castCalleeRefusal, after it). The static checks run
  * after the runs so every earlier stage keeps its verdict (a named import of a missing export still fails to LOAD and is
  * wrong_reason). ok only then.
  */
@@ -1315,6 +1408,8 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   // The runs agree (W1), so the first one's compared values stand for all; 333be5f passed this verify before.
   const mismatch = contractMismatchRefusal(source, checkRel, classifyCheckRun(raws[0]!), srcReaderAt(input.vesselRoot));
   if (mismatch) return out(CONTRACT_MISMATCH_STAGE, mismatch.reason, { edit_site: site.edit_site, runs });
+  const cast = castCalleeRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
+  if (cast) return out(CONTRACT_MISMATCH_STAGE, cast.reason, { edit_site: site.edit_site, runs });
   const unguarded = exportGuardUnavailable();
   return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) });
 }

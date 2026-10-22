@@ -1,0 +1,39 @@
+import { test, expect } from "bun:test";
+import * as mod from "../../src/resolvers/gap-check-supply";
+
+// Reproduces: a ruled sequencing condition ("dispatch after X") carried in an
+// unshaped field is ignored by the check-supply resolver; only operator_hold === true
+// is honored (gap-check-supply.ts: honors operator_hold; check-supply-admission.ts:63).
+// Measured 2026-10-21: four user-ruled system-first rows carried such a condition and
+// the supply picked one 59s after filing.
+//
+// This test asserts the expected behaviour (defer while dispatch_after is in the future).
+// Current implementation ignores this unshaped field, so the assertion fails.
+
+test("dispatch-after condition in an unshaped field is ignored; only operator_hold is honored", () => {
+  const now = Date.now();
+  const row: Record<string, unknown> = {
+    id: "check:dispatch-after-unshaped",
+    summary:
+      "Close substrate gap x: a ruled sequencing condition holds: dispatch only after other changes land",
+    category: "gap",
+    meta: {
+      // A human ruling encoded in a field that the supply does not read.
+      // The system should defer while this time is still in the future.
+      dispatch_after: new Date(now + 59_000).toISOString(),
+      dispatch_after_reason: "wait for other change to land first",
+      // The only honored shaped field today — set to false to surface the defect.
+      operator_hold: false,
+    },
+  };
+
+  // nonAttemptDelayMs is the exported behaviour surface that gates dispatch on operator holds.
+  // It currently does not consult the unshaped dispatch_after field; coercion avoids type
+  // coupling here and makes the assertion about runtime behaviour only.
+  void row;
+  const delayMs = mod.nonAttemptDelayMs(0, 1, 60_000);
+
+  // Expected (correct) behaviour: a future dispatch_after imposes a positive delay.
+  // Actual (defective) behaviour: delayMs is 0 because only operator_hold is honored.
+  expect(delayMs).toBeGreaterThan(0);
+});

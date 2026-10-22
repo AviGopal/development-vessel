@@ -35,7 +35,10 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType, credentialSendRefusal } from "../lib/caller-credential.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
-import { currentCallCredential } from "../lib/call-credential.js";
+import { currentCallCredential, runWithoutCallCredential } from "../lib/call-credential.js";
+import { bumpQueuedAttempt, deadLetterQueued, enqueueGapWrite, queuedFiles, readQueued, removeQueued } from "../lib/gap-forward-queue.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
@@ -152,13 +155,18 @@ export async function forwardToGapStore(pointer: Record<string, unknown>): Promi
   const withheld = auth ? await credentialSendRefusal(ep, "gap-store holder") : null;
   try {
     const r = await fetch(ep, { method: "POST", headers: { "Content-Type": "application/json", ...(auth && !withheld ? { Authorization: auth } : {}) }, body: JSON.stringify({ impulse: { pointer } }), signal: AbortSignal.timeout(15_000) });
+    // The holder answered over HTTP: the link is up, so writes queued while it was away may replay (GAP-WRITE QUEUE).
+    noteGapStoreHolderAnswered();
+    if (GAP_STORE_TRANSIENT_HTTP.has(r.status)) {
+      return { shape: "structuredError", body: { resolver: "substrateGap", failure_mode: "gap_store_unreachable", http_status: r.status, detail: `gap store at ${ep} answered HTTP ${r.status}` } } as ResolverResult;
+    }
     const j = await r.json() as { shape?: string; body?: unknown; success?: unknown };
     if (withheld && (j.success === false || !r.ok || !j.shape || j.shape === "structuredError")) {
       return { shape: "structuredError", body: { resolver: "substrateGap", failure_mode: "gap_store_cleartext_refused", detail: `gap store at ${ep}: no credential was sent (${withheld}), and the holder answered HTTP ${r.status}. Use https or a private address.` } } as ResolverResult;
     }
     return { shape: String(j.shape ?? "structuredError"), body: j.body ?? { detail: `gap store at ${ep} answered HTTP ${r.status}` } } as ResolverResult;
   } catch (e) {
-    return { shape: "structuredError", body: { resolver: "substrateGap", detail: `gap store at ${ep} unreachable: ${(e as Error).message}` } } as ResolverResult;
+    return { shape: "structuredError", body: { resolver: "substrateGap", failure_mode: "gap_store_unreachable", detail: `gap store at ${ep} unreachable: ${(e as Error).message}` } } as ResolverResult;
   }
 }
 
@@ -2483,9 +2491,20 @@ export function redactAuthTokens(text: string): string {
 async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>, audit: GapWriteAudit): Promise<ResolverResult> {
   const id = String(incoming["id"]);
   const status = String(incoming["status"] ?? "open");
+  const queueable = gapWriteIsQueueable();
+  // THE WRITE ID (GAP-WRITE QUEUE): minted here, on the first attempt of a write that may be queued, and sent with every
+  // forward of it, so the holder applies it once however often it is sent (a timeout after the holder applied it, a
+  // replay). A replayed write already carries its own.
+  if (queueable && (typeof pointer["write_id"] !== "string" || !GAP_WRITE_ID_RE.test(pointer["write_id"] as string))) pointer["write_id"] = randomUUID();
+  const writeId = typeof pointer["write_id"] === "string" ? (pointer["write_id"] as string) : "";
+  // FIFO: while earlier writes of this node wait in the queue, a new one waits behind them, so a later write of a gap
+  // never reaches the holder before an earlier one.
+  if (queueable && queuedFiles(gapForwardQueueDir()).length > 0) return queueGapWrite(id, writeId, pointer, "earlier writes are queued");
   const read = await forwardToGapStore({ type: "substrateGap", id, limit: 5 });
   const rows = (read?.body as { gaps?: unknown } | undefined)?.gaps;
   if (!read || read.shape !== "substrateGap" || !Array.isArray(rows)) {
+    const transient = (read?.body as { failure_mode?: unknown } | undefined)?.failure_mode === "gap_store_unreachable";
+    if (transient && queueable) return queueGapWrite(id, writeId, pointer, "the holder could not be read");
     // The holder's own answer (timeout vs refusal vs HTTP status) goes in the log, so a node's journal can say WHY it is unreadable.
     // It is a REMOTE body, so any credential it echoes (an auth refusal quoting the header) is masked before it is logged.
     console.warn(`[substrate-gap] NOT forwarded ${id}: the gap-store holder could not be read, so the write gates cannot be applied (holder said: ${redactAuthTokens(JSON.stringify(read?.body ?? null)).slice(0, 200)})`);
@@ -2494,6 +2513,8 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
       body: {
         resolver: "substrateGap_write",
         failure_mode: "gap_store_unavailable",
+        // With the queue off (a scratch store in tests), the answer is exactly what it was before the queue.
+        ...(gapForwardQueueEnabled() ? { ...(transient ? { transient: true } : {}), queued: false, ...(queueable ? {} : { queue_refused: gapWriteReplaying() ? "replaying" : "principal_not_this_node" }) } : {}),
         detail: `gap ${id}: not forwarded — the gap-store holder could not be read (${JSON.stringify(read?.body ?? null).slice(0, 200)}), so the write gates cannot be applied`,
       },
     } as ResolverResult;
@@ -2507,7 +2528,9 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
     const rg = existingRowGates(pointer, incoming, id, status, stored);
     if ("refused" in rg) return rg.refused;
   }
-  return (await forwardToGapStore(pointer))!;
+  const sent = (await forwardToGapStore(pointer))!;
+  if (queueable && (sent.body as { failure_mode?: unknown } | undefined)?.failure_mode === "gap_store_unreachable") return queueGapWrite(id, writeId, pointer, "the holder did not take the write");
+  return sent;
 }
 
 /**
@@ -2542,7 +2565,7 @@ export async function resolveSubstrateGapWrite(
   const audit: GapWriteAudit = {};
   let r: ResolverResult | undefined;
   try {
-    r = await resolveSubstrateGapWriteInner(pointer, opts, audit);
+    r = await applyWriteOnce(pointer, audit, () => resolveSubstrateGapWriteInner(pointer, opts, audit));
     return r;
   } finally {
     if (marker) {
@@ -3642,3 +3665,174 @@ export async function resolveSubstrateGapMergeWrite(pointer: Record<string, unkn
     return { shape: "substrateGapMerge_write", body: { migration_id: migrationId, chunk_index: chunkIndex, verified: true, counts } } as ResolverResult;
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP-WRITE QUEUE (2026-10-22). A forwarding node's gap write used to be lost whenever the holder was unreachable:
+// gateThenForward failed closed with gap_store_unavailable and nothing kept the write. Across hosts a link drop does
+// that to every gap the node files during the outage. Now such a write is kept on disk (lib/gap-forward-queue.ts:
+// gaps/forward-queue/, one file per write, tmp + rename, bounded) and replayed, oldest first, when the holder
+// answers again.
+//
+// WHAT IS QUEUED. Only a write whose principal is this node: one it makes itself, or one its route received with
+// the node's own key (the pull-sync gate files that way). A caller with its own key is live and can retry with its
+// own credential, which a queue must never hold. The caller still gets `failure_mode: gap_store_unavailable`, the
+// value it already matches on, plus `queued: true` and the write id, or `queued: false` with a typed
+// `queue_refused` (queue_full, entry_too_large, queue_unwritable, principal_not_this_node). Only a TRANSIENT failure
+// queues: the holder unreachable, a timeout, or HTTP 502/503/504 (failure_mode gap_store_unreachable). A refusal
+// (4xx, a gate, gap_store_cleartext_refused) never queues: replaying a decided answer cannot change it.
+//
+// ONCE, BY WRITE ID. gateThenForward mints a write id on a write's first attempt and sends it with every forward. The
+// holder applies a write id once. It keeps the applied ids (gaps/applied-write-ids.jsonl, bounded) and answers a
+// repeat with action duplicate_write_id, so a write the holder applied before its answer was lost is not applied
+// again on replay. One known debt: the id is recorded just AFTER the write's save, so a holder crash between the two
+// lets one replay apply it a second time (an upsert of the same content).
+//
+// REPLAY. At unit start (after the merge migration) and after any HTTP answer from the holder, one drain at a time
+// replays the queue oldest first, through the full write path again, so the gates judge the holder's CURRENT row:
+//   - an answer that is not an error removes the entry;
+//   - a transient failure adds one attempt to the SAME entry and stops the drain, because the link is still down;
+//     after GAP_FORWARD_QUEUE_MAX_ATTEMPTS the entry is dead-lettered as attempts_exhausted;
+//   - any other answer dead-letters it as refused_on_replay:<rule>.
+// While writes wait, a new queueable write waits behind them (FIFO), so a later write of a gap never overtakes an
+// earlier one. A write from a caller with its own key is not queued and can still go ahead of queued writes: a named
+// limit.
+// ─────────────────────────────────────────────────────────────────────────────
+const GAP_STORE_TRANSIENT_HTTP: ReadonlySet<number> = new Set([502, 503, 504]);
+const GAP_WRITE_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+export const GAP_FORWARD_QUEUE_MAX_ATTEMPTS = 50;
+const gapForwardQueueDir = (): string => join(workspaceRoot(), "gaps", "forward-queue");
+const gapWriteReplay = new AsyncLocalStorage<true>();
+function gapWriteReplaying(): boolean { return gapWriteReplay.getStore() === true; }
+/** Whether a failed forward of the current write may be queued: this node is its principal, and it is not a replay. */
+function gapWriteIsQueueable(): boolean {
+  if (gapWriteReplaying() || !gapForwardQueueEnabled()) return false;
+  const call = currentCallCredential();
+  if (call === null) return true;
+  const nodeKey = process.env["METABOB_API_KEY"] ?? process.env["API_KEY"];
+  const m = /^ApiKey\s+(\S+)$/i.exec(call);
+  return !!nodeKey && !!m && m[1] === nodeKey;
+}
+function queueGapWrite(id: string, writeId: string, pointer: Record<string, unknown>, why: string): ResolverResult {
+  const { _route_caller: _dropped, ...kept } = pointer;
+  const q = enqueueGapWrite(gapForwardQueueDir(), writeId, kept);
+  gapForwardQueueMayHaveEntries = true;
+  if (q.queued) {
+    console.warn(`[gap-forward-queue] ${id}: ${why}; queued for replay as write ${writeId}`);
+    scheduleGapForwardDrain();
+    return { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "gap_store_unavailable", queued: true, write_id: writeId, detail: `gap ${id}: not yet at the holder (${why}); kept on disk and replayed when the holder answers` } } as ResolverResult;
+  }
+  console.error(`[gap-forward-queue] ${id}: ${why}, and the write was NOT queued (${q.reason}: ${q.detail})`);
+  return { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "gap_store_unavailable", queued: false, queue_refused: q.reason, write_id: writeId, detail: `gap ${id}: not forwarded (${why}) and not queued (${q.reason}: ${q.detail})` } } as ResolverResult;
+}
+
+let gapForwardQueueMayHaveEntries = true; // unknown until the first drain looks
+let gapForwardDrain: Promise<GapForwardDrainResult> | null = null;
+let gapForwardDrainScheduled = false;
+export type GapForwardDrainResult = { replayed: number; dead: number; remaining: number; stopped: string | null };
+function noteGapStoreHolderAnswered(): void {
+  if (gapForwardQueueMayHaveEntries && !gapWriteReplaying() && gapForwardQueueEnabled()) scheduleGapForwardDrain();
+}
+// NOT FROM A SCRATCH STORE IN TESTS, unless a test opts in (the gap-written publish's rule, above): the suite runs many
+// files in one process on one scratch root, and a write one file queued against its down holder would otherwise
+// replay into the next file's holder. The deployed store root is never a scratch root.
+let gapForwardQueueFromScratchAllowed = false;
+function gapForwardQueueEnabled(): boolean { return gapForwardQueueFromScratchAllowed || !isScratchGapStoreRoot(workspaceRoot()); }
+/** Tests only: let the forward queue run from a scratch store root. */
+export function __allowGapForwardQueueFromScratchForTests(on: boolean): void { gapForwardQueueFromScratchAllowed = on; }
+function scheduleGapForwardDrain(): void {
+  if (gapForwardDrainScheduled || gapWriteReplaying()) return;
+  gapForwardDrainScheduled = true;
+  setTimeout(() => { gapForwardDrainScheduled = false; void drainGapForwardQueue().catch((err) => console.error(`[gap-forward-queue] drain failed: ${String(err).slice(0, 200)}`)); }, 0);
+}
+/** Replay the queue, oldest first, one drain at a time (a call while one runs joins it). */
+export function drainGapForwardQueue(): Promise<GapForwardDrainResult> {
+  if (gapForwardDrain) return gapForwardDrain;
+  const run = runWithoutCallCredential(() => gapWriteReplay.run(true, async (): Promise<GapForwardDrainResult> => {
+    const dir = gapForwardQueueDir();
+    const out: GapForwardDrainResult = { replayed: 0, dead: 0, remaining: 0, stopped: null };
+    if (!gapForwardQueueEnabled()) return out;
+    if (gapStoreIsLocal()) { out.remaining = queuedFiles(dir).length; out.stopped = out.remaining > 0 ? "this node holds the store" : null; return out; }
+    for (const file of queuedFiles(dir)) {
+      const entry = readQueued(dir, file);
+      if (!entry) { deadLetterQueued(dir, file, null, "unreadable_entry"); out.dead++; continue; }
+      const r = await resolveSubstrateGapWrite(structuredClone(entry.pointer));
+      const b = (r.body ?? {}) as Record<string, unknown>;
+      if (r.shape !== "structuredError") { removeQueued(dir, file); out.replayed++; continue; }
+      if (b["failure_mode"] === "gap_store_unreachable" || b["transient"] === true) {
+        const next = bumpQueuedAttempt(dir, file, entry, String(b["detail"] ?? "transient"));
+        if (next.attempts >= GAP_FORWARD_QUEUE_MAX_ATTEMPTS) { deadLetterQueued(dir, file, next, "attempts_exhausted"); out.dead++; continue; }
+        out.stopped = "the holder is still unreachable";
+        break;
+      }
+      deadLetterQueued(dir, file, entry, `refused_on_replay:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}`);
+      console.error(`[gap-forward-queue] write ${entry.write_id} refused on replay (${String(b["rule"] ?? b["failure_mode"] ?? "error")}); dead-lettered`);
+      out.dead++;
+    }
+    out.remaining = queuedFiles(dir).length;
+    gapForwardQueueMayHaveEntries = out.remaining > 0;
+    if (out.replayed + out.dead > 0) console.log(`[gap-forward-queue] drain: replayed=${out.replayed} dead=${out.dead} remaining=${out.remaining}${out.stopped ? ` (${out.stopped})` : ""}`);
+    return out;
+  }));
+  gapForwardDrain = run;
+  // Writes queued while this drain ran are picked up by the next one, unless the holder is still away.
+  void run.then((o) => { if (gapForwardDrain === run) gapForwardDrain = null; if (o.remaining > 0 && !o.stopped) scheduleGapForwardDrain(); },
+    () => { if (gapForwardDrain === run) gapForwardDrain = null; });
+  return run;
+}
+
+// THE HOLDER APPLIES A WRITE ID ONCE (see GAP-WRITE QUEUE). In memory from first use, appended per applied write,
+// rewritten (tmp + rename) to the newest GAP_APPLIED_WRITE_IDS_MAX when it holds twice that many.
+const GAP_APPLIED_WRITE_IDS_MAX = 20_000;
+const GAP_APPLIED_WRITE_IDS_PATH = () => join(workspaceRoot(), "gaps", "applied-write-ids.jsonl");
+let gapAppliedWriteIds: Map<string, string> | null = null;
+let gapAppliedWriteIdLines = 0;
+const gapWritesInFlight = new Map<string, Promise<ResolverResult>>();
+function appliedWriteIds(): Map<string, string> {
+  if (gapAppliedWriteIds) return gapAppliedWriteIds;
+  const m = new Map<string, string>();
+  let lines = 0;
+  try {
+    for (const line of readFileSync(GAP_APPLIED_WRITE_IDS_PATH(), "utf-8").split("\n")) {
+      if (!line) continue;
+      lines++;
+      try { const e = JSON.parse(line) as { w?: unknown; g?: unknown }; if (typeof e.w === "string") { m.delete(e.w); m.set(e.w, String(e.g ?? "")); } } catch { /* a torn line */ }
+    }
+  } catch (err) { if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") console.error(`[gap-write-id] applied ids unreadable (a repeat may apply again): ${String(err).slice(0, 200)}`); }
+  gapAppliedWriteIds = m;
+  gapAppliedWriteIdLines = lines;
+  return m;
+}
+function recordAppliedWriteId(writeId: string, gapId: string): void {
+  const m = appliedWriteIds();
+  m.delete(writeId); m.set(writeId, gapId);
+  try {
+    mkdirSync(dirname(GAP_APPLIED_WRITE_IDS_PATH()), { recursive: true });
+    appendFileSync(GAP_APPLIED_WRITE_IDS_PATH(), JSON.stringify({ w: writeId, g: gapId }) + "\n");
+    gapAppliedWriteIdLines++;
+    if (gapAppliedWriteIdLines > 2 * GAP_APPLIED_WRITE_IDS_MAX) {
+      while (m.size > GAP_APPLIED_WRITE_IDS_MAX) { const oldest = m.keys().next().value; if (oldest === undefined) break; m.delete(oldest); }
+      const tmp = `${GAP_APPLIED_WRITE_IDS_PATH()}.${process.pid}.tmp`;
+      writeFileSync(tmp, [...m].map(([w, g]) => JSON.stringify({ w, g })).join("\n") + "\n");
+      renameSync(tmp, GAP_APPLIED_WRITE_IDS_PATH());
+      gapAppliedWriteIdLines = m.size;
+    }
+  } catch (err) { console.error(`[gap-write-id] applied id ${writeId} NOT recorded (a repeat may apply again): ${String(err).slice(0, 200)}`); }
+}
+/** On the holder: run `apply` for a write id at most once (a repeat answers duplicate_write_id; a concurrent one joins). */
+async function applyWriteOnce(pointer: unknown, audit: GapWriteAudit, apply: () => Promise<ResolverResult>): Promise<ResolverResult> {
+  const wid = (pointer as { write_id?: unknown } | null)?.write_id;
+  if (!gapStoreIsLocal() || typeof wid !== "string" || !GAP_WRITE_ID_RE.test(wid)) return apply();
+  const prior = appliedWriteIds().get(wid);
+  if (prior !== undefined) { audit.changed = []; return { shape: "substrateGapWriteResult", body: { id: prior, action: "duplicate_write_id", write_id: wid } } as ResolverResult; }
+  const running = gapWritesInFlight.get(wid);
+  if (running) { audit.changed = []; return running; }
+  const p = apply();
+  gapWritesInFlight.set(wid, p);
+  try {
+    const r = await p;
+    if (r.shape !== "structuredError") recordAppliedWriteId(wid, String((r.body as { id?: unknown } | undefined)?.id ?? ""));
+    return r;
+  } finally { gapWritesInFlight.delete(wid); }
+}
+/** Tests only: forget the in-memory applied ids (the file is re-read on next use). */
+export function __resetAppliedWriteIdsForTests(): void { gapAppliedWriteIds = null; gapAppliedWriteIdLines = 0; gapWritesInFlight.clear(); }

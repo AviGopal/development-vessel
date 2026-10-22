@@ -25,3 +25,8 @@ export function runWithCallCredential<T>(authorization: string | undefined, fn: 
 export function currentCallCredential(): string | null {
   return current.getStore() ?? null;
 }
+
+/** Run `fn` as a call this node makes itself, outside any caller's context (work queued by a call, replayed later). */
+export function runWithoutCallCredential<T>(fn: () => Promise<T>): Promise<T> {
+  return current.exit(fn);
+}

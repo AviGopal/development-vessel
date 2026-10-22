@@ -34,6 +34,7 @@ const SAVED_ID = process.env["IDENTITY_VESSEL_URL"];
 const gapMod = await import("../../src/resolvers/substrate-gap.js");
 const merge = await import("../../src/lib/gap-store-merge.js");
 const migration = await import("../../src/resolvers/gap-store-merge-migration.js");
+const queueLib = await import("../../src/lib/gap-forward-queue.js");
 const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"gap-store-merge"}`);
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;
 
@@ -193,12 +194,16 @@ describe("the forwarder pushes its old store once, by id-whole chunks, verified"
   let holderRows: Row[] = [];
   let calls: Array<{ rows: Row[] }> = [];
   let lieOnChunk = -1;
+  let order: string[] = [];
   let fake: ReturnType<typeof Bun.serve> | null = null;
   beforeAll(() => {
     fake = Bun.serve({
       port: 0, hostname: "127.0.0.1",
       fetch: async (req) => {
-        const p = ((await req.json()) as { impulse: { pointer: { rows: Row[]; chunk_index: number } } }).impulse.pointer;
+        const p = ((await req.json()) as { impulse: { pointer: { type: string; rows: Row[]; chunk_index: number; gap?: { id?: unknown } } } }).impulse.pointer;
+        order.push(p.type);
+        if (p.type === "substrateGap") return Response.json({ success: true, shape: "substrateGap", body: { gaps: [], total: 0 } });
+        if (p.type === "substrateGap_write") return Response.json({ success: true, shape: "substrateGapWriteResult", body: { id: p.gap?.id, action: "updated" } });
         calls.push({ rows: p.rows });
         const plan = merge.planGapStoreMerge(holderRows, p.rows);
         holderRows = plan.rows;
@@ -231,6 +236,27 @@ describe("the forwarder pushes its old store once, by id-whole chunks, verified"
     expect(r).toMatchObject({ status: "incomplete", chunk_index: 1 });
     expect(existsSync(MARKER)).toBe(false);
     expect(calls.length).toBe(2);
+  });
+  it("[MUST-FAIL] a queued gap write does not replay between merge chunks; it replays after the merge", async () => {
+    setup();
+    gapMod.__allowGapForwardQueueFromScratchForTests(true);
+    const qdir = join(STORE_ROOT, "gaps", "forward-queue");
+    try {
+      const q = queueLib.enqueueGapWrite(qdir, "wid-merge-order-0123", { type: "substrateGap_write", write_id: "wid-merge-order-0123", gap: { id: "f-1", category: "systematic_failure", source: "substrate_detected", summary: "a queued fixture write of f-1", detected_at: T1, status: "open" } });
+      expect(q.queued).toBe(true);
+      order = [];
+      const r = await migration.runGapStoreMergeMigration({ chunkRows: 2 });
+      expect(r.status).toBe("merged");
+      await new Promise((res) => setTimeout(res, 50));
+      expect(order.filter((t) => t !== "substrateGapMerge_write")).toEqual([]);
+      expect(queueLib.queuedFiles(qdir).length).toBe(1);
+      await gapMod.drainGapForwardQueue();
+      expect(order.slice(-1)).toEqual(["substrateGap_write"]);
+      expect(queueLib.queuedFiles(qdir).length).toBe(0);
+    } finally {
+      gapMod.__allowGapForwardQueueFromScratchForTests(false);
+      rmSync(qdir, { recursive: true, force: true });
+    }
   });
   it("[CONTROL] the holder itself (no GAP_STORE_ENDPOINT) never pushes", async () => {
     setup();

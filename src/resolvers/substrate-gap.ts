@@ -3739,8 +3739,20 @@ let gapForwardQueueFromScratchAllowed = false;
 function gapForwardQueueEnabled(): boolean { return gapForwardQueueFromScratchAllowed || !isScratchGapStoreRoot(workspaceRoot()); }
 /** Tests only: let the forward queue run from a scratch store root. */
 export function __allowGapForwardQueueFromScratchForTests(on: boolean): void { gapForwardQueueFromScratchAllowed = on; }
+// HELD WHILE THE MERGE MIGRATION RUNS (resolvers/gap-store-merge-migration.ts). Every merge chunk is an HTTP answer
+// from the holder, which would otherwise start a drain between chunks. A queued write of gap X replayed before the
+// merge delivers the old store's row X makes the holder create X from that write alone, newer than the old row, so the
+// row with X's history (arming, falsifier, close evidence) would lose the conflict and end up only in _previous.
+// After the merge, the write lands on the merged row and the write path carries that history forward.
+let gapForwardDrainHolds = 0;
+/** Hold queue drains until the returned release is called (the merge migration holds them for its whole run). */
+export function holdGapForwardDrains(): () => void {
+  gapForwardDrainHolds++;
+  let released = false;
+  return () => { if (!released) { released = true; gapForwardDrainHolds--; } };
+}
 function scheduleGapForwardDrain(): void {
-  if (gapForwardDrainScheduled || gapWriteReplaying()) return;
+  if (gapForwardDrainScheduled || gapWriteReplaying() || gapForwardDrainHolds > 0) return;
   gapForwardDrainScheduled = true;
   setTimeout(() => { gapForwardDrainScheduled = false; void drainGapForwardQueue().catch((err) => console.error(`[gap-forward-queue] drain failed: ${String(err).slice(0, 200)}`)); }, 0);
 }
@@ -3751,6 +3763,7 @@ export function drainGapForwardQueue(): Promise<GapForwardDrainResult> {
     const dir = gapForwardQueueDir();
     const out: GapForwardDrainResult = { replayed: 0, dead: 0, remaining: 0, stopped: null };
     if (!gapForwardQueueEnabled()) return out;
+    if (gapForwardDrainHolds > 0) { out.remaining = queuedFiles(dir).length; out.stopped = "held while the gap-store merge migration runs"; return out; }
     if (gapStoreIsLocal()) { out.remaining = queuedFiles(dir).length; out.stopped = out.remaining > 0 ? "this node holds the store" : null; return out; }
     for (const file of queuedFiles(dir)) {
       const entry = readQueued(dir, file);

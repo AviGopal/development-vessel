@@ -22,7 +22,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { forwardToGapStore, gapStoreFilePath, gapStoreIsLocal } from "./substrate-gap.js";
+import { forwardToGapStore, gapStoreFilePath, gapStoreIsLocal, holdGapForwardDrains } from "./substrate-gap.js";
 import type { ResolverResult } from "./types.js";
 
 export const GAP_STORE_MERGE_CHUNK_ROWS = 200;
@@ -78,23 +78,27 @@ export async function runGapStoreMergeMigration(opts: { chunkRows?: number; sour
   const sourceHash = sha(raw).slice(0, 16);
   const migrationId = `gap-store-merge:${endpointHash}:${sourceHash}`;
   try {
-    const m = JSON.parse(readFileSync(markerPath(), "utf-8")) as { migration_id?: unknown };
-    if (m.migration_id === migrationId) return { status: "skipped", reason: "already_merged" };
-  } catch { /* no marker, or an unreadable one: run */ }
-  const label = (opts.sourceLabel ?? process.env["VESSEL_ID"] ?? "forwarder").replace(/[^\w:.@-]/g, "").slice(0, 64);
-  const chunks = chunkRowsById(rows, opts.chunkRows ?? GAP_STORE_MERGE_CHUNK_ROWS);
-  const totals: Record<string, number> = { source_rows: 0, added: 0, identical: 0, holder_won: 0, source_won: 0, previous_kept: 0 };
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i]!;
-    const answer = await forwardToGapStore({ type: "substrateGapMerge_write", migration_id: migrationId, source_label: label, chunk_index: i, chunk_count: chunks.length, rows: chunk });
-    const why = chunkAnswerProblem(chunk, answer);
-    if (why) {
-      console.warn(`[gap-store-merge] ${migrationId}: chunk ${i + 1}/${chunks.length} not verified (${why}); no marker written, the next start runs the migration again`);
-      return { status: "incomplete", migration_id: migrationId, chunk_index: i, why };
+      const m = JSON.parse(readFileSync(markerPath(), "utf-8")) as { migration_id?: unknown };
+      if (m.migration_id === migrationId) return { status: "skipped", reason: "already_merged" };
+    } catch { /* no marker, or an unreadable one: run */ }
+    const label = (opts.sourceLabel ?? process.env["VESSEL_ID"] ?? "forwarder").replace(/[^\w:.@-]/g, "").slice(0, 64);
+    const chunks = chunkRowsById(rows, opts.chunkRows ?? GAP_STORE_MERGE_CHUNK_ROWS);
+    const totals: Record<string, number> = { source_rows: 0, added: 0, identical: 0, holder_won: 0, source_won: 0, previous_kept: 0 };
+    // Queued gap writes wait until the old rows are at the holder (substrate-gap.ts GAP-WRITE QUEUE, held drains).
+    const release = holdGapForwardDrains();
+    try {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      const answer = await forwardToGapStore({ type: "substrateGapMerge_write", migration_id: migrationId, source_label: label, chunk_index: i, chunk_count: chunks.length, rows: chunk });
+      const why = chunkAnswerProblem(chunk, answer);
+      if (why) {
+        console.warn(`[gap-store-merge] ${migrationId}: chunk ${i + 1}/${chunks.length} not verified (${why}); no marker written, the next start runs the migration again`);
+        return { status: "incomplete", migration_id: migrationId, chunk_index: i, why };
+      }
+      const c = ((answer!.body as Record<string, unknown>)["counts"] ?? {}) as Record<string, number>;
+      for (const k of Object.keys(totals)) totals[k] = (totals[k] ?? 0) + (typeof c[k] === "number" ? c[k] : 0);
     }
-    const c = ((answer!.body as Record<string, unknown>)["counts"] ?? {}) as Record<string, number>;
-    for (const k of Object.keys(totals)) totals[k] = (totals[k] ?? 0) + (typeof c[k] === "number" ? c[k] : 0);
-  }
+  } finally { release(); }
   const marker = markerPath();
   const tmp = `${marker}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify({ migration_id: migrationId, chunks: chunks.length, totals, at: new Date().toISOString() }));

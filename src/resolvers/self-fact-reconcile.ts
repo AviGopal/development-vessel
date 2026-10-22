@@ -504,8 +504,8 @@ export const journal = { read: readJournalLines };
  * falling or insufficient_data over 7 days; a falling share files a divergence). Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
  * planted run; only then is the row's canary reported.
  *
- * NAMED LIMITS (said in the judgements): no key class map is served in-system, and the oracle labels (read through
- * readOracleLabels) have no served class context, so today a key-principal write reads unattributable and a closure
+ * NAMED LIMITS (said in the judgements): the key class map is identity's apiKeyClass (readKeyClassMap), and an
+ * unclassified, ambiguous or unlisted key reads unattributable; the label rule's fixLiveAt is not served, so a closure
  * with a label on any provenance trace reads REVIEW (unjudged); a write forwarded by a
  * peer is decided only by the forwarding node's own events, which this node does not read; the expected-value-not-
  * derivable subclass of link 2 has no reader here; a scope act is dated by its super-repo commit, earlier than any apply.
@@ -864,11 +864,50 @@ const defaultOracleLabelIo: OracleLabelIo = {
   urls: async () => { const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js"); const d = await discoverOwnResolveUrls(ORACLE_LABEL_SHAPE); return d.ok && d.urls.length > 0 ? d.urls : null; },
   post: async (url, body) => (await import("../judge/gap-policy.js")).postEnvelopeRead(url, body),
 };
+/**
+ * THE KEY CLASS MAP, read through the shape identity serves (apiKeyClass: each key's class, by masked id), routed by
+ * discovery to this substrate's own producers at use time. Every key the shape lists is kept, an unclassified one
+ * included (owner_kind "unclassified", which no reader takes for system or operator), so two keys sharing a 6-character
+ * prefix stay ambiguous for keyClass6. null when no producer answers or the answer is not a key list: a key-principal
+ * write is then unattributable, never assumed system. Exported, with its transport injectable, for tests.
+ */
+export const KEY_CLASS_SHAPE = "apiKeyClass";
+export interface KeyClassServed { id: string; owner_kind: string; owner_node: string | null; is_admin: boolean }
+const defaultKeyClassIo: OracleLabelIo = {
+  urls: async () => { const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js"); const d = await discoverOwnResolveUrls(KEY_CLASS_SHAPE); return d.ok && d.urls.length > 0 ? d.urls : null; },
+  post: async (url, body) => (await import("../judge/gap-policy.js")).postEnvelopeRead(url, body),
+};
+let keyClassIo: OracleLabelIo = defaultKeyClassIo;
+/** Tests only: replace the key class map's transport (null restores discovery + the envelope read). */
+export function __setKeyClassIoForTests(io: OracleLabelIo | null): void { keyClassIo = io ?? defaultKeyClassIo; }
+export async function readKeyClassMap(io: OracleLabelIo = keyClassIo): Promise<KeyClassServed[] | null> {
+  const urls = await io.urls();
+  if (!urls) return null;
+  for (const url of urls) {
+    const r = await io.post(url, { impulse: { pointer: { type: KEY_CLASS_SHAPE } } });
+    const keys = (r?.["data"] as { keys?: unknown } | undefined)?.keys;
+    if (r?.["success"] !== true || !Array.isArray(keys)) continue;
+    return keys.filter((k): k is Record<string, unknown> => !!k && typeof k === "object" && typeof (k as Record<string, unknown>)["key_id_mask12"] === "string")
+      .map((k) => ({ id: String(k["key_id_mask12"]), owner_kind: typeof k["owner_kind"] === "string" && k["owner_kind"] ? String(k["owner_kind"]) : "unclassified", owner_node: typeof k["owner_node"] === "string" ? String(k["owner_node"]) : null, is_admin: k["is_admin"] === true }));
+  }
+  return null;
+}
+/** The label rule's key context from the served class map: forwarding keys are a peer's, or another node's system
+ *  key; this node's own admin keys are its system keys with is_admin. fixLiveAt is not served yet. */
+export function labelContextFrom(keys: readonly KeyClassServed[] | null, node: string): LabelClassContext {
+  const ks = keys ?? [];
+  return {
+    fixLiveAt: "",
+    keymap: ks.map((k) => ({ id: k.id, owner_kind: k.owner_kind })),
+    forwardingKeys: ks.filter((k) => k.owner_kind === "peer" || (k.owner_kind === "system" && k.owner_node !== null && k.owner_node !== node)).map((k) => k.id),
+    nodeSelfAdminKeys: ks.filter((k) => k.owner_kind === "system" && k.is_admin && k.owner_node === node).map((k) => k.id),
+  };
+}
 let oracleLabelIo: OracleLabelIo = defaultOracleLabelIo;
 /** Tests only: replace the label reader's transport (null restores discovery + the envelope read). */
 export function __setOracleLabelIoForTests(io: OracleLabelIo | null): void { oracleLabelIo = io ?? defaultOracleLabelIo; }
 export async function readOracleLabels(traceIds: string[], io: OracleLabelIo = defaultOracleLabelIo): Promise<{ labels: Array<OracleLabelLike & { execution_id?: string | null }>; context: LabelClassContext } | null> {
-  const context: LabelClassContext = { fixLiveAt: "", keymap: [], forwardingKeys: [], nodeSelfAdminKeys: [] };
+  let context: LabelClassContext = labelContextFrom(null, thisNode());
   const ids = [...new Set(traceIds.filter((x) => typeof x === "string" && x.length > 0))].sort();
   if (ids.length === 0) return { labels: [], context };
   const urls = await io.urls();
@@ -886,6 +925,9 @@ export async function readOracleLabels(traceIds: string[], io: OracleLabelIo = d
     if (new Set(mine.map((l) => String(l["org_id"] ?? ""))).size > 1) return null;
     labels.push(...mine.map((l) => ({ execution_id: id, labeler: (l["labeler"] as string | undefined) ?? null, source: (l["source"] as string | undefined) ?? null, created_at: (l["created_at"] as string | undefined) ?? null, principal_kind: (l["principal_kind"] as string | undefined) ?? null, principal_key_id: (l["principal_key_id"] as string | undefined) ?? null })));
   }
+  // The key context is read only when there is a label to class (fixLiveAt is not served yet, so it decides nothing
+  // today; it is read through the same shape the keymap is).
+  if (labels.length > 0) { try { context = labelContextFrom(await readKeyClassMap(), thisNode()); } catch { /* unread: the empty context, every label REVIEW */ } }
   return { labels, context };
 }
 const defaultJudgementDeps: JudgementDeps = {
@@ -916,7 +958,7 @@ const defaultJudgementDeps: JudgementDeps = {
     const b = r.body as { events?: unknown; matched?: unknown } | undefined;
     return r.shape === "gapWriteEvent" && Array.isArray(b?.events) ? { events: b!.events as GapWriteEventLike[], matched: Number(b!.matched ?? (b!.events as unknown[]).length) } : null;
   },
-  keymap: async () => null,
+  keymap: async () => { const ks = await readKeyClassMap(); return ks === null ? null : ks.map((k) => ({ id: k.id, owner_kind: k.owner_kind })); },
   labels: (traceIds) => readOracleLabels(traceIds, oracleLabelIo),
   locate: (sha) => {
     if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;

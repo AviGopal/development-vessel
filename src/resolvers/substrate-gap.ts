@@ -1353,6 +1353,8 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     "detector", "ran_at", "facts_checked", "divergence_count", "divergences", "findings", "findings_count", "finding_hashes", "gaps_emitted",
     "gaps_closed", "canary_planted", "canary_found", "profile", "node", "trust_completion", "rows_checked", "blind_rows", "unobserved_rows",
     "unregistered_rows", "observed", "gaps_filed", "self_gap_filed", "read_errors", "claim",
+    // The §14 rows' per-item judgements and their must-fail controls' own (repair_autonomy, lane_revert_within_1h).
+    "judgements", "must_fail_controls",
   ] },
   // discovery-vessel-registry-observer.ts: the discoveryRegistryState body (error/http_status/roundtrip_ms only on some
   // answers); missing_count and missing_vessels only on a successful read with vessel_ids given (the local-registration

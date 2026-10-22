@@ -86,6 +86,40 @@ export function lineageAncestors(gid: string, byId: ReadonlyMap<string, GapRow>)
   return out;
 }
 
+/**
+ * What lineageAncestors could NOT read (qa eval5 B1): an ancestor it cannot see is unknown, and unknown is never clean.
+ * - A link field (LINK_FIELDS) on the row, or on an ancestor reached through the links, that names an id the store read
+ *   does not hold: the parent exists somewhere, unseen, so whoever filed it cannot be ruled out.
+ * - A recommit row (coreId depth > 0) with no key in the store sharing its core at a lower depth: its recommit parent
+ *   is not in the read.
+ * Named limit of the id rule's "-" prefix half: a narrowed child whose parent is absent from the store is, by its id
+ * alone, indistinguishable from a root whose id happens to contain "-", so the prefix half cannot report a missing
+ * parent; only an explicit link field or a recommit- prefix can say one is missing.
+ * Returns one reason per unseen ancestor; empty when the lineage was read in full.
+ */
+export function lineageUnknown(gid: string, byId: ReadonlyMap<string, GapRow>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>([gid]);
+  const todo = [gid];
+  while (todo.length > 0) {
+    const id = todo.pop()!;
+    const cur = byId.get(id);
+    if (!cur) continue;
+    const m = metaOf(cur);
+    for (const k of LINK_FIELDS) {
+      const v = m[k] || cur[k];
+      if (typeof v !== "string" || v.length === 0 || v === gid) continue;
+      if (!byId.has(v)) { out.push(`lineage: ${id === gid ? "the row" : `ancestor ${id.slice(-60)}`} links ${k}=${v.slice(-60)}, which is not in the gap store read`); continue; }
+      if (!seen.has(v)) { seen.add(v); todo.push(v); }
+    }
+  }
+  const g = coreId(gid);
+  if (g.depth > 0 && ![...byId.keys()].some((k) => k !== gid && (() => { const c = coreId(k); return c.core === g.core && c.depth < g.depth; })())) {
+    out.push(`lineage: ${gid.slice(-60)} is a recommit (depth ${g.depth}) and no row of core ${g.core.slice(-60)} at a lower depth is in the gap store read`);
+  }
+  return out;
+}
+
 /** An instant from an ISO time; fractional seconds past milliseconds are dropped (the parser reads three digits). */
 export function isoMs(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
@@ -531,6 +565,8 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
   // 2a, 2a′, and a hold flag with no stamp, on the row and every lineage ancestor
   const byId = ctx.byId.has(gid) ? ctx.byId : new Map([...ctx.byId, [gid, row]]);
   const lineage = [gid, ...[...lineageAncestors(gid, byId)].sort()];
+  // An ancestor the store read does not hold is unknown (lineageUnknown): its filer and its acts cannot be ruled out.
+  unread.push(...lineageUnknown(gid, byId));
   acts.push(...rowFieldOperatorActs(gid, byId, untilMs));
   for (const k of lineage) {
     const km = metaOf(byId.get(k));

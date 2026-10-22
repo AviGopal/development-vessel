@@ -3331,7 +3331,11 @@ ${diff}
 Output ONLY this JSON object, nothing else: {"refuted": <boolean>, "confidence": <number 0..1>, "reason": "<the specific flaw, citing lines>"}`;
 }
 
-function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = "", netNewTargets: string[] = []): string {
+export function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = "", netNewTargets: string[] = []): string {
+  // The exact schema is the binding output contract, so a field the plan is asked for elsewhere in the prompt is part of
+  // it: when the concept priors are shown, the schema carries their "applied_ids" (the ids the credit reads), with the
+  // same meaning as the priors text; when none are shown it does not ask for it.
+  const priorsShown = principles.includes(CONCEPT_PRIORS_HEADER);
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
 Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Tests import ONLY from "bun:test" — any other test-framework import (vitest, jest, @jest/globals, mocha, chai) fails typecheck; when scaffolding a NEW vessel prefer creating NO test file over a test file with any non-bun:test import. New vessels need "typescript" and "@types/bun" in devDependencies. Edits must compile (\`bun run typecheck\`).
@@ -3374,7 +3378,8 @@ Emit ONE JSON object, no markdown fences, with this exact schema:
     { "kind": "edit", "path": "repos/<vessel>/<subpath>", "old_string": "<verbatim current text>", "new_string": "<replacement>", "rationale": "<why>" },
     // replace a LINE RANGE — ONLY when a change spans N identical, ADJACENT blocks that cannot be uniquely content-anchored (their surrounding context is also identical). Target files in GROUND TRUTH are shown as: line-number, then a TAB, then the line text. start_line/end_line are those 1-indexed numbers (inclusive); expect_first_line/expect_last_line are the VERBATIM <line text> of those two boundary lines — the text AFTER the tab only, NOT the number or tab (apply DRIFT-REFUSES on any mismatch); new_string is the full replacement for the whole range (use "" to delete it):
     { "kind": "replace_lines", "path": "repos/<vessel>/<subpath>", "start_line": 0, "end_line": 0, "expect_first_line": "<verbatim text of start_line>", "expect_last_line": "<verbatim text of end_line>", "new_string": "<replacement for the range, or empty to delete>", "rationale": "<why>" }
-  ]
+  ]${priorsShown ? `,
+  "applied_ids": ["<id>", ...]   // the [id] of each CONCEPT PRIOR above that the plan actually follows; omit the field when none applies` : ""}
 }
 
 RULES:
@@ -3723,6 +3728,8 @@ const CONCEPT_PRIOR_MAX = 6;
 const CONCEPT_PRIOR_CHARS = 600;
 const CONCEPT_PRIOR_QUERY_CHARS = 600;
 const CONCEPT_PRIOR_BUDGET_TOKENS = 1500;
+/** The block's header: decomposePrompt reads it to know the priors are shown, and then asks for "applied_ids" in its schema. */
+const CONCEPT_PRIORS_HEADER = "CONCEPT PRIORS (selected for this change by the substrate's concept graph, concept_select_for_prompt; each is cited by its [id]):";
 /** A concept id the drafter may cite: the same allowlist gates what is rendered and what a plan's citation may name. */
 const CONCEPT_ID_RE = /^[\w:.-]{1,80}$/;
 export type ConceptPrior = { id: string; source_type: string; name: string | null; content: string };
@@ -3731,7 +3738,7 @@ export function renderConceptPriors(selected: ReadonlyArray<ConceptPrior>): stri
   const rows = selected.filter((c) => CONCEPT_ID_RE.test(c.id) && c.content.trim().length > 0).slice(0, CONCEPT_PRIOR_MAX);
   if (rows.length === 0) return "";
   const line = (c: ConceptPrior) => `- [${c.id}] (source_type: ${String(c.source_type).replace(/[^\w.-]/g, "").slice(0, 40) || "unknown"})${c.name ? ` ${c.name.replace(/\s+/g, " ").trim().slice(0, 120)}:` : ""} ${c.content.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_CHARS)}`;
-  return `\nCONCEPT PRIORS (selected for this change by the substrate's concept graph, concept_select_for_prompt; each is cited by its [id]):\n${rows.map(line).join("\n")}\nIf your plan applies any of these priors, add a top-level "applied_ids" array to the JSON object naming the id of each prior the plan actually follows (an id not shown above is ignored; omit the field when none applies). The attempt's outcome is credited to exactly those priors.\n`;
+  return `\n${CONCEPT_PRIORS_HEADER}\n${rows.map(line).join("\n")}\nIf your plan applies any of these priors, add a top-level "applied_ids" array to the JSON object naming the id of each prior the plan actually follows (an id not shown above is ignored; omit the field when none applies). The attempt's outcome is credited to exactly those priors.\n`;
 }
 /** The concept ids a plan says it applied, kept only when they were rendered to it: an unknown or invented id is dropped. */
 export function appliedConceptIds(plan: Record<string, unknown> | null, rendered: ReadonlyArray<string>): { applied: string[]; dropped: string[] } {

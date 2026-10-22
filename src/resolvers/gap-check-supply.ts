@@ -64,6 +64,7 @@
  * at HEAD (predicate_birth_verdict present).
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
@@ -83,11 +84,11 @@ import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeR
 import { codeContract } from "./code-introspect.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
-import { redForTheRightReason } from "./scope-earn-in.js";
+import { coverageKnobs, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { dispatchGoalOnPeer, placeCompose } from "./compose-placement.js";
-import { armRedReasonRefusal, testTitleInSource } from "./retry-evidence.js";
-import { onlyTestsProblem } from "./test-suite.js";
+import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
+import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY } from "../config.js";
 import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
@@ -134,6 +135,8 @@ type Ledger = {
   judged_titles?: string[];
   /** Set on an armed record when the missing-export guard could not run (typescript unavailable): it decided nothing. */
   guard_decided_nothing?: string;
+  /** The edit-site mutation gate's reading at arm time (EDIT-SITE MUTATION GATE): mutants run, how many changed the red. */
+  mutation_gate?: Row;
 };
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
@@ -783,6 +786,136 @@ async function holderCheckReport(evidence: { shape: string; input: Row }): Promi
   }
 }
 
+/**
+ * EDIT-SITE MUTATION GATE. A check red for an assertion, on a contract its target has, can still be red whatever the
+ * edit site does: it mocks the module it asserts on (activity-api 2138d94), its mock's key is never what the code sends
+ * (goal-host 979b966d), it reads a field of a value the site never returns that way (goal-host 725638cc, `.shapes` on a
+ * Promise), or it calls through a cast with arguments the site cannot use (2182d140). No fix of the site can turn such a
+ * check green, so armed it makes a gap no landing closes. The arm step runs the check under operator mutants OF THE EDIT
+ * SITE ITSELF (scope-earn-in selectMutants, applied by test_suite's mutate_edit through lib/apply-mutant.ts on the
+ * committed tree), never of a helper it imports: a mutant that turns the named tests green, or changes the failing
+ * assertion's error line, Expected or Received, shows the red depends on the site. A run that did not measure (the
+ * mutant did not apply, the file did not load, a named test threw instead of asserting) tells nothing either way. When at least one mutant
+ * measured and none changed anything, the red is not about the site: refused, `red_independent_of_edit_site`.
+ *
+ * COST, bounded: at most k extra runs of the check per arm (`mutants_per_file` on this family's rhythm record, read by
+ * scope-earn-in's coverageKnobs: default 6, capped at 20), one at a time, stopping at the first mutant that changes the
+ * red, so a check that depends on its site usually costs one or two. They run where the check's report was taken: here,
+ * or at the gap-store holder on a node that forwards its store. A site with no mutable construct runs none.
+ */
+export type MutationGateOutcome =
+  | { kind: "pass"; record: Row }
+  | { kind: "refuse"; reason: string; record: Row }
+  | { kind: "wait"; detail: string };
+/** How a run's named tests fail: per title, pass, or the failing assertion's error line, Expected and Received. null
+ *  when the run did not measure that: it did not run, the file did not load, or a named test failed on something other
+ *  than an assertion (a mutant that makes the check throw shows the check reaches the site, not that it tests it). */
+function redSignature(report: Row | null, titles: string[]): string | null {
+  const c = (report?.["red_reason"] ?? null) as CheckRunClass | null;
+  if (!report || report["ran"] !== true || !c || typeof c !== "object" || !Array.isArray(c.failures) || c.unhandled || !c.ran) return null;
+  const compared = Array.isArray(c.compared) ? c.compared : [];
+  const sig: unknown[] = [];
+  for (const t of titles) {
+    const f = c.failures.find((x) => x.name.includes(t));
+    if (!f) { sig.push([t, "pass"]); continue; }
+    if (f.cls !== "assertion") return null;
+    const v = compared.find((x) => x?.name === f.name);
+    sig.push([t, f.error ?? null, v?.expected ?? null, v?.received ?? null]);
+  }
+  return JSON.stringify(sig);
+}
+/** The gate's decision from the unmutated report and one report per mutant run (null: that run answered nothing). */
+export function mutationGateVerdict(baseline: Row | null, runs: Array<{ mutant: Mutant; report: Row | null }>, titles: string[]): { measured: number; changed: number; unmeasured: number } {
+  const base = redSignature(baseline, titles);
+  let measured = 0, changed = 0, unmeasured = 0;
+  for (const { report } of runs) {
+    const applied = ((report?.["mutation"] ?? null) as Row | null)?.["applied"] === true;
+    const green = applied && report?.["ran"] === true && report?.["requested_not_passing"] === 0;
+    const sig = applied ? redSignature(report, titles) : null;
+    if (!applied || (!green && sig === null) || base === null) { unmeasured += 1; continue; }
+    measured += 1;
+    if (green || sig !== base) changed += 1;
+  }
+  return { measured, changed, unmeasured };
+}
+/**
+ * THE PART OF THE SITE THE CHECK EXERCISES. Operator mutants spread over a whole file land mostly in code a check never
+ * reaches (one function of a large module), so a genuine check would read as unmoved and be refused. The mutants are
+ * taken from the site's top-level declarations the check names (`ns.x` on any namespace import, or a named import) and
+ * the same-file declarations those reach, transitively; everything else is blanked to spaces, so offsets and lines are
+ * the file's own. The whole file when the check names nothing the site declares.
+ */
+export function siteRegionSource(siteSrc: string, checkSrc: string): string {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return siteSrc; }
+  const check = ts.createSourceFile("c.ts", checkSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const nsNames = new Set<string>();
+  const wanted = new Set<string>();
+  check.forEachChild((n) => {
+    if (!ts.isImportDeclaration(n) || !n.importClause || !ts.isStringLiteral(n.moduleSpecifier) || !n.moduleSpecifier.text.startsWith(".")) return;
+    const nb = n.importClause.namedBindings;
+    if (nb && ts.isNamespaceImport(nb)) nsNames.add(nb.name.text);
+    if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) wanted.add((el.propertyName ?? el.name).text);
+  });
+  const reads = (n: import("typescript").Node): void => {
+    if (ts.isPropertyAccessExpression(n)) {
+      let e: import("typescript").Expression = n.expression;
+      while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+      if (ts.isIdentifier(e) && nsNames.has(e.text)) wanted.add(n.name.text);
+    }
+    ts.forEachChild(n, reads);
+  };
+  reads(check);
+  const site = ts.createSourceFile("s.ts", siteSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const decls = new Map<string, import("typescript").Statement>();
+  for (const st of site.statements) {
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) decls.set(st.name.text, st);
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) decls.set(d.name.text, st);
+  }
+  const keep = new Set<import("typescript").Statement>();
+  const queue = [...wanted].filter((w) => decls.has(w));
+  while (queue.length > 0) {
+    const st = decls.get(queue.pop()!)!;
+    if (keep.has(st)) continue;
+    keep.add(st);
+    const walk = (n: import("typescript").Node): void => { if (ts.isIdentifier(n) && decls.has(n.text) && !keep.has(decls.get(n.text)!)) queue.push(n.text); ts.forEachChild(n, walk); };
+    walk(st);
+  }
+  if (keep.size === 0) return siteSrc;
+  const chars: string[] = siteSrc.split("").map((ch) => (ch === "\n" || ch === "\r" ? ch : " "));
+  for (const st of keep) for (let i = st.getStart(site); i < st.getEnd(); i += 1) chars[i] = siteSrc[i]!;
+  return chars.join("");
+}
+async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number }): Promise<MutationGateOutcome> {
+  let src: string | null = null;
+  try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  if (src === null) return { kind: "refuse", reason: `red_independent_of_edit_site: the edit site ${a.siteRel} is not readable here, so no change to it can be shown to move the check`, record: { mutants: 0, site: a.siteRel } };
+  const region = siteRegionSource(src, a.checkSrc);
+  const mutants = selectMutants(region, a.k).map((m) => ({ ...m, original: src!.slice(m.start, m.end) }));
+  const record: Row = { site: a.siteRel, k: a.k, selected: mutants.length, region: region === src ? "file" : "declarations_the_check_names" };
+  if (mutants.length === 0) return { kind: "pass", record: { ...record, decided: "nothing: the edit site has no mutable construct" } };
+  const runs: Array<{ mutant: Mutant; report: Row | null }> = [];
+  for (const m of mutants) {
+    const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
+    let report: Row | null;
+    if (gapStoreIsLocal()) {
+      const r = await resolveTestSuite(input).catch(() => null);
+      report = r && r.shape === "test_suite" ? (r.body as Row) : null;
+    } else {
+      const held = await holderCheckReport({ shape: "test_suite", input });
+      if (!held.report && /unreachable|HTTP/.test(held.detail)) return { kind: "wait", detail: `the mutant runs could not be read at the holder (${held.detail})` };
+      report = held.report;
+    }
+    runs.push({ mutant: m, report });
+    const v = mutationGateVerdict(a.baseline, runs, a.titles);
+    if (v.changed > 0) return { kind: "pass", record: { ...record, ran: runs.length, ...v, changed_by: { operator: m.operator, line: m.line } } };
+  }
+  const v = mutationGateVerdict(a.baseline, runs, a.titles);
+  const out = { ...record, ran: runs.length, ...v };
+  if (v.measured === 0) return { kind: "pass", record: { ...out, decided: "nothing: no mutant run measured the check" } };
+  return { kind: "refuse", reason: `red_independent_of_edit_site: the named test(s) fail the same way under all ${v.measured} measured mutant(s) of ${a.siteRel} (${mutants.map((m) => `${m.operator}@${m.line}`).join(", ")}), so no change to the site moves the check`, record: out };
+}
+
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
 export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick", extra: Row = {}): Promise<void> {
   // `extra` lands in the SAME write as the leg (the settled attempt keys): a debit and its key are stored together or not at all.
@@ -1034,7 +1167,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
     const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
     const classified = verdict === "present" ? armRedReasonRefusal(redReason, titles) : null;
-    const wrongReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
+    const gateReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
+    // Last, as the costliest: is the red about the edit site at all (EDIT-SITE MUTATION GATE)?
+    const mutation = verdict === "present" && !gateReason && site.ok
+      ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles, baseline: report, k: coverageKnobs(rhythm.body).k })
+      : null;
+    if (mutation?.kind === "wait") {
+      notArmed.push({ id, reason: `awaiting_mutation_runs: ${mutation.detail}` });
+      console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${mutation.detail})`);
+      continue;
+    }
+    const wrongReason = gateReason ?? (mutation?.kind === "refuse" ? mutation.reason : null);
+    const mutationRecord = mutation ? { mutation_gate: mutation.record } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
     if (verdict !== "present" || wrongReason) {
@@ -1045,7 +1189,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (!unknown) refused += 1;
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
       if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
-      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD", ...(firstFailure ? { first_failure: firstFailure } : {}) };
+      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD", ...(firstFailure ? { first_failure: firstFailure } : {}), ...mutationRecord };
       // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
       // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
       const handedOff = !unknown && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
@@ -1058,7 +1202,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}) },
+      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

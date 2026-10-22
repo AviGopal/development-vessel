@@ -78,6 +78,9 @@ async function holderRow(id: string): Promise<Row | undefined> {
 }
 /** The forward URL, answered by the holder's own resolvers (the route's dispatch, in process). */
 async function holderAnswers(pointer: Row): Promise<Response> {
+  // The holder serves the check's own pointer too, as a real holder does: a forwarding node reads a present's run
+  // report there (gap-check-supply holderCheckReport), the holder's run on the holder's tree.
+  if (pointer["type"] === "test_suite") return asHolder(() => fetch("http://self.test/v2/impulses/resolve", { method: "POST", body: JSON.stringify({ impulse: { pointer } }) }));
   return asHolder(async () => {
     let release: () => void = () => {};
     holderGate = new Promise<void>((r) => { release = r; });
@@ -239,15 +242,17 @@ describe("the forwarding node's arm step hands the check to the gap-store holder
     expect(m["predicate_source"]).toBe(supply.CHECK_SUPPLY_SOURCE);
     expect(sg.predicateSuspect(m)).toBeNull();
     expect(elig.composeEligibilitySkipReason(armed!)).toBeNull();
+    // Two runs, both the holder's: its birth evaluation, and the report the arm gates judge, read through the forward.
     const runs = suiteRuns.filter((r) => r.test_file === checkPathOf(id));
-    expect(runs.length).toBe(1);
-    expect(runs[0]!.on_holder).toBe(true);
+    expect(runs.length).toBe(2);
+    expect(runs.every((r) => r.on_holder)).toBe(true);
     expect(runs[0]!.body).toMatchObject({ ran: true, requested_not_passing: 1 });
+    expect(runs[1]!.body).toMatchObject({ ran: true, requested_not_passing: 1 });
 
     // (i) NOT ARMED BY THE WRITE ALONE: right after the hand-off write, before the holder ran the check, the row is
     // pending (predicate_suspect) and held; after the holder's present, still held until this node reads it back.
     // Two forwarded writes carried the check: the hand-off, and the settlement, which carries the holder's verdict
-    // forward (the same check: no second run, asserted above).
+    // forward (the same check: no second birth evaluation; the second run above is the report read).
     const pre = beforeEval.filter((s) => s.id === id);
     expect(pre.length).toBe(2);
     expect(pre[0]).toMatchObject({ verdict: "pending", eligibility: "held", state: "goal_dispatched" });

@@ -3,7 +3,7 @@
 // the row or ANY lineage ancestor is an operator act in the fix's provenance; ancestry follows the explicit links AND
 // the id rule (recommit- PREPENDED, -<suffix> appended).
 //
-// The real ids come from ONE archive snapshot, vendored as test/fixtures/operator-acts/lineage-archive-rows.json (only
+// The real ids come from ONE archive snapshot, vendored as test/self-fact-evaluator/fixtures/lineage-archive-rows.json (only
 // the fields lineage reads), so these must-fail cases never depend on the live store. Each case is named by its frozen
 // case id (fixtures-manifest.json) and that id's sha256 prefix; case ids are never renamed.
 import { describe, expect, it } from "bun:test";
@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { lineageAncestors, rowFieldOperatorActs, type GapRow } from "../../src/resolvers/operator-acts.js";
 
-const FIX = JSON.parse(readFileSync(join(import.meta.dir, "..", "fixtures", "operator-acts", "lineage-archive-rows.json"), "utf8")) as { rows: GapRow[] };
+const FIX = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "lineage-archive-rows.json"), "utf8")) as { rows: GapRow[] };
 const byid = new Map<string, GapRow>(FIX.rows.map((r) => [String(r["id"]), r]));
 const ts = (s: string) => Date.parse(s);
 const anc = (gid: string, m: ReadonlyMap<string, GapRow>) => lineageAncestors(gid, m);

@@ -25,7 +25,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
-import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 useUngatedRowsSource();
 
 const ROOT = join(tmpdir(), `repair-review-ad-${Date.now()}-${Math.random().toString(36).slice(2)}`);

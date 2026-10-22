@@ -7,7 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
-import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 useUngatedRowsSource();
 
 const ROOT = join(tmpdir(), `sf-aggregate-${Date.now()}-${Math.random().toString(36).slice(2)}`);

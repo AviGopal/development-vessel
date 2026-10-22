@@ -200,3 +200,30 @@ describe("gap-check-supply candidate_order, read from the family rhythm", () => 
     expect(await rankedKeys(ids)).toEqual(GOLDEN);
   });
 });
+
+// NEWEST FIRST WITHIN THE BAND (USER RULING 2026-10-22 "Newest first within the band (Recommended)"): the same band,
+// first, ordered newest first by today's age key; the rows outside the band keep today's order and follow.
+const NEWEST_FIRST = ["sysFreshSited", "sysFreshSitedSpec", "sysNonAttemptSited", "opRetry", "sysRetry", "opFreshSited", "opFreshSitedNoSpec", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
+
+describe("gap-check-supply candidate_order eligible_never_attempted_newest_first", () => {
+  it("MUST-FAIL (a): newest first within the band puts a newer band row ahead of an older band row", async () => {
+    rhythms = [dueRhythm({ candidate_order: "eligible_never_attempted_newest_first" })];
+    const ids = await seedCorpus();
+    const keys = await rankedKeys(ids);
+    expect(keys.indexOf("sysFreshSited")).toBeLessThan(keys.indexOf("sysNonAttemptSited"));
+    expect(keys).toEqual(NEWEST_FIRST);
+    expect(logs.filter((l) => l.includes("[check-supply] candidate_order="))).toEqual(["[check-supply] candidate_order=eligible_never_attempted_newest_first"]);
+  });
+  it("MUST-FAIL (b): eligible_never_attempted_first keeps its old order, oldest first in the band", async () => {
+    rhythms = [dueRhythm({ candidate_order: "eligible_never_attempted_first" })];
+    const ids = await seedCorpus();
+    const keys = await rankedKeys(ids);
+    expect(keys.indexOf("sysNonAttemptSited")).toBeLessThan(keys.indexOf("sysFreshSited"));
+    expect(keys).toEqual(ELIGIBLE_FIRST);
+  });
+  it("MUST-FAIL (c): with candidate_order absent the order is byte-identical to the golden", async () => {
+    const ids = await seedCorpus();
+    expect(JSON.stringify(await rankedKeys(ids))).toBe(JSON.stringify(GOLDEN));
+    expect(logs.filter((l) => l.includes("[check-supply] candidate_order="))).toEqual(["[check-supply] candidate_order=default"]);
+  });
+});

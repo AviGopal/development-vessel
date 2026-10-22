@@ -1034,6 +1034,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // system's own writable rows are not starved behind operator retries. Absent, or any other value: today's order.
   const candidateOrder = rhythm.body["candidate_order"];
   const eligibleFirst = candidateOrder === "eligible_never_attempted_first";
+  // "eligible_never_attempted_newest_first": the same band, ranked first, and ordered NEWEST first within it (the age key
+  // today's order reads, reversed); the rows outside the band keep today's order and follow.
+  const newestFirst = candidateOrder === "eligible_never_attempted_newest_first";
   const localNode = checkSupplyNode();
 
   const read = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
@@ -1347,12 +1350,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const v = checkSupplyVessel(r);
     return Number(ledgerOf(metaOf(r)).attempts ?? 0) === 0 && r["source"] === "substrate_detected" && Boolean(v && checkSupplySite(r, v));
   };
-  console.log(`[check-supply] candidate_order=${eligibleFirst ? "eligible_never_attempted_first" : candidateOrder === undefined ? "default" : `default (unrecognised ${JSON.stringify(candidateOrder)})`}`);
+  console.log(`[check-supply] candidate_order=${eligibleFirst ? "eligible_never_attempted_first" : newestFirst ? "eligible_never_attempted_newest_first" : candidateOrder === undefined ? "default" : `default (unrecognised ${JSON.stringify(candidateOrder)})`}`);
   const candidates = open
     .filter((r) => !touched.has(String(r["id"])) && checkSupplyDisposition(r) !== null)
     .sort((a, b) => {
       // The band first (candidate_order above), then today's order within each band.
       if (eligibleFirst) { const ba = neverAttemptedSystemSited(a); const bb = neverAttemptedSystemSited(b); if (ba !== bb) return ba ? -1 : 1; }
+      if (newestFirst) {
+        const ba = neverAttemptedSystemSited(a); const bb = neverAttemptedSystemSited(b);
+        if (ba !== bb) return ba ? -1 : 1;
+        // Within the band, newest first: today's age key, reversed. A tie falls through to today's order.
+        if (ba) { const age = String(b["first_detected_at"] ?? b["detected_at"] ?? "").localeCompare(String(a["first_detected_at"] ?? a["detected_at"] ?? "")); if (age !== 0) return age; }
+      }
       const ra = dueRetry(a); const rb = dueRetry(b);
       if (ra !== rb) return ra ? -1 : 1;
       // Priority after attempts: writable (existing edit site in clone) > stated falsifier_spec > oldest first

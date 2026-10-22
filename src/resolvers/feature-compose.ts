@@ -3655,6 +3655,23 @@ async function consultPrinciples(spec: string): Promise<string> {
   }
   return "";
 }
+// CONTENT REACHES THE DRAFTER WITH ITS KIND (learning integrity). This search has no shape or source_type filter, and a
+// concept recording a REJECTED approach names the very file and symbols the spec does, so it matched as well as any
+// rule and was rendered as one: recording what failed steered drafts toward it. A rejected_approach concept is
+// excluded here (the drafter's negative evidence is its own gap's failure record, which says what failed and why), and
+// every item that remains is shown with its id, shape and source_type, as the concept priors are.
+const CONSULT_EXCLUDED_SHAPES = new Set(["rejected_approach"]);
+type ConsultedConcept = { id?: string; shape?: string; source_type?: string; summary?: string; content?: string };
+/** The consultation's rendering: rejected approaches dropped, each remaining item carrying its kind. */
+export function renderConsultedConcepts(concepts: ReadonlyArray<ConsultedConcept>): { text: string; excluded: string[] } {
+  const excluded = concepts.filter((c) => CONSULT_EXCLUDED_SHAPES.has(String(c.shape ?? ""))).map((c) => String(c.id ?? "(no id)"));
+  const items = concepts.filter((c) => !CONSULT_EXCLUDED_SHAPES.has(String(c.shape ?? ""))).slice(0, 4);
+  const kind = (c: ConsultedConcept) => `[${String(c.id ?? "no id").slice(0, 80)}] (shape: ${String(c.shape ?? "unknown").replace(/[^\w.-]/g, "").slice(0, 40) || "unknown"}, source_type: ${String(c.source_type ?? "unknown").replace(/[^\w.-]/g, "").slice(0, 40) || "unknown"})`;
+  return {
+    text: items.map((c, i) => `${i + 1}. ${kind(c)} ${String(c.summary ?? "").trim()}\n   ${String(c.content ?? "").replace(/\s+/g, " ").slice(0, 400)}`).join("\n"),
+    excluded,
+  };
+}
 async function consultPrinciplesQuery(query: string): Promise<string> {
   try {
     if (!query.trim()) return "";
@@ -3664,12 +3681,10 @@ async function consultPrinciplesQuery(query: string): Promise<string> {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return "";
-    const j = (await res.json()) as { concepts?: Array<{ summary?: string; content?: string }> };
-    const items = (j.concepts ?? []).slice(0, 4);
-    if (!items.length) return "";
-    return items
-      .map((c, i) => `${i + 1}. ${String(c.summary ?? "").trim()}\n   ${String(c.content ?? "").replace(/\s+/g, " ").slice(0, 400)}`)
-      .join("\n");
+    const j = (await res.json()) as { concepts?: ConsultedConcept[] };
+    const { text, excluded } = renderConsultedConcepts(j.concepts ?? []);
+    if (excluded.length > 0) console.log(`[fc-principles] excluded ${excluded.length} rejected_approach concept(s) from the consultation: ${excluded.join(", ")}`);
+    return text;
   } catch {
     return "";
   }

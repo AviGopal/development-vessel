@@ -768,13 +768,25 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
  * It refuses, `check_asserts_contract_mismatch:<shape | body.X>`, when
  *   - the assertion reads `<r>.shape`, Received is a shape the function returns, and Expected is a string that is neither
  *     a shape it returns nor any string literal in its module; or
- *   - it reads `<r>.body.<X>`, Received is undefined, and every return's body is an object literal none of which sets X.
+ *   - it reads `<r>.body.<X>`, Received is undefined, and every return's body is an object literal none of which sets X;
+ *   - it reads `<r>` ITSELF with toBe / toEqual / toStrictEqual (not negated), Expected is a string, number or boolean
+ *     the function can never return (every return is a literal or object of another kind: an object or null, say), and
+ *     Received is of a kind it does return (`check_asserts_contract_mismatch:value`). An inverted check is this class:
+ *     it calls an object-or-null classifier with a field the classifier never reads and expects the field's value
+ *     back, so greening it would mean breaking the real classifier. Unlike the shape rule, a string literal elsewhere
+ *     in the module does not excuse it: a literal the function compares against is not a value it returns.
+ * The called function is found through `ns.fn(…)`, `(ns as any).fn(…)`, a named import, or a local alias of one of
+ * those (`const f: any = (ns as any).fn; f(…)`).
  * An assertion it cannot place, a value it cannot trace, or an open contract decides nothing. Known limit (accepted, as
- * for a missing export): a gap whose fix ADDS the shape or the body field writes exactly this check, and it is refused.
- * Applied where missingExportRefusal is: at the verify of a test_writing compose and at the arm step. null = no refusal.
+ * for a missing export): a gap whose fix ADDS the shape or the body field, or makes the function return a value of a
+ * new kind, writes exactly this check, and it is refused.
+ * Applied where missingExportRefusal is: at the verify of a test_writing compose (so a refused check never lands) and at
+ * the arm step. null = no refusal.
  */
 export const CONTRACT_MISMATCH_STAGE = "check_asserts_contract_mismatch";
-type ReturnedContract = { shapes: Set<string> | null; bodyKeys: Set<string> | null };
+/** The kinds of value a function can return (`kinds`), read from the same return walk; null = open. */
+type ValueKind = "object" | "array" | "null" | "undefined" | "string" | "number" | "boolean";
+type ReturnedContract = { shapes: Set<string> | null; bodyKeys: Set<string> | null; kinds: Set<ValueKind> | null };
 function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): ReturnedContract | null {
   const locals = new Map<string, TS.FunctionLikeDeclaration>();
   for (const s of sf.statements) {
@@ -783,8 +795,8 @@ function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): Retu
   }
   const root = locals.get(fnName);
   if (!root) return null;
-  const shapes = new Set<string>(), bodyKeys = new Set<string>();
-  let shapesOpen = false, bodyOpen = false;
+  const shapes = new Set<string>(), bodyKeys = new Set<string>(), kinds = new Set<ValueKind>();
+  let shapesOpen = false, bodyOpen = false, kindsOpen = false;
   const open = (): void => { shapesOpen = true; bodyOpen = true; };
   const unwrap = (e: TS.Expression): TS.Expression => {
     while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e) || ts.isAwaitExpression(e)) e = e.expression;
@@ -800,13 +812,26 @@ function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): Retu
     ts.forEachChild(fn.body, visit);
     return out;
   };
+  // The kind of a return that is not an object literal: a literal of one kind, or null (open) for anything else.
+  const literalKind = (e: TS.Expression): ValueKind | null => {
+    if (e.kind === ts.SyntaxKind.NullKeyword) return "null";
+    if (e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) return "boolean";
+    if (ts.isIdentifier(e) && e.text === "undefined") return "undefined";
+    if (ts.isVoidExpression(e)) return "undefined";
+    if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isTemplateExpression(e)) return "string";
+    if (ts.isNumericLiteral(e) || (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(e.operand))) return "number";
+    if (ts.isArrayLiteralExpression(e)) return "array";
+    return null;
+  };
   const value = (raw: TS.Expression | undefined): void => {
-    if (!raw) { open(); return; }
+    if (!raw) { kinds.add("undefined"); open(); return; }
     const e = unwrap(raw);
     if (ts.isConditionalExpression(e)) { value(e.whenTrue); value(e.whenFalse); return; }
     const helper = ts.isCallExpression(e) && ts.isIdentifier(e.expression) ? locals.get(e.expression.text) : undefined;
     if (helper) { if (!seen.has(helper)) { seen.add(helper); for (const r of returnsOf(helper)) value(r); } return; }
-    if (!ts.isObjectLiteralExpression(e)) { open(); return; }
+    if (!ts.isObjectLiteralExpression(e)) { const k = literalKind(e); if (k) kinds.add(k); else kindsOpen = true; open(); return; }
+    // An object literal is an object whatever it spreads: a spread opens its shape and body, never its kind.
+    kinds.add("object");
     let shape = false, body = false;
     for (const p of e.properties) {
       const k = ts.isSpreadAssignment(p) ? null : keyOf(p);
@@ -825,7 +850,7 @@ function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): Retu
     if (!body) bodyOpen = true;
   };
   for (const r of returnsOf(root)) value(r);
-  return { shapes: shapesOpen ? null : shapes, bodyKeys: bodyOpen ? null : bodyKeys };
+  return { shapes: shapesOpen ? null : shapes, bodyKeys: bodyOpen ? null : bodyKeys, kinds: kindsOpen ? null : kinds };
 }
 export function contractMismatchRefusal(source: string, checkRel: string, redReason: unknown, reader: SrcReader): { test: string; module: string; fn: string; reads: string; reason: string } | null {
   const compared = (redReason as { compared?: unknown } | null | undefined)?.compared;
@@ -856,14 +881,14 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
   };
   bind(sf);
   // Every expect(<subject>)…<matcher>(…) call: the matcher name's position is where bun's stack frame points.
-  const expects: Array<{ subject: TS.Expression; line: number; col: number }> = [];
+  const expects: Array<{ subject: TS.Expression; line: number; col: number; matcher: string; negated: boolean }> = [];
   const findExpects = (n: TS.Node): void => {
     if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "expect" && n.arguments[0]) {
       let m: TS.Node = n;
       while (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m && m.parent.name.text === "not") m = m.parent;
       if (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m) {
         const pos = sf.getLineAndCharacterOfPosition(m.parent.name.getStart(sf));
-        expects.push({ subject: n.arguments[0], line: pos.line + 1, col: pos.character + 1 });
+        expects.push({ subject: n.arguments[0], line: pos.line + 1, col: pos.character + 1, matcher: m.parent.name.text, negated: m !== n });
       }
     }
     ts.forEachChild(n, findExpects);
@@ -893,16 +918,27 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
       if (ts.isElementAccessExpression(e) && (ts.isStringLiteral(e.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(e.argumentExpression))) { path.unshift(e.argumentExpression.text); e = unwrap(e.expression); continue; }
       break;
     }
-    const reads = path[0] === "shape" && path.length === 1 ? "shape" : path[0] === "body" && path.length >= 2 ? `body.${path[1]}` : null;
+    const equality = !at[0]!.negated && (at[0]!.matcher === "toBe" || at[0]!.matcher === "toEqual" || at[0]!.matcher === "toStrictEqual");
+    const reads = path[0] === "shape" && path.length === 1 ? "shape" : path[0] === "body" && path.length >= 2 ? `body.${path[1]}` : path.length === 0 && equality ? "value" : null;
     if (!reads) continue;
     const init = ts.isIdentifier(e) ? initOf(at[0]!.subject, e.text) : e;
     const call = init ? unwrap(init) : null;
     if (!call || !ts.isCallExpression(call)) continue;
-    const callee = call.expression;
-    let target: { spec: string; fn: string } | null = null;
-    if (ts.isIdentifier(callee) && named.has(callee.text)) target = { spec: named.get(callee.text)!.spec, fn: named.get(callee.text)!.imported };
-    else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && ns.has(callee.expression.text)) target = { spec: ns.get(callee.expression.text)!, fn: callee.name.text };
-    else if (ts.isElementAccessExpression(callee) && ts.isIdentifier(callee.expression) && ns.has(callee.expression.text) && ts.isStringLiteral(callee.argumentExpression)) target = { spec: ns.get(callee.expression.text)!, fn: callee.argumentExpression.text };
+    // The callee: a named import, a member of a namespace (through a cast: `(ns as any).fn`), or one local alias of either.
+    const calleeOf = (raw: TS.Expression, aliased: boolean): { spec: string; fn: string } | null => {
+      const callee = unwrap(raw);
+      if (ts.isIdentifier(callee)) {
+        if (named.has(callee.text)) return { spec: named.get(callee.text)!.spec, fn: named.get(callee.text)!.imported };
+        const alias = aliased ? null : initOf(call, callee.text);
+        return alias ? calleeOf(alias, true) : null;
+      }
+      const obj = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? unwrap(callee.expression) : null;
+      if (!obj || !ts.isIdentifier(obj) || !ns.has(obj.text)) return null;
+      if (ts.isPropertyAccessExpression(callee)) return { spec: ns.get(obj.text)!, fn: callee.name.text };
+      if (ts.isElementAccessExpression(callee) && ts.isStringLiteral(callee.argumentExpression)) return { spec: ns.get(obj.text)!, fn: callee.argumentExpression.text };
+      return null;
+    };
+    const target = calleeOf(call.expression, false);
     if (!target) continue;
     const mod = resolveModule(checkRel, target.spec, reader);
     if (!mod || !mod.rel.startsWith("src/")) continue;
@@ -919,6 +955,27 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
       lit(msf);
       if (literals.has(expected)) continue;
       return { test, module: mod.rel, fn: target.fn, reads, reason: `${CONTRACT_MISMATCH_STAGE}:shape: ${where} expects the shape ${JSON.stringify(expected)} from ${target.fn} in ${mod.rel}, which returns ${[...contract.shapes].map((s) => JSON.stringify(s)).join(", ")} and names ${JSON.stringify(expected)} nowhere, so the check is red on every tree, not for the defect` };
+    }
+    if (reads === "value") {
+      // What bun printed, by kind: a JSON string, a number, true/false; Received also null, undefined, an object or an array.
+      const kindOfPrinted = (v: unknown): ValueKind | null => {
+        if (typeof v !== "string") return null;
+        const t = v.trim();
+        if (t === "null") return "null";
+        if (t === "undefined") return "undefined";
+        if (t === "true" || t === "false") return "boolean";
+        if (/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(t)) return "number";
+        if (t.startsWith("\"")) return parseValue(t) === null ? null : "string";
+        if (t.startsWith("{")) return "object";
+        if (t.startsWith("[")) return "array";
+        return null;
+      };
+      const expectedKind = kindOfPrinted(c["expected"]), receivedKind = kindOfPrinted(c["received"]);
+      if (!contract.kinds || contract.kinds.size === 0 || !receivedKind || !contract.kinds.has(receivedKind)) continue;
+      if (expectedKind !== "string" && expectedKind !== "number" && expectedKind !== "boolean") continue;
+      if (contract.kinds.has(expectedKind)) continue;
+      const returns = [...contract.kinds].sort().join(" | ");
+      return { test, module: mod.rel, fn: target.fn, reads, reason: `${CONTRACT_MISMATCH_STAGE}:value: ${where} expects ${String(c["expected"]).slice(0, 80)} (a ${expectedKind}) from ${target.fn} in ${mod.rel}, which only ever returns ${returns} (Received ${String(c["received"]).slice(0, 80)}), so the check is red on every tree, not for the defect` };
     }
     const field = path[1]!;
     if (c["received"] !== "undefined" || !contract.bodyKeys || contract.bodyKeys.has(field)) continue;

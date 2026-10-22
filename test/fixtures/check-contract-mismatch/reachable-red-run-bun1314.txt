@@ -1,0 +1,22 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/reachable-red.check.ts:
+2 | import { settlementKindOf, settlementLabel } from "../../src/resolvers/settlement-kind";
+3 | 
+4 | describe("settlement classification (real signature, reachable returns)", () => {
+5 |   test("a refusal without a retry is labelled unsettled", () => {
+6 |     expect(settlementKindOf({ kind: "refused" })?.kind).toBe("refused");
+7 |     expect(settlementLabel({ kind: "refused" })).toBe("unsettled");
+                                                     ^
+error: expect(received).toBe(expected)
+
+Expected: "unsettled"
+Received: "settled"
+
+      at <anonymous> (/tmp/fx/test/checks/reachable-red.check.ts:7:50)
+(fail) settlement classification (real signature, reachable returns) > a refusal without a retry is labelled unsettled [0.69ms]
+
+ 0 pass
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [16.00ms]

@@ -1,0 +1,9 @@
+import { expect, test } from "bun:test";
+import * as mod from "../../src/resolvers/settlement-kind";
+
+// An inverted check: it guesses the classifier reads `status` and expects the guessed field's value back.
+test("settlementKindOf reads a guessed status field", () => {
+  const guessed = { status: "green" } as const;
+  const got = (mod as any).settlementKindOf(guessed);
+  expect(got).toBe(guessed.status);
+});

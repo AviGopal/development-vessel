@@ -134,3 +134,98 @@ describe("LIVE: the test_writing verify (judgeTestWritingCheck) with the bun run
     expect(j).toMatchObject({ ok: true, stage: null });
   });
 });
+
+// AN INVERTED CHECK IS REFUSED BEFORE IT LANDS (2026-10-21).
+//
+// A system test-writing compose landed checks that call an object-or-null classifier (it reads `kind`) with a field it
+// never reads (`status`) and expect a STRING back: `expect(kindOf({ status: "green" })).toBe("green")`, once directly
+// through `(mod as any).fn(…)` and once through a local alias `const classify: any = (mod as any).fn`. Each is an
+// assertion red (Expected a string, Received null), so the verify passed it and the cutover committed it, and greening
+// it would mean breaking the real classifier. The rule now also reads an assertion on the call's result ITSELF
+// (`check_asserts_contract_mismatch:value`): Expected is a string the function can never return, and Received is a
+// kind it does return. The callee is resolved through a cast and through one local alias.
+//
+// FIXTURES: settlement-kind.ts.txt (a classifier of that form, with the compared literal "non_attempt" in its module),
+// the two inverted checks, and a control with the real signature and a reachable return; *-run-bun1314.txt are bun
+// 1.3.14's runs of them (paths rewritten to /tmp/fx).
+const KIND_REL = "src/resolvers/settlement-kind.ts";
+const KIND_SRC = fixture("settlement-kind.ts.txt");
+const KIND_TREE = readerOf({ [KIND_REL]: KIND_SRC });
+const CHECK_INVERTED = fixture("inverted-value.check.ts.txt");
+const CHECK_ALIASED = fixture("aliased-value.check.ts.txt");
+const CHECK_REACHABLE = fixture("reachable-red.check.ts.txt");
+const REL_INVERTED = "test/checks/inverted-value.check.ts";
+const REL_ALIASED = "test/checks/aliased-value.check.ts";
+const REL_REACHABLE = "test/checks/reachable-red.check.ts";
+
+describe("contractMismatchRefusal: a value the called function never returns", () => {
+  test("[FIXTURE] the inverted check's red compared a string with null at its own expect()", () => {
+    const c = classify(fixture("inverted-value-run-bun1314.txt"));
+    expect(c.compared?.[0]).toMatchObject({ file: `/tmp/fx/${REL_INVERTED}`, line: 8, expected: "\"green\"", received: "null" });
+  });
+
+  test("[MUST-FAIL] an inverted check through `(ns as any).fn(…)` is refused: a string from an object-or-null function", () => {
+    expect(typeof refusal).toBe("function");
+    const r = refusal!(CHECK_INVERTED, REL_INVERTED, classify(fixture("inverted-value-run-bun1314.txt")), KIND_TREE);
+    expect(r).toMatchObject({ module: KIND_REL, fn: "settlementKindOf", reads: "value" });
+    expect(r!.reason).toContain("check_asserts_contract_mismatch:value");
+    expect(r!.reason).toContain("null | object");
+  });
+
+  test("[MUST-FAIL] the same through a local alias is refused, though the expected string is a literal in the module", () => {
+    expect(typeof refusal).toBe("function");
+    expect(KIND_SRC).toContain("\"non_attempt\"");
+    const r = refusal!(CHECK_ALIASED, REL_ALIASED, classify(fixture("aliased-value-run-bun1314.txt")), KIND_TREE);
+    expect(r).toMatchObject({ module: KIND_REL, fn: "settlementKindOf", reads: "value" });
+    expect(r!.reason).toContain("\"non_attempt\"");
+  });
+
+  test("[CONTROL] the real signature with a reachable return (a string from a string function) is not refused", () => {
+    expect(typeof refusal).toBe("function");
+    expect(refusal!(CHECK_REACHABLE, REL_REACHABLE, classify(fixture("reachable-red-run-bun1314.txt")), KIND_TREE)).toBeNull();
+  });
+
+  test("[CONTROL] a negated matcher, a non-equality matcher, an open return, or a Received the function never returns decides nothing", () => {
+    expect(typeof refusal).toBe("function");
+    const run = classify(fixture("inverted-value-run-bun1314.txt"));
+    expect(refusal!(CHECK_INVERTED.replace("expect(got).toBe(", "expect(got).not.toBe("), REL_INVERTED, run, KIND_TREE)).toBeNull();
+    expect(refusal!(CHECK_INVERTED.replace("expect(got).toBe(", "expect(got).toContain("), REL_INVERTED, run, KIND_TREE)).toBeNull();
+    const open = KIND_SRC.replace("if (!o || typeof o !== \"object\") return null;", "if (!o || typeof o !== \"object\") return fallback(o);");
+    expect(open).not.toBe(KIND_SRC);
+    expect(refusal!(CHECK_INVERTED, REL_INVERTED, run, readerOf({ [KIND_REL]: open }))).toBeNull();
+    expect(refusal!(CHECK_INVERTED, REL_INVERTED, { ...run, compared: run.compared!.map((x) => ({ ...x, received: "\"green \"" })) }, KIND_TREE)).toBeNull();
+  });
+});
+
+describe("LIVE: the test_writing verify refuses an inverted check before it lands", () => {
+  const kindVessel = (gapId: string, check: string): string => {
+    const root = mkdtempSync(join(tmpdir(), "contract-mismatch-value-"));
+    for (const [rel, text] of Object.entries({ [KIND_REL]: KIND_SRC, [`test/checks/${checkFile(gapId)}`]: check })) {
+      mkdirSync(join(root, rel, ".."), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return root;
+  };
+  const verdict = async (gapId: string, check: string): Promise<Judgement> => {
+    const root = kindVessel(gapId, check);
+    return judge({ gapId, vesselRoot: root, editSite: null, run: runner(root), runs: 3 });
+  };
+
+  test("[MUST-FAIL] the inverted check is refused at the verify: check_asserts_contract_mismatch:value", async () => {
+    const j = await verdict("contract-mismatch-inverted-value", CHECK_INVERTED);
+    expect(j.ok).toBe(false);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("check_asserts_contract_mismatch:value");
+  });
+
+  test("[MUST-FAIL] the aliased inverted check is refused at the verify", async () => {
+    const j = await verdict("contract-mismatch-aliased-value", CHECK_ALIASED);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("settlementKindOf");
+  });
+
+  test("[CONTROL] a check with the real signature and a reachable return passes the verify", async () => {
+    const j = await verdict("contract-mismatch-reachable-value", CHECK_REACHABLE);
+    expect(j).toMatchObject({ ok: true, stage: null });
+  });
+});

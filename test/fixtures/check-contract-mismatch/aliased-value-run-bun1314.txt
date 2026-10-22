@@ -1,0 +1,22 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/aliased-value.check.ts:
+3 | 
+4 | describe("settlement classification", () => {
+5 |   test("a failed send classifies as a non-attempt", () => {
+6 |     const classify: any = (mod as any).settlementKindOf;
+7 |     const verdict = classify({ status: "dispatch_failed" });
+8 |     expect(verdict).toBe("non_attempt");
+                        ^
+error: expect(received).toBe(expected)
+
+Expected: "non_attempt"
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/aliased-value.check.ts:8:21)
+(fail) settlement classification > a failed send classifies as a non-attempt [0.26ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [16.00ms]

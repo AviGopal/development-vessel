@@ -1,0 +1,15 @@
+// A classifier of a settled outcome: it reads `kind` (and `retry_after_s`), and returns an object or null.
+type Row = Record<string, unknown>;
+
+export function settlementKindOf(o: unknown): { kind: "non_attempt" | "refused"; retry_after_s?: number } | null {
+  if (!o || typeof o !== "object") return null;
+  const r = o as Row;
+  const kind = r["kind"];
+  if (kind !== "non_attempt" && kind !== "refused") return null;
+  const ra = r["retry_after_s"];
+  return { kind, ...(typeof ra === "number" && Number.isFinite(ra) && ra > 0 ? { retry_after_s: ra } : {}) };
+}
+
+export function settlementLabel(o: unknown): string {
+  return settlementKindOf(o) ? "settled" : "unsettled";
+}

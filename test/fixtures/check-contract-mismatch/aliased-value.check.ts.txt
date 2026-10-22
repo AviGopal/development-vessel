@@ -1,0 +1,10 @@
+import { describe, expect, test } from "bun:test";
+import * as mod from "../../src/resolvers/settlement-kind";
+
+describe("settlement classification", () => {
+  test("a failed send classifies as a non-attempt", () => {
+    const classify: any = (mod as any).settlementKindOf;
+    const verdict = classify({ status: "dispatch_failed" });
+    expect(verdict).toBe("non_attempt");
+  });
+});

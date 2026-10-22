@@ -1,0 +1,22 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/inverted-value.check.ts:
+3 | 
+4 | // An inverted check: it guesses the classifier reads `status` and expects the guessed field's value back.
+5 | test("settlementKindOf reads a guessed status field", () => {
+6 |   const guessed = { status: "green" } as const;
+7 |   const got = (mod as any).settlementKindOf(guessed);
+8 |   expect(got).toBe(guessed.status);
+                  ^
+error: expect(received).toBe(expected)
+
+Expected: "green"
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/inverted-value.check.ts:8:15)
+(fail) settlementKindOf reads a guessed status field [0.27ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [16.00ms]

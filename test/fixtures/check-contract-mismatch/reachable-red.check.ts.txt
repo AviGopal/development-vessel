@@ -1,0 +1,9 @@
+import { describe, expect, test } from "bun:test";
+import { settlementKindOf, settlementLabel } from "../../src/resolvers/settlement-kind";
+
+describe("settlement classification (real signature, reachable returns)", () => {
+  test("a refusal without a retry is labelled unsettled", () => {
+    expect(settlementKindOf({ kind: "refused" })?.kind).toBe("refused");
+    expect(settlementLabel({ kind: "refused" })).toBe("unsettled");
+  });
+});

@@ -601,16 +601,18 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   // child is written by the lane as substrate_detected, so an operator-filed or human_reported lineage ancestor (the
   // explicit links, transitively, and the id rule) is the closure's origin, and link 1 fails on it.
   const src = String(row["source"] ?? "");
-  const operatorFiled = src.startsWith("operator:") || src === "human_reported";
   const filerOf = (r: GapRow | undefined): string | null => {
     const s0 = String(r?.["source"] ?? "");
     const fb = String(metaRec(r ?? null)["filed_by"] ?? "");
     return s0.startsWith("operator:") || s0 === "human_reported" ? `source ${s0}` : fb.startsWith("operator:") ? `filed_by ${fb}` : null;
   };
+  // The row's OWN filer is read by the same rule as an ancestor's (qa eval5 B2): `source` alone missed a row the lane
+  // wrote as substrate_detected whose filed_by names an operator.
+  const ownFiler = filerOf(row);
   const rootFiler = [...lineageAncestors(landing.gap_id, inp.byId)].sort().map((k) => ({ k, by: filerOf(inp.byId.get(k)) })).find((a) => a.by !== null);
   // The row's own operator filing fails link 1 in the same form (qa ruling 2026-10-22); its filing is still also the
   // operator act link 5 names.
-  const l1: LinkState = operatorFiled ? { state: "fail", why: `origin: operator-filed (source ${src})` }
+  const l1: LinkState = ownFiler ? { state: "fail", why: `origin: operator-filed (${ownFiler})` }
     : rootFiler ? { state: "fail", why: `origin: operator-filed (lineage ancestor ${rootFiler.k.slice(-60)} is ${rootFiler.by})` }
     : src === "substrate_detected" ? { state: "pass", why: "source substrate_detected, and no operator-filed lineage ancestor" }
     : { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` };

@@ -84,6 +84,12 @@ export interface AttemptRecord {
   tc_lessons_unparsed?: string;
   /** How this attempt was grounded and what moved (law 12). */
   attribution?: GroundingAttribution;
+  /**
+   * Which drafter assembly drafted this attempt, so an outcome is credited to the variant that drafted it (drafting-as-
+   * activities 1.1): the variant asked for, the version its context declared, and why the floor drafted instead
+   * (null: the variant itself drafted). Absent: the compose stopped before the drafter ran.
+   */
+  drafter?: { variant: string | null; version: string | null; fell_back: string | null };
 }
 
 /**

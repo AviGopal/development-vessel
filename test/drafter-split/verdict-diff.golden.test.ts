@@ -11,6 +11,7 @@
 // the open data golden under src/drafter/golden/ (a review instrument the lane updates with each open change); this
 // file changes only by an operator/qa act. The split's own journal lines ("[drafter] ", "[fc-drafter] ") did not
 // exist before it and are set aside before the comparison.
+// Re-baselined once, adding only the drafter key on the attempt record: USER RULING 2026-10-22 "Re-baseline, drafter key only (Recommended)" (via qa).
 import { afterAll, describe, expect, it, mock } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

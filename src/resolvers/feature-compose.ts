@@ -6560,7 +6560,9 @@ export type DrafterCheckedContext = {
   grounding: string; targetWindows: Record<string, string>; priorFeedback: string; principles: string; composeLessons: string;
   netNewTargets: string[]; opBudgetHint: number; journal: string[]; version: string;
 };
-export type DrafterRecord = { version: string | null; fell_back: string | null; op_budget: number; clamped?: string; dropped?: string[] };
+export type DrafterRecord = { variant: string; version: string | null; fell_back: string | null; op_budget: number; clamped?: string; dropped?: string[] };
+/** The variant an unnamed compose drafts with: the shipped module, src/drafter/index.ts (its context declares this version). */
+export const DRAFTER_DEFAULT_VARIANT = "drafter-v1";
 
 /** A deep-frozen structured copy: the module can neither mutate what a closed gate reads later nor keep a handle. */
 export function drafterDeepFreeze<T>(v: T): T {
@@ -6765,6 +6767,8 @@ export type DrafterRun = {
   lessonRows: (query: string, limit: number) => Promise<string[]>;
   ancestorStart: string;
   selfId: string;
+  /** The variant this run drafts with, as recorded (default DRAFTER_DEFAULT_VARIANT). */
+  variant?: string;
   load: () => Promise<DrafterModule>;
 };
 
@@ -6796,8 +6800,9 @@ async function drafterAncestors(start: string, depth: number, selfId: string, re
 
 /** ONE CALL OF THE OPEN MODULE, CLAMPED. Returns the validated context (or null: draft with the floor) and the record. */
 export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ ctx: DrafterCheckedContext | null; budget: number; record: DrafterRecord }> {
+  const variant = run.variant ?? DRAFTER_DEFAULT_VARIANT;
   const floor = (why: string, version: string | null = null, dropped: string[] = []): { ctx: null; budget: number; record: DrafterRecord } =>
-    ({ ctx: null, budget: run.floorBudget, record: { version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
+    ({ ctx: null, budget: run.floorBudget, record: { variant, version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
   const targets = run.scope.targets;
   if (targets.some((t) => t.startsWith(DRAFTER_SELF_PREFIX))) return floor("target_under_src_drafter");
   let mod: DrafterModule;
@@ -6835,7 +6840,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   const v = validateDrafterContext(raw, run.expect);
   const version = raw && typeof raw === "object" && typeof (raw as { version?: unknown }).version === "string" ? String((raw as { version: string }).version).slice(0, 64) : null;
   if (!v.ok) return floor(`context_refused: ${v.why}`, version, dropped);
-  return { ctx: v.ctx, budget: v.budget, record: { version: v.ctx.version, fell_back: null, op_budget: v.budget, ...(v.clamped ? { clamped: v.clamped } : {}), ...(dropped.length ? { dropped } : {}) } };
+  return { ctx: v.ctx, budget: v.budget, record: { variant, version: v.ctx.version, fell_back: null, op_budget: v.budget, ...(v.clamped ? { clamped: v.clamped } : {}), ...(dropped.length ? { dropped } : {}) } };
 }
 
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
@@ -10609,6 +10614,10 @@ const earlyAttempt = await Promise.race([
     // failed, the base regions it edited, the own check's failing Expected/Received, and whether the edit had
     // any effect on that check. The next attempt's prompt shows it and its applier enforces it.
     const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable, groundingOn ? { grounding: groundingEntries, sources: groundingPolicy!.read_widening === 1 ? (v) => readVesselSourcesAt(`${REPO_ROOT}/${v}`) : undefined } : {});
+    // drafting-as-activities 1.1: the drafter that drafted this attempt rides on the structured record, so its outcome
+    // is attributed to that variant (a fallback to the floor is recorded with its reason).
+    const drafterRec = composeDrafterStore.getStore()?.record;
+    if (drafterRec) attemptRecord.drafter = { variant: drafterRec.variant, version: drafterRec.version, fell_back: drafterRec.fell_back };
     if (groundingOn) {
       attemptRecord.attribution = groundingAttributionNow();
       console.log(groundingAttributionLine(String(pointer.gap?.id ?? ""), attemptRecord.attribution));

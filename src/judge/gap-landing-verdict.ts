@@ -691,6 +691,29 @@ export const NON_DISCRIMINATING_CHECK = "non_discriminating_check";
 export function nonDiscriminatingLandingLabel(label: GoalVerificationLabel | null | undefined): boolean {
   return !!label && label.grounded === false && label.shadow !== true && typeof label.reason === "string" && label.reason.startsWith("parent green, landed green");
 }
+/** The close_basis of a sweep close that a grounded re-run decided over an absent birth verdict. */
+export const GROUNDED_RERUN_CLOSE_BASIS = "grounded_rerun";
+/**
+ * A FIX THAT LANDED BEFORE ITS CHECK WAS BORN. A class-2 check is born by reading it on the tree of the day. When the
+ * fix landed first (an operator build with its own must-fail test, then a check armed on it; or a re-arm after the fix
+ * went live), the check reads green at birth and the row is predicate_suspect: its 'absent' closes nothing. That
+ * refusal stays, except where the birth tree already held the very landing the sweep verifies: then the absent birth
+ * is what the landing explains, and the sweep's own grounded re-run (red at the landing's parent, green at the landed
+ * sha, computed in this pass) decides the close, written with close_basis GROUNDED_RERUN_CLOSE_BASIS.
+ * Returns the birth sha the landing is an ancestor of (or equal to), or null: the birth verdict is not an 'absent' for
+ * this very check, no birth tree is recorded (predicate_birth_sha, else predicate_birth_queued_sha), or git cannot show
+ * the landing in it (a landing after the birth leaves the absent unexplained). Exported for tests.
+ */
+export function birthAbsentExplainedByLanding(meta: Record<string, unknown>, sha: string): { birth_sha: string } | null {
+  if (meta.predicate_birth_verdict !== "absent" || meta.predicate_birth_key !== class2PredicateKey(meta)) return null;
+  const hex = (v: unknown): string | null => (typeof v === "string" && /^[0-9a-f]{7,40}$/i.test(v.trim()) ? v.trim() : null);
+  const landed = hex(sha);
+  const birth = hex(meta.predicate_birth_sha) ?? hex(meta.predicate_birth_queued_sha);
+  const repo = birthCheckRepo(meta);
+  if (!landed || !birth || !repo || !existsSync(join(repo.dir, ".git"))) return null;
+  return sweepGitOut(repo.dir, ["merge-base", "--is-ancestor", landed, birth]) !== null ? { birth_sha: birth } : null;
+}
+
 /** Whether the row's pending hold was released (pending_released) on this landing. */
 export function pendingReleasedFor(meta: Record<string, unknown>, sha: string): boolean {
   const rel = meta.pending_released as { landed?: unknown } | null | undefined;
@@ -1936,9 +1959,11 @@ const pending = candidates.unheld
       }
       const verdict = await evaluateGapCheck(g);
       const gidSweep = String(g.id ?? "");
-      // 8.5: an 'absent' from a check that never read 'present' at birth closes nothing.
+      // 8.5: an 'absent' from a check that never read 'present' at birth closes nothing, UNLESS the birth tree
+      // already held this landing (birthAbsentExplainedByLanding): then the grounded re-run below decides, and only it.
       const suspectSweep = verdict === "absent" ? predicateSuspect(meta) : null;
-      if (suspectSweep) {
+      const birthExplained = suspectSweep ? birthAbsentExplainedByLanding(meta, sha) : null;
+      if (suspectSweep && !birthExplained) {
         tally.unknown += 1;
         console.log(`[gap-sweep] gap ${gidSweep} reads absent but is NOT closed: predicate_suspect (${suspectSweep})`);
         continue;
@@ -2028,6 +2053,13 @@ const pending = candidates.unheld
           continue;
         }
       }
+      // A suspect birth is overridden by this pass's grounded re-run and by nothing else (not a partial or
+      // literal-only close, which take no re-run).
+      if (birthExplained && independentLabel?.grounded !== true) {
+        tally.unknown += 1;
+        console.log(`[gap-sweep] gap ${gidSweep} reads absent but is NOT closed: predicate_suspect (${suspectSweep}; no grounded re-run for landed ${sha.slice(0, 12)})`);
+        continue;
+      }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;
       // ONE CREDIT PER (gap, landing): a standing row may re-close after a reopen on the landing it already
@@ -2048,11 +2080,14 @@ const pending = candidates.unheld
         // closer (02f55935) it is the only writer that can carry it; without it scope earn-in's guardCommit (which reads
         // landed_sha) found no commit for regression rows whose sha was in falsifier_exercise only.
         landed_sha: sha,
-        close_basis: verdict,
+        close_basis: birthExplained ? GROUNDED_RERUN_CLOSE_BASIS : verdict,
+        ...(birthExplained ? { birth_absent_explained: { landed: sha, parent: independentLabel?.parent ?? null, birth_sha: birthExplained.birth_sha } } : {}),
         falsifier_exercise: isLiteralOnlyStepClose(meta)
           ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }
           : { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
-        resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
+        resolution: birthExplained
+          ? `landed ${sha}: its own check re-run red at parent ${String(independentLabel?.parent ?? "").slice(0, 12)} and green at the landed sha; the birth tree ${birthExplained.birth_sha.slice(0, 12)} already held this landing, which explains its absent birth verdict`
+          : `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
         closed_at: new Date().toISOString(),
       };
       const sweepCloseWrite = await resolveSubstrateGapWrite({

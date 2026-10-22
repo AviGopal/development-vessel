@@ -412,3 +412,16 @@ describe("F-ARM: a mocked name its module does not export", () => {
     expect(refusalOf(CHECK_979, REL_979, reader({ "src/index.ts": INDEX_979, "src/llm-router.ts": `${ROUTER_979}\nexport * from "./elsewhere";\n` }))).toBeNull();
   });
 });
+
+// THE ARM STEP REFUSES A CHECK THAT CALLS ITS TARGET THROUGH A CAST (2026-10-22, user ruling: the rule at the verify
+// AND the arm). castCalleeRefusal (check-supply-admission.ts) runs after contractMismatchRefusal in the arm step's
+// wrong-reason chain, so a cast-reached call on a real export is never attached as the gap's falsifier.
+describe("F-ARM: a call to the target through a cast to any / unknown", () => {
+  it("[MUST-FAIL] a check calling a real export through `(mod as any)` is not armed: check_asserts_contract_mismatch:cast_callee", async () => {
+    const cast = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/index";\ntest("verifyGoalReached grades a lettercount goal", () => {\n  expect((mod as any).verifyGoalReached("count the letters")).toBe(true);\n});\n`;
+    const { id } = await landAndTick("me-cast", "goal-host-vessel", "src/index.ts", cast);
+    const led = ledgerOf(await storeRow(id));
+    expect(led["state"]).toBe("arm_refused");
+    expect(String(led["reason"])).toContain("check_asserts_contract_mismatch:cast_callee:verifyGoalReached");
+  });
+});

@@ -961,7 +961,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
     const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
     const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal(redReason, titles) : null;
-    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? null : null;
+    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = gapStoreIsLocal() ? firstFailureOf(redReason) : null;
     if (verdict !== "present" || wrongReason) {

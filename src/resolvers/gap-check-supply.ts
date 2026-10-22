@@ -89,6 +89,7 @@ import { armRedReasonRefusal, testTitleInSource } from "./retry-evidence.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY } from "../config.js";
+import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
 /** The predicate_source a system-authored check carries: the discriminator the measures count. */
@@ -724,6 +725,33 @@ export async function probeDispatch(dispatchId: string): Promise<DispatchProbe> 
   }
 }
 
+/**
+ * THE CHECK'S RUN REPORT, READ WHERE ITS VERDICT WAS TAKEN. A node that forwards its gap store settles a handed-off
+ * check from the holder's birth stamp, which carries a verdict and no report; the arm gates (red for the right reason,
+ * the red-reason classifier, the contract rule, the first failure) need the report. So the check's own pointer is
+ * resolved at the holder (the forward's endpoint, as forwardToGapStore sends it, under the judge's check timeout),
+ * and its report is the holder's run on the holder's tree. A null report arms nothing.
+ */
+async function holderCheckReport(evidence: { shape: string; input: Row }): Promise<{ report: Row | null; detail: string }> {
+  const ep = process.env["GAP_STORE_ENDPOINT"];
+  if (!ep) return { report: null, detail: "no gap-store holder endpoint" };
+  try {
+    const r = await fetch(ep, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      body: JSON.stringify({ impulse: { pointer: { type: evidence.shape, ...evidence.input } } }),
+      signal: AbortSignal.timeout(gapCheckTimeoutMs(evidence.shape, evidence.input)),
+    });
+    if (!r.ok) return { report: null, detail: `holder answered HTTP ${r.status}` };
+    const j = (await r.json()) as Row;
+    if (j["shape"] !== evidence.shape) return { report: null, detail: `holder answered ${String(j["shape"] ?? "no shape")}: ${JSON.stringify(j["body"] ?? null).slice(0, 160)}` };
+    const body = j["body"];
+    return typeof body === "object" && body !== null ? { report: body as Row, detail: "read" } : { report: null, detail: "holder answered no report body" };
+  } catch (err) {
+    return { report: null, detail: `holder unreachable: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
+  }
+}
+
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
 export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick", extra: Row = {}): Promise<void> {
   // `extra` lands in the SAME write as the leg (the settled attempt keys): a debit and its key are stored together or not at all.
@@ -883,8 +911,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (titles.length === 0) continue; // nothing appended yet: still waiting on the goal
     // The budget bounds the checks run for this tick: here, the ones this node runs; on a node that forwards its gap
     // store, the ones it hands to the holder (counted at the hand-off below), which bounds the holder's load. Waiting on
-    // or reading back the holder's verdict runs nothing and spends nothing; spent on the judge's abstain, it let one
-    // row's re-judged unknown block every other row on every tick.
+    // or reading back the holder's verdict spends nothing (a present's report read, below, runs the check once more at
+    // the holder, one per settled row); spent on the judge's abstain, it let one row's re-judged unknown block every
+    // other row on every tick.
     if (gapStoreIsLocal()) armBudget -= 1;
     touched.add(id);
     // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
@@ -952,18 +981,31 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       // An absent the holder re-labelled unknown because its tree moved is still the check passing at HEAD.
       verdict = atHolder === "present" ? "present" : atHolder === "absent" || (atHolder === "unknown" && birthTreeMoved(meta)) ? "absent" : "unknown";
       if (verdict === "unknown") { notArmed.push({ id, reason: `awaiting_holder_verdict: ${String(atHolder)}` }); continue; }
+      // THE GATES BELOW RUN ON EVERY NODE. The holder's stamp carries no report, and without one every handed-off check
+      // armed ungated here (a check red for the wrong reason, or on a contract its target lacks, armed hollow). A present
+      // reads its report where it was measured (holderCheckReport); a report that cannot be read arms nothing, and the
+      // row is read again on the next tick. Reading it is a settlement, not a hand-off: it spends no max_per_tick.
+      if (verdict === "present") {
+        const held = await holderCheckReport(evidence_resolve);
+        if (!held.report) {
+          notArmed.push({ id, reason: `awaiting_holder_report: ${held.detail}` });
+          console.warn(`[gap-check-supply] ${id}: the holder's present is not armed until its run report is read (${held.detail})`);
+          continue;
+        }
+        report = held.report;
+      }
     }
     // RED FOR THE RIGHT REASON, BY THE SHARED CLASSIFIER: every named test among the failures (redForTheRightReason)
     // AND each an assertion in the report's red_reason (retry-evidence.ts), the rule feature_compose's verify applies.
-    // A report without red_reason cannot attribute its red: nothing is armed. The holder's stamp carries no report, so
-    // a handed-off check is held to the test_writing verify's classifier (judgeTestWritingCheck) it landed through.
+    // A report without red_reason cannot attribute its red: nothing is armed. Wherever the store is held: a handed-off
+    // check is judged from the holder's report of it, read above.
     // An assertion red on a contract the target does not have (333be5f: a shape and a body field the resolver never
     // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
     const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
-    const classified = verdict === "present" && gapStoreIsLocal() ? armRedReasonRefusal(redReason, titles) : null;
-    const wrongReason = verdict === "present" && gapStoreIsLocal() ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
+    const classified = verdict === "present" ? armRedReasonRefusal(redReason, titles) : null;
+    const wrongReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
-    const firstFailure = gapStoreIsLocal() ? firstFailureOf(redReason) : null;
+    const firstFailure = firstFailureOf(redReason);
     if (verdict !== "present" || wrongReason) {
       // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown keeps the row's state and is judged again:
       // turned back to goal_dispatched, a settled failure was read back and settled again on the next tick.

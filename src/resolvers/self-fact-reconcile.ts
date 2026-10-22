@@ -44,7 +44,7 @@ import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveGapWriteEvent, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { appendRecord, ledgerDir, readRecords } from "./attempt-ledger.js";
-import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, provenanceTraceIds, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit } from "./operator-acts.js";
+import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, provenanceTraceIds, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit, type DispatchStoreEntry, type ResolverDispatchLike, type ResolverRequestLike, type ResolverAnswerLike } from "./operator-acts.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
@@ -671,7 +671,7 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   if (acts.acts.length > 0) return out("not_counted", `operator act from filing to close + 24 h: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}`);
   // UNKNOWN IS NEVER CLEAN: anything unread, unattributable or in review decides before time does.
   if (unknown.length > 0) return out("unjudged", `unread, so an operator act cannot be ruled out: ${unknown.join("; ")}`);
-  if (acts.unattributable.length > 0) return out("unjudged", `gap write(s) whose writer cannot be classed: ${acts.unattributable.slice(0, 3).join("; ")}`);
+  if (acts.unattributable.length > 0) return out("unjudged", `link 5 UNATTRIBUTABLE (a writer or an S-2 answer cannot be classed): ${acts.unattributable.slice(0, 3).join("; ")}`);
   if (acts.review.length > 0) return out("unjudged", `REVIEW: ${acts.review.slice(0, 2).join("; ")}`);
   if (honest.value === "unjudged") return out("unjudged", `link 2: ${honest.reason}`);
   for (const [n, s] of [["link 3", l3], ["link 4", l4], ["link 6", l6]] as const) if (s.state === "review") return out("unjudged", `${n}: ${s.why}`);
@@ -755,6 +755,29 @@ export function laneRevertControls(nowMs: number): Array<{ name: string; want: L
   ];
 }
 export const judgementLine = (j: { fact: string }): string => `[self-fact-judgement] ${JSON.stringify(j)}`;
+/** The S-2 inputs of one closure: the dispatch records naming its gap (by id or qualified edit_site, as link 5 names
+ *  them), each read with its resolverAnswers, and the resolverRequest record of every request those answers name. An
+ *  unread store is unread answers. Whether a record is trusted (it must name a provenance trace) is the reader's. */
+async function s2Inputs(deps: JudgementDeps, store: DispatchStoreEntry[] | null, gapId: string, site: string): Promise<{ resolverDispatches: ResolverDispatchLike[] | null; resolverRequests: Map<string, ResolverRequestLike> }> {
+  const requests = new Map<string, ResolverRequestLike>();
+  if (store === null) return { resolverDispatches: null, resolverRequests: requests };
+  const names = [...new Set([gapId, site, site.startsWith("repos/") ? site.slice("repos/".length) : ""])].filter((n) => n && n.length > 8);
+  const ids = [...new Set(store.filter((e): e is Record<string, unknown> => !!e && typeof e === "object").filter((e) => { const t = JSON.stringify(e) ?? ""; return names.some((n) => t.includes(n)); }).map((e) => String(e["dispatchId"] ?? "")).filter(Boolean))];
+  const out: ResolverDispatchLike[] = [];
+  for (const id of ids) {
+    let d: ResolverDispatchLike | null = null;
+    try { d = deps.resolverDispatch ? await deps.resolverDispatch(id) : null; } catch { d = null; }
+    out.push(d ?? { dispatch_id: id, execution_id: null, resolverAnswers: null });
+    for (const a of d?.resolverAnswers ?? []) {
+      const rid = a && typeof a === "object" ? a.lease_provenance?.request_id : null;
+      if (typeof rid !== "string" || !rid || requests.has(rid)) continue;
+      let r: ResolverRequestLike | null = null;
+      try { r = deps.resolverRequest ? await deps.resolverRequest(rid) : null; } catch { r = null; }
+      if (r) requests.set(rid, r);
+    }
+  }
+  return { resolverDispatches: out, resolverRequests: requests };
+}
 
 type LedgerRow = { key: string; at: string; record: Record<string, unknown> };
 // What the two rows read, injectable for tests (a fixture ledger, store, clones and scope history).
@@ -792,6 +815,12 @@ export interface JudgementDeps {
   /** Operator scope acts in ALL of the super-repo's scope history that opened each of `sites` to the lane (read once per
    *  run), or null when unreadable. Never from the row window's start: an act before the window still opened the site. */
   scopeActs: (sites: string[]) => Promise<Map<string, ScopeAct[]> | null>;
+  /** goal-host's dispatch records (activeDispatches, every page), read once per run; null when unreadable or cut. */
+  dispatches?: () => Promise<DispatchStoreEntry[] | null>;
+  /** One goal-host dispatch record with its resolverAnswers (goalWalkState by dispatchId); null when unreadable. */
+  resolverDispatch?: (dispatchId: string) => Promise<ResolverDispatchLike | null>;
+  /** goal-host's resolverRequest record by request_id; null when unreadable or unknown. */
+  resolverRequest?: (requestId: string) => Promise<ResolverRequestLike | null>;
   /** Append one run's aggregate (append-only: a repeated key is refused). */
   persist: (key: string, record: Record<string, unknown>) => { appended: boolean };
   now: () => number;
@@ -930,6 +959,45 @@ export async function readOracleLabels(traceIds: string[], io: OracleLabelIo = d
   if (labels.length > 0) { try { context = labelContextFrom(await readKeyClassMap(), thisNode()); } catch { /* unread: the empty context, every label REVIEW */ } }
   return { labels, context };
 }
+/**
+ * goal-host's open reads for link 5 and the S-2 answers, READ-ONLY, routed by discovery to this substrate's own
+ * producers at use time (the readKeyClassMap pattern). Any failure is null: unread, so UNATTRIBUTABLE downstream.
+ */
+async function goalHostResolve(shape: string, pointer: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const { discoverOwnResolveUrls, postEnvelopeRead } = await import("../judge/gap-policy.js");
+  const d = await discoverOwnResolveUrls(shape);
+  if (!d.ok || d.urls.length === 0) return null;
+  for (const url of d.urls) {
+    const r = await postEnvelopeRead(url, { impulse: { pointer: { type: shape, ...pointer } } });
+    const b = (r?.["body"] ?? null) as Record<string, unknown> | null;
+    if (b && typeof b === "object") return b;
+  }
+  return null;
+}
+/** Every activeDispatches page, or null when a page is unreadable or the store is longer than the bound read. */
+const DISPATCH_PAGE = 50, DISPATCH_PAGES = 40;
+async function readGoalHostDispatches(): Promise<DispatchStoreEntry[] | null> {
+  const out: DispatchStoreEntry[] = [];
+  for (let i = 0; i < DISPATCH_PAGES; i++) {
+    const b = await goalHostResolve("activeDispatches", { limit: DISPATCH_PAGE, offset: i * DISPATCH_PAGE });
+    if (!b || !Array.isArray(b["dispatches"])) return null;
+    out.push(...(b["dispatches"] as Array<Record<string, unknown>>));
+    if (b["hasMore"] !== true) return out;
+  }
+  return null; // more than the bound: some dispatches unseen, so the store reads unread
+}
+async function readGoalHostResolverDispatch(dispatchId: string): Promise<ResolverDispatchLike | null> {
+  const b = await goalHostResolve("goalWalkState", { dispatchId });
+  if (!b) return null;
+  const answers = b["resolverAnswers"];
+  return { dispatch_id: dispatchId, execution_id: typeof b["executionId"] === "string" ? b["executionId"] : null, resolverAnswers: Array.isArray(answers) ? (answers as ResolverAnswerLike[]) : null };
+}
+async function readGoalHostResolverRequest(requestId: string): Promise<ResolverRequestLike | null> {
+  const b = await goalHostResolve("resolverRequest", { request_id: requestId });
+  const reqs = b && Array.isArray(b["requests"]) && b["unknown"] !== true ? (b["requests"] as ResolverRequestLike[]) : null;
+  const r = reqs?.find((x) => x && x.request_id === requestId);
+  return r ?? null;
+}
 const defaultJudgementDeps: JudgementDeps = {
   ledger: (kind) => readRecords(kind).map((r) => ({ key: r.key, at: r.at, record: r.record as Record<string, unknown> })),
   ledgerPresent: (kind) => existsSync(join(ledgerDir(), `${kind}.jsonl`)),
@@ -997,13 +1065,20 @@ const defaultJudgementDeps: JudgementDeps = {
   },
   show: (dir, sha, path) => gitIn(dir, ["show", `${sha}:${path}`]),
   scopeActs: scopeActsFromHistory,
+  dispatches: () => readGoalHostDispatches(),
+  resolverDispatch: (id) => readGoalHostResolverDispatch(id),
+  resolverRequest: (id) => readGoalHostResolverRequest(id),
   persist: (key, record) => ({ appended: appendRecord("selfFactAggregate", key, record).appended }),
   now: () => Date.now(),
   log: (line) => console.log(line),
 };
 let judgementDeps: JudgementDeps = defaultJudgementDeps;
 /** Tests only: replace what repair_autonomy and lane_revert_within_1h read (null restores the defaults). */
-export function __setJudgementDepsForTests(d: Partial<JudgementDeps> | null): void { judgementDeps = d ? { ...defaultJudgementDeps, ...d } : defaultJudgementDeps; }
+export function __setJudgementDepsForTests(d: Partial<JudgementDeps> | null): void {
+  // The goal-host reads (link 5 dispatches, S-2 answers) are NOT ASKED unless a test injects them: a test of another
+  // link must not reach a live goal-host, and "not asked" is not "unread" (operator-acts reads undefined as not asked).
+  judgementDeps = d ? { ...defaultJudgementDeps, dispatches: undefined, resolverDispatch: undefined, resolverRequest: undefined, ...d } : defaultJudgementDeps;
+}
 
 /** A ledger or spool entry that may be a lane landing but cannot be tied to a gap: counted in expected, judged unjudged. */
 export interface UnjudgeableLanding { key: string; reason: string; attempt_id: string | null; sha: string | null; at: string | null; from: "ledger" | "spool" }
@@ -1766,6 +1841,9 @@ const FACTS: Record<string, FactFn> = {
     let gaps: GapRow[];
     try { gaps = await deps.readGaps(); } catch (err) { noteReadError("gap store for repair_autonomy", err); return unread("gap store unreadable"); }
     const byId = new Map(gaps.map((g) => [String(g["id"] ?? ""), g] as [string, GapRow]));
+    // link 5 and the S-2 answers: goal-host's dispatch records, read once for every closure this run judges.
+    let dispatchStore: DispatchStoreEntry[] | null | undefined = undefined;
+    if (deps.dispatches) { try { dispatchStore = await deps.dispatches(); } catch { dispatchStore = null; } }
     let keymap: KeyMapEntry[] | null = null;
     try { keymap = await deps.keymap(); } catch { keymap = null; }
     // The scope history is read once for every edit site this run judges.
@@ -1817,6 +1895,7 @@ const FACTS: Record<string, FactFn> = {
           events, eventsCapped: capped, eventsFromFiling: fromFiling,
           labels: labelRead ? labelRead.labels : null, labelContext: labelRead ? labelRead.context : null,
           originPresent: false, keymap, peerKeys6: (keymap ?? []).filter((k) => k.owner_kind === "peer").map((k) => k.id.slice(0, 6)),
+          ...(dispatchStore === undefined ? {} : { dispatches: dispatchStore, ...(await s2Inputs(deps, dispatchStore, l.gap_id, siteRaw)) }),
         },
         nowMs,
       });

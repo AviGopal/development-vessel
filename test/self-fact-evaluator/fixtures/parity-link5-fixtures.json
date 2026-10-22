@@ -1,0 +1,523 @@
+{
+ "doc": "Link-5 parity fixtures (research, autonomy6 dispatcher_class + operator_dispatches_naming). Read-only for the evaluator builder. keymap = test keymap used for every class case. Unparseable-store case: a store text 'not json <gap_id>' => ['unattributable'].",
+ "keymap": [
+  [
+   "key_OPERATOR_TEST",
+   "operator"
+  ],
+  [
+   "key_SYSTEM_TEST",
+   "system"
+  ]
+ ],
+ "system_dispatcher_ids": [
+  "expectation-scan",
+  "learning-liveness-probe",
+  "operator:expectation-scan",
+  "rhythm-conductor-drain",
+  "substrate-status"
+ ],
+ "class_cases": [
+  {
+   "name": "pre-door operator field operator:qa-2d1e764f-random-reach",
+   "record": {
+    "operator": "operator:qa-2d1e764f-random-reach"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label operator:qa-2d1e764f-random-reach",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "operator:qa-2d1e764f-random-reach"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field operator:ac8b0aad",
+   "record": {
+    "operator": "operator:ac8b0aad"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label operator:ac8b0aad",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "operator:ac8b0aad"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field ac8b0aad",
+   "record": {
+    "operator": "ac8b0aad"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label ac8b0aad",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "ac8b0aad"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field human-surface",
+   "record": {
+    "operator": "human-surface"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label human-surface",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "human-surface"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field claude-code-operator",
+   "record": {
+    "operator": "claude-code-operator"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label claude-code-operator",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "claude-code-operator"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field metabob-mcp-bd0671c967ea",
+   "record": {
+    "operator": "metabob-mcp-bd0671c967ea"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label metabob-mcp-bd0671c967ea",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "metabob-mcp-bd0671c967ea"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "pre-door operator field rhythm-conductor-drain",
+   "record": {
+    "operator": "rhythm-conductor-drain"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self + label rhythm-conductor-drain",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "rhythm-conductor-drain"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "pre-door operator field learning-liveness-probe",
+   "record": {
+    "operator": "learning-liveness-probe"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self + label learning-liveness-probe",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "learning-liveness-probe"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "pre-door operator field substrate-status",
+   "record": {
+    "operator": "substrate-status"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self + label substrate-status",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "substrate-status"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "pre-door operator field operator:expectation-scan",
+   "record": {
+    "operator": "operator:expectation-scan"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self + label operator:expectation-scan",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "operator:expectation-scan"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "pre-door operator field learning-loop-selftest-x",
+   "record": {
+    "operator": "learning-loop-selftest-x"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self + label learning-loop-selftest-x",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "learning-loop-selftest-x"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "pre-door operator field some-new-thing",
+   "record": {
+    "operator": "some-new-thing"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self + label some-new-thing",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator_label": "some-new-thing"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "node_self, no label",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    }
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "node_self, top-level operator only (ignored with a principal)",
+   "record": {
+    "principal": {
+     "kind": "node_self"
+    },
+    "operator": "human-surface"
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "key operator-class",
+   "record": {
+    "principal": {
+     "kind": "key",
+     "label": "key:key_OPERATOR_TEST"
+    }
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "key system-class, no label",
+   "record": {
+    "principal": {
+     "kind": "key",
+     "label": "key:key_SYSTEM_TEST"
+    }
+   },
+   "expected_class": "system"
+  },
+  {
+   "name": "key system-class + human label",
+   "record": {
+    "principal": {
+     "kind": "key",
+     "label": "key:key_SYSTEM_TEST"
+    },
+    "operator_label": "human-surface"
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "key unlisted",
+   "record": {
+    "principal": {
+     "kind": "key",
+     "label": "key:key_NOT_IN_MAP"
+    }
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "principal session",
+   "record": {
+    "principal": {
+     "kind": "session"
+    }
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "principal admin",
+   "record": {
+    "principal": {
+     "kind": "admin"
+    }
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "principal obo",
+   "record": {
+    "principal": {
+     "kind": "obo"
+    }
+   },
+   "expected_class": "ours"
+  },
+  {
+   "name": "no principal, no tag",
+   "record": {
+    "goal": "x"
+   },
+   "expected_class": "unattributable"
+  }
+ ],
+ "naming_cases": [
+  {
+   "name": "ours names id",
+   "store": [
+    {
+     "dispatchId": "n1",
+     "operator": "operator:qa-1",
+     "goal": "close some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": [
+    "operator"
+   ]
+  },
+  {
+   "name": "ours names repos/ path",
+   "store": [
+    {
+     "dispatchId": "n2",
+     "principal": {
+      "kind": "node_self"
+     },
+     "operator_label": "human-surface",
+     "goal": "edit repos/goal-host-vessel/src/judge/thing.ts"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": [
+    "operator"
+   ]
+  },
+  {
+   "name": "ours names vessel/ path",
+   "store": [
+    {
+     "dispatchId": "n3",
+     "principal": {
+      "kind": "key",
+      "label": "key:key_NOT_IN_MAP"
+     },
+     "goal": "edit goal-host-vessel/src/judge/thing.ts"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": [
+    "operator"
+   ]
+  },
+  {
+   "name": "bare vessel-relative path does not name",
+   "store": [
+    {
+     "dispatchId": "n4",
+     "operator": "operator:qa-1",
+     "goal": "edit src/judge/thing.ts"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": []
+  },
+  {
+   "name": "system dispatcher names id",
+   "store": [
+    {
+     "dispatchId": "n5",
+     "operator": "rhythm-conductor-drain",
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": []
+  },
+  {
+   "name": "untagged principal-less names id",
+   "store": [
+    {
+     "dispatchId": "n6",
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": null,
+   "expected_findings": [
+    "unattributable"
+   ]
+  },
+  {
+   "name": "window inside ISO",
+   "store": [
+    {
+     "dispatchId": "w1",
+     "operator": "operator:qa-1",
+     "startedAt": "2026-10-21T12:00:00Z",
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": [
+    "2026-10-21T00:00:00Z",
+    "2026-10-22T00:00:00Z"
+   ],
+   "expected_findings": [
+    "operator"
+   ]
+  },
+  {
+   "name": "window outside ISO",
+   "store": [
+    {
+     "dispatchId": "w2",
+     "operator": "operator:qa-1",
+     "startedAt": "2026-10-19T12:00:00Z",
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": [
+    "2026-10-21T00:00:00Z",
+    "2026-10-22T00:00:00Z"
+   ],
+   "expected_findings": []
+  },
+  {
+   "name": "window unreadable start stays in",
+   "store": [
+    {
+     "dispatchId": "w3",
+     "operator": "operator:qa-1",
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": [
+    "2026-10-21T00:00:00Z",
+    "2026-10-22T00:00:00Z"
+   ],
+   "expected_findings": [
+    "operator"
+   ]
+  },
+  {
+   "name": "window epoch-ms outside",
+   "store": [
+    {
+     "dispatchId": "w4",
+     "operator": "operator:qa-1",
+     "startedAt": 1760000000000,
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": [
+    "2026-10-21T00:00:00Z",
+    "2026-10-22T00:00:00Z"
+   ],
+   "expected_findings": []
+  },
+  {
+   "name": "window epoch-ms inside",
+   "store": [
+    {
+     "dispatchId": "w5",
+     "operator": "operator:qa-1",
+     "startedAt": 1792584000000,
+     "goal": "some-system-gap-id-about-a-real-defect"
+    }
+   ],
+   "gap_id": "some-system-gap-id-about-a-real-defect",
+   "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+   "window": [
+    "2026-10-21T00:00:00Z",
+    "2026-10-22T00:00:00Z"
+   ],
+   "expected_findings": [
+    "operator"
+   ]
+  }
+ ],
+ "unparseable_store_case": {
+  "store_text": "not json some-system-gap-id-about-a-real-defect",
+  "gap_id": "some-system-gap-id-about-a-real-defect",
+  "edit_site": "repos/goal-host-vessel/src/judge/thing.ts",
+  "expected_findings": [
+   "unattributable"
+  ]
+ },
+ "autonomy6_sha256": "e41a47000eefb86d369e8919668756a0823519c8085da652111fe219924bace9"
+}

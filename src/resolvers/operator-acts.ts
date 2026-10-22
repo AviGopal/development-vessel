@@ -41,6 +41,8 @@
  * event decides, and without it nobody can say who wrote it.
  */
 
+import { handsOperatorId, isHumanOperatorId, MACHINE_OPERATOR_IDS } from "./goal-reach-tick.js";
+
 export type GapRow = Record<string, unknown>;
 
 /** "recommit-" prefixes stripped, and how many there were. */
@@ -92,7 +94,7 @@ export function isoMs(v: unknown): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-export type OperatorActKind = "2a" | "2a-at-without-by" | "hold-undated" | "3" | "edit-site-commit" | "check-authored" | "operator-filed" | "arm" | "gap-write" | "ancestor-gap-write" | "directed" | "hand-close" | "operator-field" | "operator-label";
+export type OperatorActKind = "2a" | "2a-at-without-by" | "hold-undated" | "3" | "edit-site-commit" | "check-authored" | "operator-filed" | "arm" | "gap-write" | "ancestor-gap-write" | "directed" | "hand-close" | "operator-field" | "operator-label" | "s2-answer" | "operator-dispatch";
 export interface OperatorAct {
   /** Which accepted addendum this act falls under; `operator_act:<addendum>` is the failing link it names. */
   readonly addendum: OperatorActKind;
@@ -143,6 +145,189 @@ export function keyClass6(kid6: string, keymap: readonly KeyMapEntry[]): string 
   const hits = keymap.filter((k) => k.id.slice(0, 6) === kid6);
   if (hits.length > 1) return "ambiguous";
   return hits[0] ? String(hits[0].owner_kind) : null;
+}
+
+// ─── S-2 resolver answers (USER RULING 2026-10-22: "Autonomous if the system initiated it") ───────────────
+/** One goal-host DispatchRecord.resolverAnswers[] entry (S-2 contract): answered_by_tag is the answering principal's
+ *  tag, never a key id; lease_provenance and answer_id are null for a person's v1 answer by solicitation id. */
+export interface ResolverAnswerLike {
+  readonly request_id?: string | null;
+  readonly outcome?: string | null;
+  readonly at?: string | null;
+  readonly answered_by_tag?: string | null;
+  readonly lease_provenance?: { readonly request_id?: string | null; readonly lease_id?: string | null; readonly attempt?: number | null; readonly dispatch_id?: string | null; readonly origin?: string | null } | null;
+  readonly answer_id?: string | null;
+  /** GUARD, not a contract field: goal-host builds resolverAnswers itself and no answer can carry an operator marker
+   *  (S-2 builder, 2026-10-22). If one ever does, it is never exempted. */
+  readonly operator_marker?: boolean | null;
+}
+/** One goal-host dispatch record as read (GET /executions/:dispatchId or goalWalkState): its id, the execution it
+ *  ran (executionId), any trace ids it lists, and its resolverAnswers[]. A walk trace is tagged dispatch:<id>, but that
+ *  tag can be caller-supplied (goal-host compose-gap-id keeps a caller's variables.dispatch_id), so a record is trusted
+ *  only when it names a provenance trace itself. */
+export interface ResolverDispatchLike {
+  readonly dispatch_id: string;
+  readonly execution_id?: string | null;
+  readonly trace_ids?: ReadonlyArray<string> | null;
+  readonly resolverAnswers?: ReadonlyArray<ResolverAnswerLike> | null;
+}
+/** goal-host's resolverRequest record (the lease record, read at use time), the fields addendum 8 reads. */
+export interface ResolverRequestLike {
+  readonly request_id: string;
+  readonly origin?: string | null;
+  readonly dispatch_id?: string | null;
+  readonly attempts?: ReadonlyArray<{ readonly attempt?: number | null; readonly lease_id?: string | null; readonly granted_at?: string | null; readonly expires_at?: string | null; readonly ended_at?: string | null; readonly answer_binding?: { readonly answer_id?: string | null; readonly accepted_at?: string | null } | null }> | null;
+}
+/**
+ * PREREG ADDENDUM 8 — S-2 RESOLVER ANSWERS (research's rule text, verbatim; the research instrument cites the same).
+ *
+ * Scope: every entry of DispatchRecord.resolverAnswers[] on a dispatch record that names the gap. Each entry is
+ * classified as exactly one of SYSTEM, UNATTRIBUTABLE or OPERATOR.
+ * UNATTRIBUTABLE if the entry is not a readable record, or if the resolverRequest record named by its
+ * lease_provenance.request_id cannot be read.
+ * Otherwise it is SYSTEM only if ALL of the following hold, and OPERATOR in every other case:
+ * (a) neither the entry nor its lease_provenance carries an operator marker;
+ * (b) lease_provenance is present and answer_id is non-empty;
+ * (c) the entry's request_id equals lease_provenance.request_id;
+ * (d) lease_provenance.origin is "system";
+ * (e) the request record's origin is "system" and its dispatch_id equals lease_provenance.dispatch_id;
+ * (f) the request has an attempt whose attempt AND lease_id both equal lease_provenance's;
+ * (g) that attempt's answer_binding has a non-empty answer_id equal to the entry's answer_id, and a non-empty
+ *     accepted_at;
+ * (h) the entry's `at` parses as a time;
+ * (i) the attempt has granted_at, and has ended_at or, absent that, expires_at;
+ * (j) granted_at ≤ at ≤ (ended_at, else expires_at).
+ * answered_by_tag is never used to classify. Origin is read only from the server-stamped provenance and request record.
+ * Until S-4, any non-node-self key reads as operator origin.
+ * Effect on the autonomy count: any OPERATOR entry is an operator act in the fix's provenance (ASSISTED). Any
+ * UNATTRIBUTABLE entry makes link 5 UNATTRIBUTABLE. SYSTEM entries are counted as system, and the count is named in
+ * the link evidence.
+ *
+ * Read-path precondition (this reader): a dispatch record's answers are in scope only when the record itself names one
+ * of the closure's provenance traces (a dispatch:<id> tag can be caller-supplied); an untrusted or unread record is
+ * UNATTRIBUTABLE. The operator marker of (a) is a guard: goal-host builds resolverAnswers itself and none carries one.
+ */
+export type S2AnswerClass = "SYSTEM" | "UNATTRIBUTABLE" | "OPERATOR";
+export function classifyS2Answer(entry: unknown, requests: ReadonlyMap<string, ResolverRequestLike> | null | undefined): { cls: S2AnswerClass; clause: string | null; why: string } {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return { cls: "UNATTRIBUTABLE", clause: null, why: "the entry is not a readable record" };
+  const a = entry as ResolverAnswerLike;
+  const prov = a.lease_provenance && typeof a.lease_provenance === "object" ? a.lease_provenance as NonNullable<ResolverAnswerLike["lease_provenance"]> & { operator_marker?: unknown } : null;
+  const rid = prov && typeof prov.request_id === "string" ? prov.request_id : null;
+  const req = rid !== null ? requests?.get(rid) : undefined;
+  if (rid !== null && !req) return { cls: "UNATTRIBUTABLE", clause: null, why: `resolverRequest ${rid} cannot be read` };
+  // UNATTRIBUTABLE is decided above, BEFORE clauses (a)-(j): a marked answer whose request cannot be read is
+  // UNATTRIBUTABLE, not OPERATOR(a). An absent lease_provenance names no request, so it is not unreadable: OPERATOR(b).
+  const op = (clause: string, why: string) => ({ cls: "OPERATOR" as const, clause, why: `S-2 clause (${clause}) unmet: ${why}` });
+  if (a.operator_marker === true || prov?.operator_marker === true) return op("a", "an operator marker is carried");
+  if (!prov || typeof a.answer_id !== "string" || a.answer_id.length === 0) return op("b", "no lease_provenance or no answer_id");
+  if (a.request_id !== prov.request_id) return op("c", "the entry's request_id differs from lease_provenance.request_id");
+  if (prov.origin !== "system") return op("d", `lease_provenance.origin is ${JSON.stringify(prov.origin ?? null)}`);
+  if (!req || req.origin !== "system" || req.dispatch_id !== prov.dispatch_id) return op("e", `the request record's origin is ${JSON.stringify(req?.origin ?? null)} or its dispatch_id differs from lease_provenance.dispatch_id`);
+  const att = (req.attempts ?? []).find((x) => !!x && x.attempt === prov.attempt && x.lease_id === prov.lease_id);
+  if (!att) return op("f", `no attempt with attempt ${String(prov.attempt)} and lease_id ${String(prov.lease_id)}`);
+  const ab = att.answer_binding;
+  if (!ab || typeof ab.answer_id !== "string" || ab.answer_id.length === 0 || ab.answer_id !== a.answer_id || typeof ab.accepted_at !== "string" || ab.accepted_at.length === 0) return op("g", "the attempt's answer_binding does not bind this answer_id with an accepted_at");
+  const t = isoMs(a.at);
+  if (t === null) return op("h", "the entry's at does not parse");
+  const end = att.ended_at ?? att.expires_at;
+  const g = isoMs(att.granted_at), e = isoMs(end);
+  if (g === null || e === null) return op("i", "the attempt lacks granted_at, or both ended_at and expires_at");
+  if (!(g <= t && t <= e)) return op("j", "at is outside granted_at to (ended_at, else expires_at)");
+  return { cls: "SYSTEM", clause: null, why: `the bound answer ${a.answer_id} of system-initiated request ${rid} (lease ${String(prov.lease_id)}, attempt ${String(prov.attempt)})` };
+}
+
+// ─── link 5: who RAN a dispatch (USER RULING 2026-10-22: "Yes, iff we ran it. Boredom, detectors or other ────
+// instigators do not count."; qa refinement and USER RULING "Keep strict: unattributable (Recommended)") ─────────
+/**
+ * research's link-5 rule (autonomy6 dispatcher_class + operator_dispatches_naming), matched case for case against its
+ * frozen parity fixtures (test/self-fact-evaluator/fixtures/parity-link5-fixtures.json). WHO RAN IT, from the
+ * server-stamped principal first:
+ *  - principal kind "key": the key's class in the key class map decides. operator => OURS. system => the claimed label
+ *    decides (a human label => OURS, a system id or no label => SYSTEM). Unlisted or ambiguous => OURS (strict).
+ *  - principal kind node_self: a human label (operator_label only) => OURS, else SYSTEM.
+ *  - a principal of any other kind (session, admin, obo, or none named) => OURS (strict).
+ *  - no principal (records from before goal-host's inbound door): the claimed tag (operator_label, else operator):
+ *    a system id => SYSTEM, any other non-empty id => OURS (unknown counts), no tag at all => UNATTRIBUTABLE.
+ *  - a record that is not an object => UNATTRIBUTABLE.
+ * "Human" reuses goal-reach-tick's isHumanOperatorId test (a non-empty id outside the system dispatchers, not prefixed
+ * learning-loop-selftest), over SYSTEM_DISPATCHER_IDS: MACHINE_OPERATOR_IDS plus the system minters it misses
+ * (operator:expectation-scan, dv index.ts expectation scan, and its bare form expectation-scan).
+ * NAMING (operator_dispatches_naming): a record names the gap when its JSON text contains the gap id, or the edit_site
+ * in its qualified forms "repos/<vessel>/<path>" or "<vessel>/<path>" (never the bare vessel-relative path), each name
+ * counted only when longer than 8 characters. A SYSTEM dispatch yields nothing. A dispatch whose start (epoch ms, or a
+ * time) is outside the window yields nothing; an unreadable start stays in. A store text that cannot be parsed yields one
+ * UNATTRIBUTABLE finding when it contains any name.
+ */
+export const SYSTEM_DISPATCHER_IDS: ReadonlySet<string> = new Set([...MACHINE_OPERATOR_IDS, "operator:expectation-scan", "expectation-scan"]);
+const humanDispatcher = (op: unknown): boolean => {
+  const o = typeof op === "string" ? op.trim() : "";
+  return !!o && isHumanOperatorId(o) && !SYSTEM_DISPATCHER_IDS.has(o);
+};
+export type DispatchRunBy = "OURS" | "SYSTEM" | "UNATTRIBUTABLE";
+/** The class of the key a dispatch principal names (its label "key:<keyId>", or key_id), from the key class map: one
+ *  entry equal to the id, or one masked entry (12 characters or more) the id begins with; none or more than one is
+ *  unlisted or ambiguous (null). */
+function dispatchKeyClass(kid: string, keymap: readonly KeyMapEntry[]): string | null {
+  if (!kid) return null;
+  const hits = keymap.filter((k) => k.id === kid || (k.id.length >= 12 && kid.startsWith(k.id)));
+  return hits.length === 1 ? String(hits[0]!.owner_kind) : null;
+}
+/** Who ran one dispatch record (research's dispatcher_class). */
+export function dispatchRunBy(rec: unknown, keymap: readonly KeyMapEntry[] = []): { by: DispatchRunBy; why: string } {
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { by: "UNATTRIBUTABLE", why: "the record is not an object" };
+  const r = rec as Record<string, unknown>;
+  const label = typeof r["operator_label"] === "string" && (r["operator_label"] as string).trim() ? (r["operator_label"] as string) : null;
+  const pr = r["principal"] && typeof r["principal"] === "object" && !Array.isArray(r["principal"]) ? (r["principal"] as Record<string, unknown>) : null;
+  if (pr) {
+    const kind = String(pr["kind"] || pr["principal_kind"] || "");
+    if (kind === "node_self") return humanDispatcher(label) ? { by: "OURS", why: `node_self principal, human label ${label}` } : { by: "SYSTEM", why: `node_self principal, label ${label ?? "absent"}` };
+    if (kind === "key") {
+      const raw = String(pr["label"] || pr["key_id"] || "");
+      const kid = raw.includes(":") ? raw.slice(raw.indexOf(":") + 1) : raw;
+      const kc = dispatchKeyClass(kid, keymap);
+      if (kc === "system") return humanDispatcher(label) ? { by: "OURS", why: `system-class key, human label ${label}` } : { by: "SYSTEM", why: `system-class key, label ${label ?? "absent"}` };
+      return { by: "OURS", why: `key principal, ${kc === "operator" ? "operator-class" : "unlisted or ambiguous"} key (strict)` };
+    }
+    return { by: "OURS", why: `principal kind ${kind || "unnamed"} (strict)` };
+  }
+  const tag = label ?? (typeof r["operator"] === "string" ? (r["operator"] as string) : null);
+  if (tag && tag.trim()) return humanDispatcher(tag) ? { by: "OURS", why: `no principal, tag ${tag}` } : { by: "SYSTEM", why: `no principal, system tag ${tag}` };
+  return { by: "UNATTRIBUTABLE", why: "no principal and no tag: who ran it cannot be read" };
+}
+/** A dispatch store entry as read: a parsed record, or the store text (one record or a list) not yet parsed. */
+export type DispatchStoreEntry = Record<string, unknown> | string;
+export interface DispatchFinding { readonly finding: "operator" | "unattributable"; readonly detail: string; readonly at: string | null }
+/** research's operator_dispatches_naming: one finding per dispatch OUR side ran, or whose initiator cannot be read,
+ *  whose record names the gap inside the window (null = no time filter). Pure. */
+export function link5DispatchFindings(entries: ReadonlyArray<DispatchStoreEntry>, gapId: string, editSite: string, window: readonly [number, number] | null, keymap: readonly KeyMapEntry[] = []): DispatchFinding[] {
+  const site = editSite || "";
+  const names = [...new Set([gapId, site, site.startsWith("repos/") ? site.slice("repos/".length) : ""])].filter((n) => n && n.length > 8);
+  const out: DispatchFinding[] = [];
+  for (const e of entries) {
+    let recs: unknown[];
+    if (typeof e === "string") {
+      let parsed: unknown;
+      try { parsed = JSON.parse(e); } catch {
+        if (names.some((n) => e.includes(n))) out.push({ finding: "unattributable", detail: "a dispatch store text that cannot be parsed names the gap or its edit_site", at: null });
+        continue;
+      }
+      recs = Array.isArray(parsed) ? parsed : [parsed];
+    } else recs = [e];
+    for (const rec of recs) {
+      const text = JSON.stringify(rec) ?? "";
+      const hit = names.find((n) => text.includes(n));
+      if (!hit) continue;
+      const cls = dispatchRunBy(rec, keymap);
+      if (cls.by === "SYSTEM") continue;
+      const r = rec && typeof rec === "object" ? (rec as Record<string, unknown>) : null;
+      const started = r ? (r["startedAt"] ?? r["started_at"]) : undefined;
+      const st = typeof started === "number" && started > 1e11 ? started : isoMs(started);
+      if (window && r && st !== null && !(window[0] <= st && st <= window[1])) continue;
+      out.push({ finding: cls.by === "OURS" ? "operator" : "unattributable", at: st === null ? null : new Date(st).toISOString(),
+        detail: `link 5 dispatch ${String(r?.["dispatchId"] ?? "?")}: ${cls.by} (${cls.why}), naming ${hit === gapId ? "the id" : `its edit_site ${hit}`}` });
+    }
+  }
+  return out;
 }
 
 export interface GapWriteEventLike {
@@ -290,6 +475,15 @@ export interface OperatorActsContext {
   readonly labelContext?: LabelClassContext | null;
   /** The key class map. null or absent: no map, so a key-principal write is unattributable. */
   readonly keymap?: readonly KeyMapEntry[] | null;
+  /** The goal-host dispatch records the provenance traces are tagged with (dispatch:<id>), each with its
+   *  resolverAnswers[]. null: unread, so an operator answer cannot be ruled out (said in `unread`); undefined: not asked. */
+  readonly resolverDispatches?: ReadonlyArray<ResolverDispatchLike> | null;
+  /** goal-host's dispatch store entries (link 5 "who ran it"): parsed records or store texts. null: unread, so link 5
+   *  is UNATTRIBUTABLE; undefined: not asked. */
+  readonly dispatches?: ReadonlyArray<DispatchStoreEntry> | null;
+  /** goal-host's resolverRequest records, by request_id (classifyS2Answer). A request not here cannot be read:
+   *  its answers are UNATTRIBUTABLE. */
+  readonly resolverRequests?: ReadonlyMap<string, ResolverRequestLike> | null;
   readonly peerKeys6?: readonly string[];
 }
 export interface OperatorActsResult {
@@ -300,6 +494,8 @@ export interface OperatorActsResult {
   readonly unattributable: string[];
   /** Label (or other) readings that need review before anything counts. */
   readonly review: string[];
+  /** S-2 answers classified SYSTEM under PREREG ADDENDUM 8 (the count named in link 5's evidence). */
+  readonly s2_system_answers?: string[];
   /** Addendum 4a: system-principal writes (in-process, node-self) with no recorded route. */
   readonly route_unverifiable: number;
   /** Inputs that were unreadable or incomplete, by name: an act there cannot be ruled out. */
@@ -320,6 +516,7 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
   const review: string[] = [];
   const armWrites: Array<{ at: string | null; writer: string }> = [];
   let routeUnverifiable = 0;
+  const s2Answers: string[] = [];
   if (filedMs === null) unread.push("the row's filing time (unset or unparsable)");
   if (ctx.untilAt !== null && untilMs === null) unread.push("the provenance window's end (unparsable)");
   const inWindow = (ms: number) => (filedMs === null || ms >= filedMs) && (untilMs === null || ms <= untilMs);
@@ -398,6 +595,30 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     }
     if ((ev.principal_kind === "in-process" || ev.principal_kind === "node-self") && !ev.route) routeUnverifiable += 1;
   }
+  // link 5: dispatches naming the gap that our side RAN (link5DispatchFindings): an operator finding is an operator act,
+  // an unattributable one makes link 5 unattributable; a SYSTEM dispatch does not count.
+  if (ctx.dispatches === null) unattributable.push("link 5 dispatch: the dispatch store cannot be read");
+  for (const f of link5DispatchFindings(ctx.dispatches ?? [], gid, String(m["edit_site"] ?? ""), filedMs === null && untilMs === null ? null : [filedMs ?? Number.NEGATIVE_INFINITY, untilMs ?? Number.POSITIVE_INFINITY], ctx.keymap ?? [])) {
+    if (f.finding === "operator") acts.push({ addendum: "operator-dispatch", at: f.at, detail: f.detail });
+    else unattributable.push(f.detail);
+  }
+  // S-2 resolver answers (PREREG ADDENDUM 8, see classifyS2Answer): OPERATOR is an operator act, UNATTRIBUTABLE makes
+  // link 5 unattributable, SYSTEM is counted as system and named in the evidence.
+  if (ctx.resolverDispatches === null) unattributable.push("S-2 resolver answers: the dispatch records cannot be read");
+  const provTraces = new Set<string>(provenanceTraceIds(row, ctx.traceIds ?? []));
+  for (const d of ctx.resolverDispatches ?? []) {
+    // A dispatch:<id> tag is not proof: the record itself must name one of this closure's provenance traces.
+    const names = [d.execution_id, ...(d.trace_ids ?? [])].filter((x): x is string => typeof x === "string" && x.length > 0);
+    if (!names.some((x) => provTraces.has(x))) { unattributable.push(`S-2 dispatch ${d.dispatch_id}: its record names no provenance trace (executionId ${d.execution_id ?? "none"}), so its tag cannot be trusted`); continue; }
+    if (!Array.isArray(d.resolverAnswers)) { unattributable.push(`S-2 resolver answers of dispatch ${d.dispatch_id} cannot be read`); continue; }
+    for (const a of d.resolverAnswers) {
+      const c = classifyS2Answer(a, ctx.resolverRequests);
+      const req = String((a as ResolverAnswerLike | null)?.request_id ?? "?");
+      if (c.cls === "SYSTEM") s2Answers.push(c.why);
+      else if (c.cls === "UNATTRIBUTABLE") unattributable.push(`S-2 answer on request ${req} (dispatch ${d.dispatch_id}): UNATTRIBUTABLE, ${c.why}`);
+      else { const at = isoMs((a as ResolverAnswerLike).at); acts.push({ addendum: "s2-answer", at: at === null ? null : new Date(at).toISOString(), detail: `S-2 answer on request ${req} (dispatch ${d.dispatch_id}): ${c.why}` }); }
+    }
+  }
   // oracle labels on the provenance traces (operator feedback there is an operator act)
   const traces = new Set<string>(provenanceTraceIds(row, ctx.traceIds ?? []));
   if (ctx.labels === null || ctx.labels === undefined || !ctx.labelContext) {
@@ -410,5 +631,5 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
       else if (c.startsWith("review")) review.push(`${c} on trace ${lab.execution_id}`);
     }
   }
-  return { acts, arm_writes: armWrites, unattributable, review, route_unverifiable: routeUnverifiable, unread };
+  return { acts, arm_writes: armWrites, unattributable, review, route_unverifiable: routeUnverifiable, unread, s2_system_answers: s2Answers };
 }

@@ -1,0 +1,78 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/wrapped-forms.check.ts:
+4 | 
+5 | const guess = { status: "green" };
+6 | 
+7 | describe("wrapped forms", () => {
+8 |   test("Promise.resolve inline", async () => {
+9 |     expect(await Promise.resolve((mod as any).settlementKindOf(guess))).toBe("green");
+                                                                            ^
+error: expect(received).toBe(expected)
+
+Expected: "green"
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-forms.check.ts:9:73)
+(fail) wrapped forms > Promise.resolve inline [0.22ms]
+ 7 | describe("wrapped forms", () => {
+ 8 |   test("Promise.resolve inline", async () => {
+ 9 |     expect(await Promise.resolve((mod as any).settlementKindOf(guess))).toBe("green");
+10 |   });
+11 |   test("Promise.all element, awaited in parentheses", async () => {
+12 |     expect((await Promise.all([(mod as any).settlementKindOf(guess)]))[0]).toBe("green");
+                                                                                ^
+error: expect(received).toBe(expected)
+
+Expected: "green"
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-forms.check.ts:12:76)
+(fail) wrapped forms > Promise.all element, awaited in parentheses [0.10ms]
+11 |   test("Promise.all element, awaited in parentheses", async () => {
+12 |     expect((await Promise.all([(mod as any).settlementKindOf(guess)]))[0]).toBe("green");
+13 |   });
+14 |   test("Promise.all element through a local, at a later index", async () => {
+15 |     const all = await Promise.all([Promise.resolve(1), settlementKindOf(guess)]);
+16 |     expect(all[1]).toBe("green");
+                        ^
+error: expect(received).toBe(expected)
+
+Expected: "green"
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-forms.check.ts:16:20)
+(fail) wrapped forms > Promise.all element through a local, at a later index [0.09ms]
+15 |     const all = await Promise.all([Promise.resolve(1), settlementKindOf(guess)]);
+16 |     expect(all[1]).toBe("green");
+17 |   });
+18 |   test("satisfies, as and a non-null assertion around Promise.resolve", async () => {
+19 |     const got = ((await Promise.resolve(settlementKindOf(guess) satisfies unknown)) as unknown)!;
+20 |     expect(got).toBe(7);
+                     ^
+error: expect(received).toBe(expected)
+
+Expected: 7
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-forms.check.ts:20:17)
+(fail) wrapped forms > satisfies, as and a non-null assertion around Promise.resolve [0.07ms]
+20 |     expect(got).toBe(7);
+21 |   });
+22 |   test("Promise.resolve of a local that holds the call", async () => {
+23 |     const pending = (mod as any).settlementKindOf(guess);
+24 |     const got = await Promise.resolve(pending);
+25 |     expect(got).toBe(false);
+                     ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: null
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-forms.check.ts:25:17)
+(fail) wrapped forms > Promise.resolve of a local that holds the call [0.06ms]
+
+ 0 pass
+ 5 fail
+ 5 expect() calls
+Ran 5 tests across 1 file. [11.00ms]

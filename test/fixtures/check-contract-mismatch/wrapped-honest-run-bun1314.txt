@@ -1,0 +1,22 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/wrapped-honest.check.ts:
+3 | 
+4 | describe("wrapped calls asserted against values their functions do return", () => {
+5 |   test("a refusal without a retry is labelled unsettled", async () => {
+6 |     const [kind, label] = await Promise.all([settlementKindOf({ kind: "refused" }), Promise.resolve(settlementLabel({ kind: "refused" }))]);
+7 |     expect(kind?.kind).toBe("refused");
+8 |     expect(await Promise.resolve(settlementLabel({ kind: "refused" }))).toBe("unsettled");
+                                                                            ^
+error: expect(received).toBe(expected)
+
+Expected: "unsettled"
+Received: "settled"
+
+      at <anonymous> (/tmp/fx/test/checks/wrapped-honest.check.ts:8:73)
+(fail) wrapped calls asserted against values their functions do return > a refusal without a retry is labelled unsettled [0.41ms]
+
+ 0 pass
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [11.00ms]

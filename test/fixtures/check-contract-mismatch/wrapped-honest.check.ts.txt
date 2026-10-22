@@ -1,0 +1,11 @@
+import { describe, expect, test } from "bun:test";
+import { settlementKindOf, settlementLabel } from "../../src/resolvers/settlement-kind";
+
+describe("wrapped calls asserted against values their functions do return", () => {
+  test("a refusal without a retry is labelled unsettled", async () => {
+    const [kind, label] = await Promise.all([settlementKindOf({ kind: "refused" }), Promise.resolve(settlementLabel({ kind: "refused" }))]);
+    expect(kind?.kind).toBe("refused");
+    expect(await Promise.resolve(settlementLabel({ kind: "refused" }))).toBe("unsettled");
+    expect(label).toBe("settled");
+  });
+});

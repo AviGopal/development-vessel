@@ -776,7 +776,10 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
  *     back, so greening it would mean breaking the real classifier. Unlike the shape rule, a string literal elsewhere
  *     in the module does not excuse it: a literal the function compares against is not a value it returns.
  * The called function is found through `ns.fn(…)`, `(ns as any).fn(…)`, a named import, or a local alias of one of
- * those (`const f: any = (ns as any).fn; f(…)`).
+ * those (`const f: any = (ns as any).fn; f(…)`). Every value-preserving pass-through around the call is looked through
+ * first, for every rule: await, parentheses, `as` / `satisfies` / `!`, a one-argument `Promise.resolve(x)`, and
+ * `Promise.all([…])[i]` / `(await Promise.all([…]))[i]` (directly or through a local holding the Promise.all), whose
+ * element i is the call. A wrapper is not a contract: `await Promise.resolve(f(x))` asserts what f returns.
  * An assertion it cannot place, a value it cannot trace, or an open contract decides nothing. Known limit (accepted, as
  * for a missing export): a gap whose fix ADDS the shape or the body field, or makes the function return a value of a
  * new kind, writes exactly this check, and it is refused.
@@ -902,6 +905,32 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     }
     return null;
   };
+  /** `Promise.<method>(…)` on the global Promise (not a local binding named Promise). */
+  const promiseCall = (e: TS.Expression, method: string): TS.CallExpression | null => {
+    if (!ts.isCallExpression(e) || !ts.isPropertyAccessExpression(e.expression) || e.expression.name.text !== method) return null;
+    const o = e.expression.expression;
+    return ts.isIdentifier(o) && o.text === "Promise" && !initOf(e, "Promise") ? e : null;
+  };
+  /** The expression a value-preserving pass-through wraps, until none is left (a bounded walk). */
+  const passThrough = (from: TS.Expression): TS.Expression => {
+    let e = unwrap(from);
+    for (let hops = 0; hops < 8; hops++) {
+      // A local holding the wrapped value (`const p = f(x); … Promise.resolve(p)`) is read through its declaration.
+      if (ts.isIdentifier(e)) { const d = initOf(e, e.text); if (d) { e = unwrap(d); continue; } break; }
+      const resolved = promiseCall(e, "resolve");
+      if (resolved && resolved.arguments.length === 1 && !ts.isSpreadElement(resolved.arguments[0]!)) { e = unwrap(resolved.arguments[0]!); continue; }
+      if (ts.isElementAccessExpression(e) && ts.isNumericLiteral(e.argumentExpression)) {
+        let base = unwrap(e.expression);
+        if (ts.isIdentifier(base)) { const b = initOf(e, base.text); if (b) base = unwrap(b); }
+        const all = promiseCall(base, "all");
+        const arr = all && all.arguments.length === 1 ? unwrap(all.arguments[0]!) : null;
+        const i = Number(e.argumentExpression.text);
+        if (arr && ts.isArrayLiteralExpression(arr) && Number.isInteger(i) && i < arr.elements.length && !arr.elements.slice(0, i + 1).some((x) => ts.isSpreadElement(x) || ts.isOmittedExpression(x))) { e = unwrap(arr.elements[i]!); continue; }
+      }
+      break;
+    }
+    return e;
+  };
   const parseValue = (v: string | null): string | null => { if (v === null || !v.startsWith("\"")) return null; try { const s = JSON.parse(v) as unknown; return typeof s === "string" ? s : null; } catch { return null; } };
   for (const c of compared as Array<Record<string, unknown>>) {
     const file = typeof c["file"] === "string" ? c["file"].replace(/\\/g, "/") : "";
@@ -922,7 +951,7 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     const reads = path[0] === "shape" && path.length === 1 ? "shape" : path[0] === "body" && path.length >= 2 ? `body.${path[1]}` : path.length === 0 && equality ? "value" : null;
     if (!reads) continue;
     const init = ts.isIdentifier(e) ? initOf(at[0]!.subject, e.text) : e;
-    const call = init ? unwrap(init) : null;
+    const call = init ? passThrough(init) : null;
     if (!call || !ts.isCallExpression(call)) continue;
     // The callee: a named import, a member of a namespace (through a cast: `(ns as any).fn`), or one local alias of either.
     const calleeOf = (raw: TS.Expression, aliased: boolean): { spec: string; fn: string } | null => {

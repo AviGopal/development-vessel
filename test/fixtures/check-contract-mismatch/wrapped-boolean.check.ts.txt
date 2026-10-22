@@ -1,0 +1,15 @@
+import { describe, expect, it } from "bun:test";
+import * as mod from "../../src/resolvers/settlement-kind";
+
+describe("a wrapped call asserted against a value its function never returns", () => {
+  it("accepts the evidence it is handed", async () => {
+    const evidence = { status: "settled" };
+
+    // The call goes through the exported surface, wrapped in Promise.resolve.
+    const res = await Promise.resolve(
+      (mod as any).settlementKindOf(evidence)
+    );
+
+    expect(res).toBe(true);
+  });
+});

@@ -1,0 +1,27 @@
+import { describe, expect, test } from "bun:test";
+import * as mod from "../../src/resolvers/settlement-kind";
+import { settlementKindOf } from "../../src/resolvers/settlement-kind";
+
+const guess = { status: "green" };
+
+describe("wrapped forms", () => {
+  test("Promise.resolve inline", async () => {
+    expect(await Promise.resolve((mod as any).settlementKindOf(guess))).toBe("green");
+  });
+  test("Promise.all element, awaited in parentheses", async () => {
+    expect((await Promise.all([(mod as any).settlementKindOf(guess)]))[0]).toBe("green");
+  });
+  test("Promise.all element through a local, at a later index", async () => {
+    const all = await Promise.all([Promise.resolve(1), settlementKindOf(guess)]);
+    expect(all[1]).toBe("green");
+  });
+  test("satisfies, as and a non-null assertion around Promise.resolve", async () => {
+    const got = ((await Promise.resolve(settlementKindOf(guess) satisfies unknown)) as unknown)!;
+    expect(got).toBe(7);
+  });
+  test("Promise.resolve of a local that holds the call", async () => {
+    const pending = (mod as any).settlementKindOf(guess);
+    const got = await Promise.resolve(pending);
+    expect(got).toBe(false);
+  });
+});

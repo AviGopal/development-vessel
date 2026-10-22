@@ -229,3 +229,102 @@ describe("LIVE: the test_writing verify refuses an inverted check before it land
     expect(j).toMatchObject({ ok: true, stage: null });
   });
 });
+
+// A WRAPPER IS NOT A CONTRACT (2026-10-22).
+//
+// A landed system check bound `const res = await Promise.resolve((mod as any).fn(goal, dig))` and asserted
+// `expect(res).toBe(true)` on a function that returns a verdict object or null. The rule resolved the callee of the
+// outermost call, `Promise.resolve`, found no module behind it and decided nothing, so the check passed the verify and
+// was armed. Every value-preserving pass-through is now looked through before the callee is resolved, for the value,
+// shape and body rules alike: await, parentheses, `as` / `satisfies` / `!`, a one-argument Promise.resolve(x), and
+// element i of an awaited Promise.all([…]) (inline or through a local), and a local that holds the call.
+//
+// FIXTURES: wrapped-boolean (that check's form against settlement-kind.ts.txt), wrapped-forms (one test per wrapper,
+// each red Expected a primitive, Received null), wrapped-honest (wrapped calls whose expected kind IS returned), and
+// their bun 1.3.14 runs.
+const REL_WRAPPED_BOOL = "test/checks/wrapped-boolean.check.ts";
+const REL_WRAPPED_FORMS = "test/checks/wrapped-forms.check.ts";
+const REL_WRAPPED_HONEST = "test/checks/wrapped-honest.check.ts";
+const CHECK_WRAPPED_BOOL = fixture("wrapped-boolean.check.ts.txt");
+const CHECK_WRAPPED_FORMS = fixture("wrapped-forms.check.ts.txt");
+const CHECK_WRAPPED_HONEST = fixture("wrapped-honest.check.ts.txt");
+type Run = { failures: unknown[]; compared?: Array<Record<string, unknown>> };
+const onlyFailure = (run: Run, name: string): Run => ({ ...run, compared: run.compared!.filter((x) => String(x["name"]).endsWith(`> ${name}`)) });
+
+describe("contractMismatchRefusal looks through value-preserving wrappers", () => {
+  test("[MUST-FAIL] `await Promise.resolve((ns as any).fn(…))` asserted toBe(true) on an object-or-null function is refused", () => {
+    expect(typeof refusal).toBe("function");
+    const r = refusal!(CHECK_WRAPPED_BOOL, REL_WRAPPED_BOOL, classify(fixture("wrapped-boolean-run-bun1314.txt")), KIND_TREE);
+    expect(r).toMatchObject({ module: KIND_REL, fn: "settlementKindOf", reads: "value" });
+    expect(r!.reason).toContain("expects true (a boolean)");
+  });
+
+  const run = classify(fixture("wrapped-forms-run-bun1314.txt"));
+  for (const form of [
+    "Promise.resolve inline",
+    "Promise.all element, awaited in parentheses",
+    "Promise.all element through a local, at a later index",
+    "satisfies, as and a non-null assertion around Promise.resolve",
+    "Promise.resolve of a local that holds the call",
+  ]) {
+    test(`[MUST-FAIL] ${form}: refused`, () => {
+      expect(typeof refusal).toBe("function");
+      const one = onlyFailure(run, form);
+      expect(one.compared).toHaveLength(1);
+      const r = refusal!(CHECK_WRAPPED_FORMS, REL_WRAPPED_FORMS, one, KIND_TREE);
+      expect(r).toMatchObject({ module: KIND_REL, fn: "settlementKindOf", reads: "value" });
+    });
+  }
+
+  test("[MUST-FAIL] the shape and body rules look through the same wrappers", () => {
+    expect(typeof refusal).toBe("function");
+    const viaResolve = CHECK_333.replace("const result = await mod.resolveTemplateInputLintScan({", "const result = await Promise.resolve(mod.resolveTemplateInputLintScan({").replace("    });\n\n    expect(result.shape)", "    }));\n\n    expect(result.shape)");
+    expect(viaResolve).not.toBe(CHECK_333);
+    expect(refusal!(viaResolve, REL_333, classify(fixture("333be5f-run-bun142.txt")), TREE)).toMatchObject({ reads: "shape" });
+    const viaAll = CHECK_BODY.replace("const result = await mod.resolveTemplateInputLintScan({", "const result = (await Promise.all([mod.resolveTemplateInputLintScan({").replace("    });\n\n    expect(result.shape)", "    })]))[0];\n\n    expect(result.shape)");
+    expect(viaAll).not.toBe(CHECK_BODY);
+    expect(refusal!(viaAll, "test/checks/body-field.check.ts", classify(fixture("body-field-run-bun142.txt")), TREE)).toMatchObject({ reads: "body.unusedInputs" });
+  });
+
+  test("[CONTROL] an honest wrapped call whose expected kind the function returns is not refused", () => {
+    expect(typeof refusal).toBe("function");
+    expect(refusal!(CHECK_WRAPPED_HONEST, REL_WRAPPED_HONEST, classify(fixture("wrapped-honest-run-bun1314.txt")), KIND_TREE)).toBeNull();
+  });
+
+  test("[CONTROL] a wrapper that does not preserve the value decides nothing", () => {
+    expect(typeof refusal).toBe("function");
+    const bool = classify(fixture("wrapped-boolean-run-bun1314.txt"));
+    // a two-argument call, a Promise.all index past the array, and a local binding that shadows Promise
+    const twoArgs = CHECK_WRAPPED_BOOL.replace("(mod as any).settlementKindOf(evidence)\n", "(mod as any).settlementKindOf(evidence), 1\n");
+    expect(twoArgs).not.toBe(CHECK_WRAPPED_BOOL);
+    expect(refusal!(twoArgs, REL_WRAPPED_BOOL, bool, KIND_TREE)).toBeNull();
+    const pastEnd = onlyFailure(run, "Promise.all element, awaited in parentheses");
+    expect(refusal!(CHECK_WRAPPED_FORMS.replace("(mod as any).settlementKindOf(guess)]))[0]", "(mod as any).settlementKindOf(guess)]))[1]"), REL_WRAPPED_FORMS, pastEnd, KIND_TREE)).toBeNull();
+    const shadowed = CHECK_WRAPPED_BOOL.replace("    const evidence = {", "    const Promise = { resolve: (_x: unknown) => true };\n    const evidence = {");
+    const shifted = { ...bool, compared: bool.compared!.map((x) => ({ ...x, line: Number(x["line"]) + 1 })) };
+    expect(refusal!(shadowed, REL_WRAPPED_BOOL, shifted, KIND_TREE)).toBeNull();
+  });
+});
+
+describe("LIVE: the test_writing verify refuses a wrapped inverted check before it lands", () => {
+  const verdictOf = async (gapId: string, check: string): Promise<Judgement> => {
+    const root = mkdtempSync(join(tmpdir(), "contract-mismatch-wrapped-"));
+    for (const [rel, text] of Object.entries({ [KIND_REL]: KIND_SRC, [`test/checks/${checkFile(gapId)}`]: check })) {
+      mkdirSync(join(root, rel, ".."), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return judge({ gapId, vesselRoot: root, editSite: null, run: runner(root), runs: 3 });
+  };
+
+  test("[MUST-FAIL] `await Promise.resolve(fn(…))` toBe(true) on an object-or-null function is refused at the verify", async () => {
+    const j = await verdictOf("contract-mismatch-wrapped-boolean", CHECK_WRAPPED_BOOL);
+    expect(j.ok).toBe(false);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("check_asserts_contract_mismatch:value");
+  });
+
+  test("[CONTROL] an honest wrapped check passes the verify", async () => {
+    const j = await verdictOf("contract-mismatch-wrapped-honest", CHECK_WRAPPED_HONEST);
+    expect(j).toMatchObject({ ok: true, stage: null });
+  });
+});

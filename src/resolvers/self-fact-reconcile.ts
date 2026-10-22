@@ -44,7 +44,7 @@ import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveGapWriteEvent, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { appendRecord, ledgerDir, readRecords } from "./attempt-ledger.js";
-import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit } from "./operator-acts.js";
+import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, provenanceTraceIds, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit } from "./operator-acts.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
@@ -740,7 +740,7 @@ export interface JudgementDeps {
   /** Whether the ledger file of `kind` exists: an absent file is unknown, never an empty ledger. */
   ledgerPresent: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent") => boolean;
   /** The spool's landing events not yet ingested into the ledger (read only), or null when the spool is unreadable. */
-  spool: () => Array<{ key: string; record: Record<string, unknown> }> | null;
+  spool: () => Array<{ key: string; record: Record<string, unknown> | null }> | null;
   readGaps: () => Promise<GapRow[]>;
   /** One gap's write events from this node's file (the holder's), with how many matched; null when unreadable. */
   readEvents: (gapId: string) => Promise<{ events: GapWriteEventLike[]; matched: number } | null>;
@@ -766,8 +766,9 @@ export interface JudgementDeps {
   commit: (dir: string, sha: string) => RevertCommit | null;
   /** A file at a commit, or null. */
   show: (dir: string, sha: string, path: string) => string | null;
-  /** Operator scope acts in the window that opened each of `sites` to the lane (read once per run), or null when unreadable. */
-  scopeActs: (sites: string[], sinceIso: string) => Promise<Map<string, ScopeAct[]> | null>;
+  /** Operator scope acts in ALL of the super-repo's scope history that opened each of `sites` to the lane (read once per
+   *  run), or null when unreadable. Never from the row window's start: an act before the window still opened the site. */
+  scopeActs: (sites: string[]) => Promise<Map<string, ScopeAct[]> | null>;
   /** Append one run's aggregate (append-only: a repeated key is refused). */
   persist: (key: string, record: Record<string, unknown>) => { appended: boolean };
   now: () => number;
@@ -790,9 +791,9 @@ const parseCommits = (out: string): SiteCommit[] => out.split("\x1e").map((b) =>
 /** Operator scope acts from the super-repo's history of the committed scope and this node's pin: a commit (not the
  *  lane's) after which a site is no longer excluded where it was before. Dated by the commit (earlier than any apply).
  *  The history is read ONCE per run (one log, two shows per commit), then every site is tested against it. */
-async function scopeActsFromHistory(sites: string[], sinceIso: string): Promise<Map<string, ScopeAct[]> | null> {
+async function scopeActsFromHistory(sites: string[]): Promise<Map<string, ScopeAct[]> | null> {
   const root = superRepoRoot();
-  const log = gitIn(root, ["log", "--reverse", `--since=${sinceIso}`, "--format=%H%x1f%an%x1f%cI", "origin/dev", "--", "scripts/substrate/autonomy-scope.json", ROWS_PATH]);
+  const log = gitIn(root, ["log", "--reverse", "--format=%H%x1f%an%x1f%cI", "origin/dev", "--", "scripts/substrate/autonomy-scope.json", ROWS_PATH]);
   if (log === null) return null;
   const { autonomyScopeExcludes, parseScopeExceptions } = await import("../judge/gap-policy.js");
   const node = thisNode();
@@ -837,9 +838,10 @@ const defaultJudgementDeps: JudgementDeps = {
     if (!existsSync(dir)) return null;
     let names: string[];
     try { names = readdirSync(dir).filter((f) => f.endsWith(".json")).sort(); } catch { return null; }
-    const out: Array<{ key: string; record: Record<string, unknown> }> = [];
+    const out: Array<{ key: string; record: Record<string, unknown> | null }> = [];
     for (const f of names) {
-      try { out.push({ key: `spool:${f}`, record: JSON.parse(readFileSync(join(dir, f), "utf8")) as Record<string, unknown> }); } catch { /* a torn file: the scan counts it bad too */ }
+      // A torn file is kept as record null: it may be a landing, so it is expected and unjudged, never dropped.
+      try { const r: unknown = JSON.parse(readFileSync(join(dir, f), "utf8")); out.push({ key: `spool:${f}`, record: r && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null }); } catch { out.push({ key: `spool:${f}`, record: null }); }
     }
     return out;
   },
@@ -901,20 +903,26 @@ let judgementDeps: JudgementDeps = defaultJudgementDeps;
 /** Tests only: replace what repair_autonomy and lane_revert_within_1h read (null restores the defaults). */
 export function __setJudgementDepsForTests(d: Partial<JudgementDeps> | null): void { judgementDeps = d ? { ...defaultJudgementDeps, ...d } : defaultJudgementDeps; }
 
+/** A ledger or spool entry that may be a lane landing but cannot be tied to a gap: counted in expected, judged unjudged. */
+export interface UnjudgeableLanding { key: string; reason: string; attempt_id: string | null; sha: string | null; at: string | null; from: "ledger" | "spool" }
 /** The lane landings in the window, from the ledger AND its undrained spool, newest per gap (expected for
- *  repair_autonomy). A landing whose time cannot be parsed is kept (unknown is never out of the window). */
-export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, sinceMs: number): { landings: RepairLanding[]; spool_readable: boolean } {
+ *  repair_autonomy). A landing whose time cannot be parsed is kept (unknown is never out of the window). An entry that
+ *  may be a lane landing but cannot be tied to a gap (a torn spool file; a landing whose attempt has no intent, or whose
+ *  intent names no gap) is returned as unjudgeable, never dropped. */
+export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, sinceMs: number): { landings: RepairLanding[]; unjudgeable: UnjudgeableLanding[]; spool_readable: boolean } {
   const intents = new Map<string, Record<string, unknown>>();
   for (const r of deps.ledger("attemptIntent")) intents.set(r.key, r.record);
   const ingested = deps.ledger("landingEvent");
   const keys = new Set(ingested.map((r) => r.key));
   const spool = deps.spool();
-  const events: Array<{ record: Record<string, unknown>; from: "ledger" | "spool" }> = [
-    ...ingested.map((r) => ({ record: r.record, from: "ledger" as const })),
-    ...(spool ?? []).filter((s) => !keys.has(s.key)).map((s) => ({ record: s.record, from: "spool" as const })),
+  const events: Array<{ key: string; record: Record<string, unknown> | null; from: "ledger" | "spool" }> = [
+    ...ingested.map((r) => ({ key: r.key, record: r.record, from: "ledger" as const })),
+    ...(spool ?? []).filter((s) => !keys.has(s.key)).map((s) => ({ key: s.key, record: s.record, from: "spool" as const })),
   ];
   const byGap = new Map<string, RepairLanding>();
-  for (const { record: e, from } of events) {
+  const unjudgeable = new Map<string, UnjudgeableLanding>();
+  for (const { key, record: e, from } of events) {
+    if (e === null) { unjudgeable.set(key, { key, reason: "a torn spool file: it may be a lane landing, so it is expected and cannot be judged", attempt_id: null, sha: null, at: null, from }); continue; }
     // A rewrite (an amended landing) is a landing too, under its new sha; the newest per gap is judged.
     if (e["event"] !== "commit" && e["event"] !== "rewrite") continue;
     const att = typeof e["attempt_id"] === "string" ? e["attempt_id"] : "";
@@ -922,17 +930,20 @@ export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, si
     if (!att.startsWith("att-") || !/^[0-9a-f]{40}$/.test(sha)) continue;
     const at = isoMs(e["at"]);
     if (at !== null && at < sinceMs) continue;
+    const atText = at === null ? (typeof e["at"] === "string" ? e["at"] : null) : new Date(at).toISOString();
     const intent = intents.get(att);
-    const gapId = intent && typeof intent["gap_id"] === "string" ? intent["gap_id"] : "";
-    if (!gapId || intent!["route"] === "auto_revert") continue;
+    if (!intent) { unjudgeable.set(att, { key: att, reason: `the landing's attempt ${att} has no attemptIntent, so its gap and its directed flag are unknown`, attempt_id: att, sha, at: atText, from }); continue; }
+    if (intent["route"] === "auto_revert") continue; // a revert is not a repair
+    const gapId = typeof intent["gap_id"] === "string" ? intent["gap_id"] : "";
+    if (!gapId) { unjudgeable.set(att, { key: att, reason: `the landing's attempt ${att} names no gap, so no closure can be judged`, attempt_id: att, sha, at: atText, from }); continue; }
     const repo = String(e["repo"] ?? "").split("/").filter(Boolean).pop() ?? "";
     const prev = byGap.get(gapId);
     const prevAt = prev ? isoMs(prev.at) : null;
     if (!prev || (at !== null && (prevAt === null || prevAt <= at))) {
-      byGap.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: at === null ? (typeof e["at"] === "string" ? e["at"] : null) : new Date(at).toISOString(), directed: intent!["directed"], authoring_execution_id: typeof intent!["authoring_execution_id"] === "string" ? intent!["authoring_execution_id"] : null, from });
+      byGap.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: atText, directed: intent["directed"], authoring_execution_id: typeof intent["authoring_execution_id"] === "string" ? intent["authoring_execution_id"] : null, from });
     }
   }
-  return { landings: [...byGap.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id)), spool_readable: spool !== null };
+  return { landings: [...byGap.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id)), unjudgeable: [...unjudgeable.values()].sort((a, b) => a.key.localeCompare(b.key)), spool_readable: spool !== null };
 }
 /** Every regressed settlement in the ledger, by key (the window is applied by the caller). */
 export function ledgerRegressedSettlements(deps: Pick<JudgementDeps, "ledger">): Map<string, RegressedSettlement> {
@@ -1583,18 +1594,18 @@ const FACTS: Record<string, FactFn> = {
     const deps = judgementDeps;
     const nowMs = deps.now();
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
-    const sinceIso = new Date(nowMs - hours * 3600_000).toISOString();
     const out: SelfFactDivergence[] = [];
     // An unobserved run is persisted too: a gap in the series is part of the series.
     const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate }; };
     const absent = (["attemptIntent", "landingEvent", "attemptSettlement"] as const).filter((k) => !deps.ledgerPresent(k));
     if (absent.length > 0) return unread(`landing ledger file(s) absent: ${absent.join(", ")} (unknown is never an empty ledger)`);
     let landings: RepairLanding[];
+    let unjudgeable: UnjudgeableLanding[];
     let settlements: LedgerRow[];
     try {
       const l = ledgerLandings(deps, nowMs - hours * 3600_000);
       if (!l.spool_readable) return unread("the landing spool is unreadable, so landings not yet ingested cannot be counted");
-      landings = l.landings; settlements = deps.ledger("attemptSettlement");
+      landings = l.landings; unjudgeable = l.unjudgeable; settlements = deps.ledger("attemptSettlement");
     } catch (err) { noteReadError("landing ledger for repair_autonomy", err); return unread("landing ledger unreadable"); }
     let gaps: GapRow[];
     try { gaps = await deps.readGaps(); } catch (err) { noteReadError("gap store for repair_autonomy", err); return unread("gap store unreadable"); }
@@ -1603,7 +1614,7 @@ const FACTS: Record<string, FactFn> = {
     try { keymap = await deps.keymap(); } catch { keymap = null; }
     // The scope history is read once for every edit site this run judges.
     const sites = [...new Set(landings.map((l) => String(metaRec(byId.get(l.gap_id) ?? null)["edit_site"] ?? "")).filter((x) => x.length > 0))];
-    const scopeBySite = sites.length > 0 ? await deps.scopeActs(sites, sinceIso) : new Map<string, ScopeAct[]>();
+    const scopeBySite = sites.length > 0 ? await deps.scopeActs(sites) : new Map<string, ScopeAct[]>();
     const judgements: RepairJudgement[] = [];
     for (const l of landings) {
       const g = byId.get(l.gap_id) ?? null;
@@ -1616,7 +1627,8 @@ const FACTS: Record<string, FactFn> = {
       const fullSha = siteDir ? deps.revParse(siteDir, l.sha) ?? "" : "";
       const fixDir = siteDir && fullSha ? siteDir : null;
       const reg = settlements.filter((s) => s.record["attempt_id"] === l.attempt_id && s.record["verdict"] === "regressed").pop();
-      const filed = g ? String(g["first_detected_at"] ?? g["created_at"] ?? "") || sinceIso : sinceIso;
+      // The filing time as the judge reads it; unknown means all history, never the window's start.
+      const filed = (g ? String(g["first_detected_at"] ?? g["created_at"] ?? g["detected_at"] ?? "") : "") || "1970-01-01T00:00:00.000Z";
       const paths = [site?.path, check].filter((p): p is string => !!p);
       // Events of the row AND of each lineage ancestor; capped or not reaching the filing is incomplete.
       let events: Array<GapWriteEventLike & { source: "holder" }> | null = g ? [] : null;
@@ -1631,7 +1643,8 @@ const FACTS: Record<string, FactFn> = {
           events!.push(...r.events.map((e) => ({ ...e, gap_id: e.gap_id ?? id, source: "holder" as const })));
         }
       }
-      const traceIds = [...(l.authoring_execution_id ? [l.authoring_execution_id] : [])];
+      // Labels for EVERY trace the reader considers (one list, provenanceTraceIds), not only the authoring execution.
+      const traceIds = g ? provenanceTraceIds(g, l.authoring_execution_id ? [l.authoring_execution_id] : []) : [];
       let labelRead: Awaited<ReturnType<JudgementDeps["labels"]>> = null;
       try { labelRead = await deps.labels(traceIds); } catch { labelRead = null; }
       const j = judgeRepairClosure({
@@ -1654,11 +1667,18 @@ const FACTS: Record<string, FactFn> = {
       judgements.push(j);
       deps.log(judgementLine(j));
     }
+    // Entries that may be landings but name no gap: expected, and unjudged (C).
+    for (const u of unjudgeable) {
+      const j: RepairJudgement = { fact: "repair_autonomy", gap_id: `ledger:${u.key}`, verdict: "unjudged", reason: u.reason, failing_links: [], arm_writer: "unread", operator_acts: null, fix_sha: u.sha ?? "", fix_repo: "", attempt_id: u.attempt_id ?? "", check: null, check_honest: { value: "unjudged", reason: "no gap" }, landing_verdict: { from: u.from, at: u.at }, durable_until: null, route_unverifiable: 0, window: { from: null, until: null } };
+      judgements.push(j);
+      deps.log(judgementLine(j));
+    }
+    const expectedN = landings.length + unjudgeable.length;
     const n = (v: RepairVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate: Record<string, unknown> = { observed: true, checked: n("counted"), expected: landings.length, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
+    const aggregate: Record<string, unknown> = { observed: true, checked: n("counted"), expected: expectedN, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
     if (n("unjudged") > 0) {
       const which = judgements.filter((j) => j.verdict === "unjudged");
-      out.push({ fact, key: "unjudged-landings", source: "landing ledger (lane landings in the window)", copy: "repair_autonomy judgements", detail: `${which.length} of ${landings.length} ledger landing(s) over ${hours}h could not be judged, so checked == expected cannot be read for them: ${which.slice(0, 4).map((j) => `${j.gap_id.slice(0, 60)} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
+      out.push({ fact, key: "unjudged-landings", source: "landing ledger (lane landings in the window)", copy: "repair_autonomy judgements", detail: `${which.length} of ${expectedN} ledger landing(s) over ${hours}h could not be judged, so checked == expected cannot be read for them: ${which.slice(0, 4).map((j) => `${j.gap_id.slice(0, 60)} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
     }
     aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate);
     let controls: RepairJudgement[] = [];
@@ -1671,8 +1691,8 @@ const FACTS: Record<string, FactFn> = {
         out.push({ fact, key: `${row.id}-canary`, source: REPAIR_MUST_FAIL_ID, copy: "judgeRepairClosure", detail: "must-fail control: an operator-armed gap with a verified landing read not_counted (operator_act:arm) and its system-armed twin counted", canary: true });
       }
     }
-    return { fact, source_read: true, copies_read: landings.length, divergences: out, judgements, aggregate, controls,
-      note: `${landings.length} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${landings.length}` };
+    return { fact, source_read: true, copies_read: expectedN, divergences: out, judgements, aggregate, controls,
+      note: `${expectedN} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${expectedN}` };
   },
   /**
    * LANE REVERT WITHIN 1 H (§14 #6, §7 step 5 exit): one judgement per regressed settlement in the landing ledger over

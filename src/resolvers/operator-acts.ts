@@ -246,6 +246,16 @@ export function intentIsAutonomous(directed: unknown): boolean { return directed
 export const OPERATOR_ONLY_FIELDS = ["deadline_status", "date_status", "latest_by", "filed_by"] as const;
 /** Row fields that name the traces a gap derives from (oracle labels on them are operator feedback in its provenance). */
 export const PROVENANCE_TRACE_FIELDS = ["execution_id", "example_trace_ids", "sample_exec_ids", "representative_trace_ids", "first_failed_task_id", "closed_by_trace"] as const;
+/** Every provenance trace id of a row (its PROVENANCE_TRACE_FIELDS, at the top level and in its metadata) plus `extra`.
+ *  ONE list: the caller fetches the oracle labels of exactly these, and the reader matches labels against them. */
+export function provenanceTraceIds(row: GapRow, extra: readonly string[] = []): string[] {
+  const m = metaOf(row);
+  const out = new Set<string>(extra.filter((x) => typeof x === "string" && x.length > 0));
+  for (const f of PROVENANCE_TRACE_FIELDS) {
+    for (const v of [m[f], row[f]]) for (const x of Array.isArray(v) ? v : [v]) if (typeof x === "string" && x) out.add(x);
+  }
+  return [...out].sort();
+}
 
 export interface OperatorActsContext {
   /** Every gap row the store holds (lineage reads ancestors from it). */
@@ -329,9 +339,14 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     const km = metaOf(byId.get(k));
     if (km["operator_hold"] === true && !km["operator_hold_at"]) acts.push({ addendum: "hold-undated", on: k, at: null, detail: `operator_hold set with no operator_hold_at on ${k === gid ? "this row" : `ancestor ${k.slice(-60)}`} (an undated hold counts)` });
   }
-  // operator-only row fields and a hand close
-  for (const f of OPERATOR_ONLY_FIELDS) if (f !== "filed_by" && m[f] !== undefined && m[f] !== null && m[f] !== "") acts.push({ addendum: "operator-field", at: null, detail: `row field ${f} is set (only an operator writes it)` });
-  if (String(m["closed_by"] ?? "").startsWith("operator:") || m["close_basis"] === "operator_exercised_falsifier") acts.push({ addendum: "hand-close", at: String(row["closed_at"] ?? m["closed_at"] ?? "") || null, detail: `closed by hand (${String(m["closed_by"] ?? m["close_basis"])})` });
+  // operator-only row fields and a hand close, on the row and every lineage ancestor
+  for (const k of lineage) {
+    const kr = byId.get(k);
+    const km = metaOf(kr);
+    const where = k === gid ? "this row" : `ancestor ${k.slice(-60)}`;
+    for (const f of OPERATOR_ONLY_FIELDS) if (f !== "filed_by" && km[f] !== undefined && km[f] !== null && km[f] !== "") acts.push({ addendum: "operator-field", on: k, at: null, detail: `row field ${f} is set on ${where} (only an operator writes it)` });
+    if (String(km["closed_by"] ?? "").startsWith("operator:") || km["close_basis"] === "operator_exercised_falsifier") acts.push({ addendum: "hand-close", on: k, at: String(kr?.["closed_at"] ?? km["closed_at"] ?? "") || null, detail: `${where} closed by hand (${String(km["closed_by"] ?? km["close_basis"])})` });
+  }
   // 3: an operator scope act opening the edit site, effective inside the window
   const site = String(m["edit_site"] ?? "");
   if (ctx.scopeActs === null) unread.push("scope acts");
@@ -384,11 +399,7 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     if ((ev.principal_kind === "in-process" || ev.principal_kind === "node-self") && !ev.route) routeUnverifiable += 1;
   }
   // oracle labels on the provenance traces (operator feedback there is an operator act)
-  const traces = new Set<string>(ctx.traceIds ?? []);
-  for (const f of PROVENANCE_TRACE_FIELDS) {
-    const v = m[f] ?? row[f];
-    for (const x of Array.isArray(v) ? v : [v]) if (typeof x === "string" && x) traces.add(x);
-  }
+  const traces = new Set<string>(provenanceTraceIds(row, ctx.traceIds ?? []));
   if (ctx.labels === null || ctx.labels === undefined || !ctx.labelContext) {
     review.push("oracle labels unread: operator feedback on a provenance trace cannot be ruled out");
   } else {

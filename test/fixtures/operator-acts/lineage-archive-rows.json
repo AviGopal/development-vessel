@@ -1,0 +1,73 @@
+{
+ "_doc": "Vendored from the research-watch archive snapshot the frozen test_lineage cases read (real gap ids). Only the fields lineage and row-field operator acts read: id, parent/root links, operator_*_by / operator_*_at stamps and operator_hold. Every other archive row is irrelevant to these cases: none is a lineage ancestor of a case id.",
+ "source": {
+  "snapshot": "gaps-20261021T103203Z.json.gz",
+  "sha256_prefix": "da3a8f33273a479c",
+  "rows_in_snapshot": 9929,
+  "rows_vendored": 8
+ },
+ "rows": [
+  {
+   "id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert",
+   "classification_metadata": {}
+  },
+  {
+   "id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128",
+   "classification_metadata": {}
+  },
+  {
+   "id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed",
+   "classification_metadata": {
+    "parent_gap_id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128"
+   }
+  },
+  {
+   "id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610210647",
+   "classification_metadata": {
+    "operator_hold": true,
+    "operator_hold_by": "operator:ac8b0aad (user ruling via qa)",
+    "operator_hold_at": "2026-10-21T09:13:20.000Z"
+   }
+  },
+  {
+   "id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610210647-narrowed",
+   "classification_metadata": {
+    "parent_gap_id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610210647"
+   }
+  },
+  {
+   "id": "recommit-failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed-verify_failed",
+   "classification_metadata": {
+    "root_gap_id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed",
+    "operator_hold": true,
+    "operator_hold_by": "operator:qa-2d1e764f (user ruling)",
+    "operator_hold_at": "2026-10-20T08:05:10Z",
+    "operator_hold_review_by": "2026-10-22T08:00:00Z"
+   }
+  },
+  {
+   "id": "recommit-failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed-verify_failed-step-2",
+   "classification_metadata": {
+    "parent_gap_id": "recommit-failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed-verify_failed",
+    "operator_hold": false,
+    "operator_hold_at": "2026-10-20T10:04:42Z",
+    "operator_hold_by": "operator:qa-2d1e764f (user ruling)",
+    "operator_hold_review_by": "2026-10-21T00:00:00Z",
+    "operator_hold_released_at": "2026-10-21T07:51:42.000Z",
+    "operator_hold_released_by": "operator:ac8b0aad (per qa, user ruling)"
+   }
+  },
+  {
+   "id": "recommit-recommit-failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed-verify_failed-step-2-verify_failed",
+   "classification_metadata": {
+    "root_gap_id": "failing-test-activity-api-src-services-phase5-integration-test-ts-gen-assert-r202610160128-narrowed-verify_failed-step-2",
+    "operator_hold": false,
+    "operator_hold_at": "2026-10-20T10:06:31Z",
+    "operator_hold_by": "operator:qa-2d1e764f (user ruling)",
+    "operator_hold_review_by": "2026-10-21T00:00:00Z",
+    "operator_hold_released_at": "2026-10-21T07:51:35.000Z",
+    "operator_hold_released_by": "operator:ac8b0aad (per qa, user ruling)"
+   }
+  }
+ ]
+}

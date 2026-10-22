@@ -734,10 +734,52 @@ export function checkModuleReferences(source: string, checkRel: string): Array<{
  * (moduleExports); the first one missing refuses, `check_references_missing_export:<symbol>`. A read that only asserts
  * the name is ABSENT (checkModuleReferences `absence`) requires nothing and never refuses. A module the reader cannot
  * read, or whose export list is open, decides nothing; a check that reads no module member (behaviour through a spawned
- * process, say) is unaffected. null = no refusal. Applied at attach (gap-check-supply's arm step) and at the verify of
+ * process, say) is unaffected. The names a check's module MOCKS supply are resolved the same way (979b966d, a reach-judge
+ * check: `mock.module("../../src/llm-router", () => ({ createLLMPort }))`, where llm-router exports no createLLMPort, so
+ * the stand-in its verdict rests on is never what the code calls): each key a mock.module (jest.mock / vi.mock) factory
+ * returns for a src module of the vessel must be one of that module's real exports, else the same refusal names it.
+ * null = no refusal. Applied at attach (gap-check-supply's arm step) and at the verify of
  * a test_writing compose (judgeTestWritingCheck), so the check that would be refused at attach never lands.
  */
 export const MISSING_EXPORT_STAGE = "check_references_missing_export";
+/**
+ * THE NAMES A CHECK'S MODULE MOCKS SUPPLY: for each `mock.module("<relative spec>", factory)` (and jest.mock / vi.mock
+ * with a factory), the keys of the object the factory returns (an arrow's object body, or every `return { … }` of a
+ * block body; spread members are skipped, `__esModule` is not a name). A factory whose result is not an object literal
+ * names nothing.
+ */
+function mockedModuleKeys(source: string, checkRel: string): Array<{ spec: string; symbol: string }> {
+  const ts = loadTs();
+  if (!ts) return [];
+  const sf = ts.createSourceFile(checkRel, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const out: Array<{ spec: string; symbol: string }> = [];
+  const unwrap = (e: TS.Expression): TS.Expression => { while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression; return e; };
+  const keysOf = (e: TS.Expression | undefined, spec: string): void => {
+    const o = e ? unwrap(e) : null;
+    if (!o || !ts.isObjectLiteralExpression(o)) return;
+    for (const p of o.properties) {
+      if (ts.isSpreadAssignment(p) || !p.name) continue;
+      const key = ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) ? p.name.text : null;
+      if (key && key !== "__esModule" && !out.some((r) => r.spec === spec && r.symbol === key)) out.push({ spec, symbol: key });
+    }
+  };
+  const visit = (n: TS.Node): void => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)) {
+      const who = `${n.expression.expression.text}.${n.expression.name.text}`;
+      const [specArg, factory] = n.arguments;
+      if ((who === "mock.module" || who === "jest.mock" || who === "vi.mock") && specArg && ts.isStringLiteral(specArg) && specArg.text.startsWith(".") && factory && (ts.isArrowFunction(factory) || ts.isFunctionExpression(factory))) {
+        if (!ts.isBlock(factory.body)) keysOf(factory.body, specArg.text);
+        else {
+          const rets = (b: TS.Node): void => { if (ts.isFunctionLike(b)) return; if (ts.isReturnStatement(b)) keysOf(b.expression, specArg.text); ts.forEachChild(b, rets); };
+          ts.forEachChild(factory.body, rets);
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
 export function missingExportRefusal(source: string, checkRel: string, reader: SrcReader): { symbol: string; module: string; reason: string } | null {
   const cache = new Map<string, ModuleExports | null>();
   for (const ref of checkModuleReferences(source, checkRel)) {
@@ -749,6 +791,15 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
     if (!ex || ex.open !== null || ex.names.has(ref.symbol)) continue;
     const listed = [...ex.names.keys()].slice(0, 12).join(", ");
     return { symbol: ref.symbol, module: target.rel, reason: `${MISSING_EXPORT_STAGE}:${ref.symbol}: the check reads ${ref.symbol} from ${target.rel}, which does not export it (it exports ${ex.names.size} name${ex.names.size === 1 ? "" : "s"}${listed ? `: ${listed}${ex.names.size > 12 ? ", …" : ""}` : ""}), so the check is red for the missing name on every tree, not for the defect` };
+  }
+  for (const m of mockedModuleKeys(source, checkRel)) {
+    const target = resolveModule(checkRel, m.spec, reader);
+    if (!target || !target.rel.startsWith("src/")) continue;
+    if (!cache.has(target.rel)) cache.set(target.rel, moduleExports(target.rel, reader));
+    const ex = cache.get(target.rel);
+    if (!ex || ex.open !== null || ex.names.has(m.symbol)) continue;
+    const listed = [...ex.names.keys()].slice(0, 12).join(", ");
+    return { symbol: m.symbol, module: target.rel, reason: `${MISSING_EXPORT_STAGE}:${m.symbol}: the check mocks ${m.symbol} on ${target.rel}, which does not export it (it exports ${ex.names.size} name${ex.names.size === 1 ? "" : "s"}${listed ? `: ${listed}${ex.names.size > 12 ? ", …" : ""}` : ""}), so the stand-in replaces nothing the code under test imports from there: the check's red is decided by its own mock, not by the defect` };
   }
   return null;
 }

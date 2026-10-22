@@ -1,0 +1,41 @@
+// EXCERPT of goal-host src/index.ts as it was at 979b966d, verbatim lines: its llm-router import, the import that
+// brings createLLMPort (from the executor package, not llm-router), the reach judge's declaration (body elided), and
+// the module's closing export block, which is how index.ts exports verifyGoalReached.
+import { SHADOW_ROUTE_PREFIX, transportHopHeaders, routedComplete, routedText, flushRouterFeedback, unwrapLlmContent, peekRouterUsage, setRouterDispatchIdReader, peekDispatchUsage, takeDispatchUsageDelta } from "./llm-router";
+import {
+  GoalHost,
+  DiscoveryRegistrationLoop,
+  createLLMPort,
+  ActivityApiAdapter,
+} from "@avigopal/ias-executor-ts";
+async function verifyGoalReached(goal: string, producedShapes: string[], taskSummary: string, contentDigest?: string, commandEvidence?: string, walkEvidence?: { gapsFiled: number; walkLog: string[] }, judgeView?: GateJudgeView, deliverables?: string[], poolEvidence?: PoolEvidence[], writeEvidence?: WriteArtifactEvidence, captureSurface?: judgeCapture.JudgeSurface): Promise<GoalReachVerdict | null> { return null; }
+export {
+  verifyDeterministicCompute,
+  dcNumericCandidates,
+  parseAggregateGoal, buildAggregateCommand, verifyAggregateReach,
+  parseRankAggregate, buildRankAggregateCommand, verifyRankAggregateReach,
+  parseAvgThreshold, buildAvgThresholdCommand, verifyAvgThresholdReach,
+  parseTwoSourceCompare, buildTwoSourceCompareCommand, verifyTwoSourceCompareReach,
+  isCompositionalGoal, parseBelowMean,
+  SELECTORS, enumerate, emitVerdict, parsePathsAndExt, ROW_AVG_THRESHOLD, ROW_BELOW_MEAN, CLASS_ROWS,
+  resolveClassRow, buildFromClassRow, verifyFromClassRow, selectorOf,
+  thresholdSelector, parseThreshold, verifyEditPostState, parseAddSymbol, symbolInAddedLines,
+  verifyGoalReached,
+  buildFailedCompositeTrace,
+  walkFailureMode,
+  buildCompositeTraceFromChain,
+  resolveFleetActivityFeed,
+  runGoalWithRecovery,
+  rememberGoalFailure,
+  recallGoalFailures,
+  runGroundedToolLoop,
+  isDeterministicVerdict,
+  dispatchContext,
+  readGapByIdForOracle,
+  handleRunGoal,
+  handleResolve,
+  runGoalAs,
+  markInboundRemote,
+  __inboundAuthStateForTests,
+};
+export type { ClassRow, SelectorId, Enumerated, SelParams, LabelCtx, OwnMatch, ShellCtx, SelectorDef };

@@ -343,3 +343,72 @@ describe("F-ARM: typescript unavailable is loud", () => {
     expect(refusalOf(ROUTE_EDIT_CHECK, "test/checks/route-edit-bd252f8c.check.ts", reader({ "src/index.ts": GOAL_HOST_INDEX }))?.symbol).toBe("shellResult");
   });
 });
+
+// A MOCK OF A NAME ITS MODULE DOES NOT EXPORT REPLACES NOTHING (2026-10-22).
+//
+// goal-host 979b966d landed a reach-judge check that calls mod.verifyGoalReached (exported: src/index.ts's closing
+// `export { … }` block) after `mock.module("../../src/llm-router", () => ({ createLLMPort: () => mockLlmClient }))`.
+// src/llm-router.ts exports no createLLMPort (index.ts imports it from the executor package), so the stand-in the
+// check's verdict rests on is never what the code under test calls: its red is the mock's, not the defect's. The guard
+// now resolves each key a mock.module (jest.mock / vi.mock) factory supplies for a src module against that module's
+// real exports too; the first one missing refuses with `check_references_missing_export:<symbol>`.
+//
+// FIXTURES: 979b966d's check verbatim, llm-router.ts as it was at 979b966d, and a verbatim excerpt of index.ts at
+// 979b966d (its two imports, the reach judge's declaration, the closing export block).
+const CHECK_979 = fixture("979b966d-reach-judge-current-date.check.ts.txt");
+const REL_979 = "test/checks/reach-judge-and-synthesis-lack-the-current-date-so-time-rela.check.ts";
+const ROUTER_979 = fixture("llm-router.at-979b966d.ts.txt");
+const INDEX_979 = fixture("goal-host-index.at-979b966d.excerpt.ts.txt");
+const TREE_979 = reader({ "src/index.ts": INDEX_979, "src/llm-router.ts": ROUTER_979 });
+
+describe("F-ARM: a mocked name its module does not export", () => {
+  it("[CONTROL] 979b966d's call is to a real export: verifyGoalReached is in index.ts's export block", () => {
+    const named = csa["moduleExports"] as (rel: string, r: Reader) => { names: Map<string, string>; open: string | null } | null;
+    const ex = named("src/index.ts", TREE_979);
+    expect(ex?.open).toBeNull();
+    expect(ex?.names.has("verifyGoalReached")).toBe(true);
+    // the call alone, without the mock, is admitted
+    const callOnly = CHECK_979.replace(/mock\.module\("\.\.\/\.\.\/src\/llm-router", \(\) => \(\{\n  createLLMPort: \(\) => mockLlmClient,\n\}\)\);/, "void mockLlmClient;");
+    expect(callOnly).not.toBe(CHECK_979);
+    expect(refusalOf(callOnly, REL_979, TREE_979)).toBeNull();
+  });
+
+  it("[MUST-FAIL] 979b966d's check is refused: it mocks createLLMPort on src/llm-router.ts, which does not export it", () => {
+    const r = refusalOf(CHECK_979, REL_979, TREE_979);
+    expect(r).toMatchObject({ symbol: "createLLMPort", module: "src/llm-router.ts" });
+    expect(r!.reason).toContain("check_references_missing_export:createLLMPort");
+    expect(r!.reason).toContain("mocks createLLMPort");
+  });
+
+  it("[CONTROL] a mock of a name the module does export, or a mock of a package, is not refused", () => {
+    const real = CHECK_979.replace("createLLMPort: () => mockLlmClient,", "routedText: async () => \"{}\",");
+    expect(real).not.toBe(CHECK_979);
+    expect(refusalOf(real, REL_979, TREE_979)).toBeNull();
+    const pkg = CHECK_979.replace('mock.module("../../src/llm-router",', 'mock.module("@avigopal/ias-executor-ts",');
+    expect(pkg).not.toBe(CHECK_979);
+    expect(refusalOf(pkg, REL_979, TREE_979)).toBeNull();
+  });
+
+  it("[CONTROL] a mocked key exported ONLY through an export list (`export { … }`, a plain declaration above it) is not refused", () => {
+    expect(INDEX_979).toContain("async function verifyGoalReached(");
+    expect(INDEX_979).not.toContain("export async function verifyGoalReached");
+    const viaList = CHECK_979.replace('mock.module("../../src/llm-router", () => ({\n  createLLMPort: () => mockLlmClient,\n}));', 'mock.module("../../src/index", () => ({\n  verifyGoalReached: async () => ({ reached: true, reason: "stand-in" }),\n}));');
+    expect(viaList).not.toBe(CHECK_979);
+    expect(refusalOf(viaList, REL_979, TREE_979)).toBeNull();
+    // and through a re-export (`export { x } from`, `export * from`) and a default
+    const SITE = { "src/a.ts": `export { routedText } from "./llm-router";\nexport * from "./b";\nexport default function main(): void {}\n`, "src/b.ts": "export const fromB = 1;\n", "src/llm-router.ts": ROUTER_979 };
+    const reexported = `import { expect, mock, test } from "bun:test";\nmock.module("../../src/a", () => ({ routedText: async () => "{}", fromB: 2, default: () => {} }));\ntest("t", () => { expect(1).toBe(2); });\n`;
+    expect(refusalOf(reexported, CHECK, reader(SITE))).toBeNull();
+  });
+
+  it("[MUST-FAIL] a mocked key absent from a module that re-exports is refused, naming it", () => {
+    const SITE = { "src/a.ts": `export { routedText } from "./llm-router";\nexport * from "./b";\nexport default function main(): void {}\n`, "src/b.ts": "export const fromB = 1;\n", "src/llm-router.ts": ROUTER_979 };
+    const absent = `import { expect, mock, test } from "bun:test";\nmock.module("../../src/a", () => ({ routedText: async () => "{}", notInB: 2, default: () => {} }));\ntest("t", () => { expect(1).toBe(2); });\n`;
+    expect(refusalOf(absent, CHECK, reader(SITE))?.symbol).toBe("notInB");
+  });
+
+  it("[CONTROL] a mocked module this reader cannot read, or whose export list is open, decides nothing", () => {
+    expect(refusalOf(CHECK_979, REL_979, reader({ "src/index.ts": INDEX_979 }))).toBeNull();
+    expect(refusalOf(CHECK_979, REL_979, reader({ "src/index.ts": INDEX_979, "src/llm-router.ts": `${ROUTER_979}\nexport * from "./elsewhere";\n` }))).toBeNull();
+  });
+});

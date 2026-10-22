@@ -75,8 +75,12 @@ const LOG: string[] = [];
 const created = (gapId: string) => ({ gap_id: gapId, outcome: "written", fields_changed: ["status"], status_from: "absent", principal_kind: "in-process", key_id: null, operator_marker: false, store: "local", ts: h(100) });
 const sysArm = (gapId: string, at = h(90)) => ({ gap_id: gapId, outcome: "written", fields_changed: ["classification_metadata.check_supply"], principal_kind: "in-process", key_id: null, operator_marker: false, store: "local", ts: at });
 const opWrite = (gapId: string, at: string, fields = ["classification_metadata.evidence_resolve"]) => ({ gap_id: gapId, outcome: "written", fields_changed: fields, principal_kind: "key", key_id: "key_Oa", operator_marker: true, store: "local", ts: at });
+// Every fixture landing's attempt gets an authoring execution through the REAL attemptAuthoring path (attempt-register's
+// writer), with no label on it: a lane landing whose authoring execution is known nowhere is unattributable (qa eval5 B3).
+const { setAuthoringExecution } = await import("../../src/resolvers/attempt-register.js");
 function land(gapId: string, s: string, at: string, att: string, intent: Row = {}): void {
   LEDGER["attemptIntent"]!.push({ key: att, at, record: { attempt_id: att, route: "gap_to_feature", gap_id: gapId, directed: false, ...intent } });
+  void setAuthoringExecution(att, `exec-authoring-${att}`);
   LEDGER["landingEvent"]!.push({ key: `spool:${att}`, at, record: { event: "commit", repo: "/workspace/git/vessels/v", sha: s, at, attempt_id: att } });
 }
 const READ_LABELS = { labels: [], context: { fixLiveAt: h(500), keymap: [], forwardingKeys: [], nodeSelfAdminKeys: [] } };

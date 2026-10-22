@@ -534,6 +534,9 @@ export interface RepairInputs {
   /** The check file's and the edit site's sources AT THE FIX (never HEAD). null: unreadable. */
   checkSource: string | null; siteSource: string | null;
   acts: Omit<OperatorActsContext, "byId" | "filedAt" | "untilAt" | "editSitePath" | "checkPath" | "directed" | "traceIds">;
+  /** Set by the live reader when the lane landing's authoring execution is known nowhere (its attemptIntent nor
+   *  attemptAuthoring): the labels on it cannot be read, so the closure is unattributable. Absent: not asked. */
+  authoringUnknown?: boolean;
   nowMs: number;
 }
 const EXCLUDED_CLOSE_RE = /expired|not_redetected|producer_now_exists|duplicate|superseded|stale_low_value|persistent_compose_failure/;
@@ -673,7 +676,10 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   if (acts.acts.length > 0) return out("not_counted", `operator act from filing to close + 24 h: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}`);
   // UNKNOWN IS NEVER CLEAN: anything unread, unattributable or in review decides before time does.
   if (unknown.length > 0) return out("unjudged", `unread, so an operator act cannot be ruled out: ${unknown.join("; ")}`);
-  if (acts.unattributable.length > 0) return out("unjudged", `link 5 UNATTRIBUTABLE (a writer, an S-2 answer or a provenance trace's labels cannot be classed): ${acts.unattributable.slice(0, 3).join("; ")}`);
+  // A lane landing whose authoring execution is known nowhere (qa eval5 B3): its labels were never asked, so it is
+  // unattributable, never clean. Named first, so the reason always shows it.
+  const unattributable = [...(inp.authoringUnknown === true ? ["the lane landing's authoring execution: unattributable, none on its attemptIntent and none in attemptAuthoring, so the oracle labels on it cannot be read"] : []), ...acts.unattributable];
+  if (unattributable.length > 0) return out("unjudged", `link 5 UNATTRIBUTABLE (a writer, an S-2 answer or a provenance trace's labels cannot be classed): ${unattributable.slice(0, 3).join("; ")}`);
   if (acts.review.length > 0) return out("unjudged", `REVIEW: ${acts.review.slice(0, 2).join("; ")}`);
   if (honest.value === "unjudged") return out("unjudged", `link 2: ${honest.reason}`);
   for (const [n, s] of [["link 3", l3], ["link 4", l4], ["link 6", l6]] as const) if (s.state === "review") return out("unjudged", `${n}: ${s.why}`);
@@ -824,6 +830,9 @@ export interface JudgementDeps {
   /** goal-host's resolverRequest record by request_id; null when unreadable or unknown. */
   resolverRequest?: (requestId: string) => Promise<ResolverRequestLike | null>;
   /** Append one run's aggregate (append-only: a repeated key is refused). */
+  /** A lane attempt's authoring execution written after registration (attemptAuthoring.jsonl), read by attempt-register's
+   *  own reader (authoringOverride); null when it has none. */
+  authoring?: (attemptId: string) => Promise<string | null>;
   persist: (key: string, record: Record<string, unknown>) => { appended: boolean };
   now: () => number;
   log: (line: string) => void;
@@ -1067,6 +1076,7 @@ const defaultJudgementDeps: JudgementDeps = {
   },
   show: (dir, sha, path) => gitIn(dir, ["show", `${sha}:${path}`]),
   scopeActs: scopeActsFromHistory,
+  authoring: async (id) => (await (await import("./attempt-register.js")).authoringOverride(id)).authoring_execution_id ?? null,
   dispatches: () => readGoalHostDispatches(),
   resolverDispatch: (id) => readGoalHostResolverDispatch(id),
   resolverRequest: (id) => readGoalHostResolverRequest(id),
@@ -1852,7 +1862,12 @@ const FACTS: Record<string, FactFn> = {
     const sites = [...new Set(landings.map((l) => String(metaRec(byId.get(l.gap_id) ?? null)["edit_site"] ?? "")).filter((x) => x.length > 0))];
     const scopeBySite = sites.length > 0 ? await deps.scopeActs(sites) : new Map<string, ScopeAct[]>();
     const judgements: RepairJudgement[] = [];
-    for (const l of landings) {
+    for (const l0 of landings) {
+      // The authoring execution: the intent's, else the one the compose wrote later (attemptAuthoring.jsonl, through
+      // attempt-register's reader). Still unknown: the closure is unattributable (judgeRepairClosure).
+      let authoring = l0.authoring_execution_id;
+      if (!authoring && deps.authoring) { try { authoring = await deps.authoring(l0.attempt_id); } catch { authoring = null; } }
+      const l: RepairLanding = { ...l0, authoring_execution_id: authoring ?? null };
       const g = byId.get(l.gap_id) ?? null;
       const m = metaRec(g);
       const siteRaw = String(m["edit_site"] ?? "");
@@ -1900,6 +1915,7 @@ const FACTS: Record<string, FactFn> = {
           ...(dispatchStore === undefined ? {} : { dispatches: dispatchStore, ...(await s2Inputs(deps, dispatchStore, l.gap_id, siteRaw)) }),
         },
         nowMs,
+        authoringUnknown: !l.authoring_execution_id,
       });
       judgements.push(j);
       deps.log(judgementLine(j));

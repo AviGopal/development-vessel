@@ -1,5 +1,6 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { readTraceWindowCounts } from "../lib/trace-window-counts.js";
 
 export interface ReachableUnlearnedReportPointer {
   type: "reachable_unlearned_report";
@@ -130,31 +131,22 @@ export async function resolveReachableUnlearnedReport(
     }
   } catch { /* fallback to execution counts */ }
 
-  // Count ALL-TIME executions per template. The 24h wide window covers recent
-  // activity; for confidence-floor purposes we need lifetime counts. Fetch a
-  // larger slice (30-day) and count per activity_id.
-  const allTimeSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
-  const allTimeExecCounts = new Map<string, number>(); // normalizedId → count
-  let allTimeOffset = 0;
-  while (allTimeOffset < 5000) {
-    const r = await fetch(
-      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${allTimeOffset}&since_iso=${encodeURIComponent(allTimeSince)}`,
-      { headers: auth },
-    ).catch(() => null);
-    if (!r?.ok) break;
-    const page = await r.json() as { executions?: TraceRow[] };
-    const rows = page.executions ?? [];
-    if (rows.length === 0) break;
-    for (const tr of rows) {
-      const id = tr.activity_id ?? tr.variant_id;
-      if (!id) continue;
+  // Count executions per template over the last 30 days, for the confidence floor. The server aggregates
+  // (lib/trace-window-counts.ts: traceAggregateReport by shape, a GROUP BY over the indexed window). The old offset
+  // loop asked the list route for 200 a page, the route clamps to 100, so the loop stopped after ONE page that had the
+  // database sort the whole 30-day window and counted its newest 100 rows as 30 days. When the aggregate is
+  // unavailable the list fallback is bounded by a page and a wall-time cap; a capped read is INSUFFICIENT DATA, and the
+  // floor fields below go null (unknown) rather than reporting a partial slice.
+  const windowCounts = await readTraceWindowCounts({ windowHours: 30 * 24, wantSuccess: true, caller: "reachable-unlearned-report" });
+  const allTimeExecCounts = new Map<string, number>(); // normalizedId (and the raw id when it differs) → count
+  if (windowCounts.measured) {
+    for (const [id, c] of windowCounts.counts) {
       const norm = normalizeTemplateId(id);
-      allTimeExecCounts.set(norm, (allTimeExecCounts.get(norm) ?? 0) + 1);
-      allTimeExecCounts.set(id, (allTimeExecCounts.get(id) ?? 0) + 1);
+      allTimeExecCounts.set(norm, (allTimeExecCounts.get(norm) ?? 0) + c.count);
+      if (norm !== id) allTimeExecCounts.set(id, (allTimeExecCounts.get(id) ?? 0) + c.count);
     }
-    allTimeOffset += rows.length;
-    if (rows.length < 200) break;
   }
+  const execCountsMeasured = windowCounts.measured;
 
   // Only consider ACTIVE templates for coverage dispatch:
   // - Not proposed (proposed=true means awaiting validation)
@@ -175,23 +167,24 @@ export async function resolveReachableUnlearnedReport(
   for (const tr of traces) { // short-window traces
     for (const s of (tr.output_shapes ?? [])) allTimeProducedShapes.add(s);
   }
-  // Also fetch wider 30-day produced shapes from the same paginated traces we already
-  // counted above — reuse allTimeExecCounts data source but track shapes too.
-  // We approximate: any shape in the wide-window exec traces' output_shapes is "produced".
-  // The wide fetch is the allTimeExecCounts loop above (rows have output_shapes).
-  // Re-iterate allTimeOffset data isn't available, so use a separate dedicated fetch.
-  try {
-    const shapeRes = await fetch(
-      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=500&since_iso=${encodeURIComponent(allTimeSince)}`,
-      { headers: auth },
-    ).catch(() => null);
-    if (shapeRes?.ok) {
-      const shapeData = await shapeRes.json() as { executions?: TraceRow[] };
-      for (const tr of shapeData.executions ?? []) {
-        for (const s of (tr.output_shapes ?? [])) allTimeProducedShapes.add(s);
-      }
+  // 30-day produced shapes, from the SAME read as the counts (the separate limit=500 30-day list read is gone). The
+  // list fallback's rows carry output_shapes. The aggregate has no shape dimension, so there a shape counts as
+  // produced when a template declaring it as an output SUCCEEDED in the window: declared outputs of succeeded
+  // templates, wider than the shapes the traces recorded but never invented. Insufficient data adds nothing, and
+  // produced_shapes_source says which it was.
+  let producedShapesSource: "list" | "declared_outputs_of_succeeded_templates" | "unmeasured" = "unmeasured";
+  if (windowCounts.measured && windowCounts.produced_shapes) {
+    for (const s of windowCounts.produced_shapes) allTimeProducedShapes.add(s);
+    producedShapesSource = "list";
+  } else if (windowCounts.measured) {
+    const succeeded = new Set<string>();
+    for (const [id, c] of windowCounts.counts) if (c.success > 0) succeeded.add(normalizeTemplateId(id));
+    for (const t of templates) {
+      if (!succeeded.has(normalizeTemplateId(t.id))) continue;
+      for (const s of t.output_shapes ?? []) allTimeProducedShapes.add(s);
     }
-  } catch { /* fallback: allTimeProducedShapes stays small */ }
+    producedShapesSource = "declared_outputs_of_succeeded_templates";
+  }
 
   // Unconditionally available shapes: shapes with no input requirements (always producible
   // without context) are always satisfiable regardless of history.
@@ -237,7 +230,7 @@ export async function resolveReachableUnlearnedReport(
   // alpha + beta = total_executions + 2. Floor requires alpha + beta >= confidenceFloor.
   // So: total_executions < confidenceFloor - 2.
   const execsNeeded = Math.max(0, confidenceFloor - 2);
-  const belowFloor = templates
+  const belowFloor = !execCountsMeasured ? [] : templates
     .filter(tpl => !tpl.id.includes("gap-closing:") && !tpl.id.includes("variant-")) // exclude substrate-authored
     .map(tpl => {
       const norm = normalizeTemplateId(tpl.id);
@@ -331,12 +324,17 @@ export async function resolveReachableUnlearnedReport(
       // These are the templates the substrate should run more to pass confidence_passing.
       // Sorted cheapest-to-fix first so callers can dispatch the top N.
       below_confidence_floor: belowFloor,
-      below_confidence_floor_count: belowFloor.length,
+      // Insufficient data: the list is empty and the count + top pick are null (UNKNOWN), never 0.
+      below_confidence_floor_count: execCountsMeasured ? belowFloor.length : null,
       confidence_floor: confidenceFloor,
       executions_needed_for_floor: execsNeeded,
       // Top pick: template that needs fewest additional runs to cross floor.
       top_below_floor_template_id: belowFloor[0]?.template_id ?? null,
-      top_below_floor_runs_needed: belowFloor[0]?.runs_needed ?? 0,
+      top_below_floor_runs_needed: execCountsMeasured ? (belowFloor[0]?.runs_needed ?? 0) : null,
+      execution_counts: windowCounts.measured
+        ? { measured: true, source: windowCounts.source, window_hours: windowCounts.window_hours, activities: windowCounts.counts.size, pages: windowCounts.pages, elapsed_ms: windowCounts.elapsed_ms, aggregate_reason: windowCounts.aggregate_reason }
+        : { measured: false, source: windowCounts.source, window_hours: windowCounts.window_hours, reason: windowCounts.reason, pages: windowCounts.pages, elapsed_ms: windowCounts.elapsed_ms, aggregate_reason: windowCounts.aggregate_reason },
+      produced_shapes_source: producedShapesSource,
     },
   };
 }

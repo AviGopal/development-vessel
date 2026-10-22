@@ -3,6 +3,7 @@ import type { ResolverResult } from "./types.js";
 import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fetchWithRetry } from "./http-retry.js";
+import { readTraceWindowCounts } from "../lib/trace-window-counts.js";
 import { isMetaTemplate } from "../lib/meta-templates.js";
 import { registryRowMatch, resolveDiscoveryVesselRegistryObserver } from "./discovery-vessel-registry-observer.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
@@ -446,29 +447,18 @@ export async function resolveSubstrateHealthTick(
   // self-misunderstanding defect this guard prevents.
   const corpus_complete = !fetchInterrupted && templatesTotal !== Infinity && templates.length >= templatesTotal;
 
-  // Fetch recent traces (last 30 days) to build execution counts per template.
-  const traceLookbackSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  // Execution counts per template over the last 30 days (success/fail split). The server aggregates
+  // (lib/trace-window-counts.ts: traceAggregateReport by shape, count + success_count, a GROUP BY over the indexed
+  // window). The old offset loop asked the list route for 200 a page, the route clamps to 100, so it stopped after ONE
+  // page that had the database sort the whole window and built the pairs from its newest 100 rows. When the aggregate
+  // is unavailable the list fallback is bounded by a page and a wall-time cap; a capped read is INSUFFICIENT DATA:
+  // confidence + stability (both read these counts) ABSTAIN (null) and say why, never a verdict over a partial slice.
+  const windowCounts = await readTraceWindowCounts({ windowHours: 30 * 24, wantSuccess: true, caller: "substrate-health-tick" });
   const traceCounts = new Map<string, { success: number; fail: number }>();
-  let traceOffset = 0;
-  while (traceOffset < 5000) {
-    const r = await fetchWithRetry(
-      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
-      { headers: auth },
-    );
-    if (!r?.ok) break;
-    const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
-    const rows = page.executions ?? [];
-    if (rows.length === 0) break;
-    for (const t of rows) {
-      const id = t.activity_id ?? "unknown";
-      const entry = traceCounts.get(id) ?? { success: 0, fail: 0 };
-      if (t.success === true || t.status === "success" || t.status === "completed") entry.success++;
-      else entry.fail++;
-      traceCounts.set(id, entry);
-    }
-    traceOffset += rows.length;
-    if (rows.length < 200) break;
+  if (windowCounts.measured) {
+    for (const [id, c] of windowCounts.counts) traceCounts.set(id, { success: c.success, fail: Math.max(0, c.count - c.success) });
   }
+  const trace_counts_measured = windowCounts.measured;
 
   const variantPairs: { alpha: number; beta: number }[] = [];
   // Only include ACTIVE (non-proposed) templates in the confidence calculation.
@@ -625,7 +615,7 @@ export async function resolveSubstrateHealthTick(
   // UNMEASURED (null), never a confident pass/fail. A null dimension makes
   // overall_passing null ("couldn't measure this tick"), which resets the lift
   // streak honestly instead of falsely signalling a regression.
-  const confidence_passing = !corpus_complete
+  const confidence_passing = !corpus_complete || !trace_counts_measured
     ? null
     // null, NOT false, on a thin sample. This file already treats null as "couldn't measure this
     // tick" three lines above, and the comment there states the reason: a null dimension "makes
@@ -635,7 +625,7 @@ export async function resolveSubstrateHealthTick(
     // pessimistic direction as the current behaviour is in the optimistic one. Subsumes the old
     // total_pairs === 0 guard, since 0 < confidenceMinPairs.
     : (total_pairs < confidenceMinPairs ? null : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
-  const stability_passing = !corpus_complete
+  const stability_passing = !corpus_complete || !trace_counts_measured
     ? null
     : mutation_rate_per_hour <= stabilityRateCeiling;
   const optimality_passing =
@@ -657,7 +647,7 @@ export async function resolveSubstrateHealthTick(
   const optimality_measured = optimality.mean_optimality_ratio !== null;
   const unmeasured_dimensions: string[] = [];
   if (!optimality_measured) unmeasured_dimensions.push("optimality");
-  if (!corpus_complete) unmeasured_dimensions.push("posterior_confidence", "graph_stability");
+  if (!corpus_complete || !trace_counts_measured) unmeasured_dimensions.push("posterior_confidence", "graph_stability");
 
   const report = {
     generated_at: new Date().toISOString(),
@@ -677,6 +667,11 @@ export async function resolveSubstrateHealthTick(
       templates_fetched: template_count_at_window_end,
       templates_total: templatesTotal === Infinity ? null : templatesTotal,
     },
+    // The 30-day execution counts behind posterior_confidence and graph_stability: where they came from, or why they
+    // are insufficient data (then both dimensions abstain and overall_passing is null).
+    trace_counts: windowCounts.measured
+      ? { measured: true, source: windowCounts.source, window_hours: windowCounts.window_hours, templates_counted: traceCounts.size, pages: windowCounts.pages, elapsed_ms: windowCounts.elapsed_ms, aggregate_reason: windowCounts.aggregate_reason }
+      : { measured: false, source: windowCounts.source, window_hours: windowCounts.window_hours, reason: windowCounts.reason, pages: windowCounts.pages, elapsed_ms: windowCounts.elapsed_ms, aggregate_reason: windowCounts.aggregate_reason },
     health_verdict: {
       confidence_passing,
       stability_passing,

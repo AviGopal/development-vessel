@@ -673,7 +673,7 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   if (acts.acts.length > 0) return out("not_counted", `operator act from filing to close + 24 h: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}`);
   // UNKNOWN IS NEVER CLEAN: anything unread, unattributable or in review decides before time does.
   if (unknown.length > 0) return out("unjudged", `unread, so an operator act cannot be ruled out: ${unknown.join("; ")}`);
-  if (acts.unattributable.length > 0) return out("unjudged", `link 5 UNATTRIBUTABLE (a writer or an S-2 answer cannot be classed): ${acts.unattributable.slice(0, 3).join("; ")}`);
+  if (acts.unattributable.length > 0) return out("unjudged", `link 5 UNATTRIBUTABLE (a writer, an S-2 answer or a provenance trace's labels cannot be classed): ${acts.unattributable.slice(0, 3).join("; ")}`);
   if (acts.review.length > 0) return out("unjudged", `REVIEW: ${acts.review.slice(0, 2).join("; ")}`);
   if (honest.value === "unjudged") return out("unjudged", `link 2: ${honest.reason}`);
   for (const [n, s] of [["link 3", l3], ["link 4", l4], ["link 6", l6]] as const) if (s.state === "review") return out("unjudged", `${n}: ${s.why}`);

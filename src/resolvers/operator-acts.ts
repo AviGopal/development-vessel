@@ -504,7 +504,7 @@ export interface OperatorActsContext {
   readonly directed?: unknown;
   /** Extra provenance traces (the landing's authoring execution). */
   readonly traceIds?: readonly string[];
-  /** Oracle labels on the provenance traces. null: unreadable, so operator feedback cannot be ruled out (REVIEW). */
+  /** Oracle labels on the provenance traces. null: unreadable, so operator feedback cannot be ruled out (UNATTRIBUTABLE). */
   readonly labels?: ReadonlyArray<OracleLabelLike & { readonly execution_id?: string | null }> | null;
   readonly labelContext?: LabelClassContext | null;
   /** The key class map. null or absent: no map, so a key-principal write is unattributable. */
@@ -658,7 +658,9 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
   // oracle labels on the provenance traces (operator feedback there is an operator act)
   const traces = new Set<string>(provenanceTraceIds(row, ctx.traceIds ?? []));
   if (ctx.labels === null || ctx.labels === undefined || !ctx.labelContext) {
-    review.push("oracle labels unread: operator feedback on a provenance trace cannot be ruled out");
+    // UNATTRIBUTABLE, the PREREG/autonomy6 word for an unread input (qa parity ruling); a label that IS read and classes
+    // review stays REVIEW below.
+    unattributable.push("oracle labels unread: unattributable, operator feedback on a provenance trace cannot be ruled out");
   } else {
     for (const lab of ctx.labels) {
       if (!lab.execution_id || !traces.has(lab.execution_id)) continue;

@@ -43,7 +43,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveGapWriteEvent, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
-import { ledgerDir, readRecords } from "./attempt-ledger.js";
+import { appendRecord, ledgerDir, readRecords } from "./attempt-ledger.js";
 import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit } from "./operator-acts.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
@@ -488,7 +488,9 @@ export const journal = { read: readJournalLines };
  *                          "expired unreverted" and stays red, so its gap closes only on an observed revert.
  *
  * checked == expected is the row's exit: checked counts the items that met the row (counted / green), expected counts the
- * items in the ledger. Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
+ * items in the ledger. Each run's aggregate is APPENDED to the ledger as a selfFactAggregate record (per row, per run,
+ * keyed `<row>@<node>@<ran_at>@<planted|recheck>`), so a count rising over days is computable from the system's own
+ * store (attemptLedger kind selfFactAggregate). Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
  * planted run; only then is the row's canary reported.
  *
  * NAMED LIMITS (said in the judgements): no key class map and no oracle-label reader are served in-system, so today a
@@ -766,6 +768,8 @@ export interface JudgementDeps {
   show: (dir: string, sha: string, path: string) => string | null;
   /** Operator scope acts in the window that opened each of `sites` to the lane (read once per run), or null when unreadable. */
   scopeActs: (sites: string[], sinceIso: string) => Promise<Map<string, ScopeAct[]> | null>;
+  /** Append one run's aggregate (append-only: a repeated key is refused). */
+  persist: (key: string, record: Record<string, unknown>) => { appended: boolean };
   now: () => number;
   log: (line: string) => void;
 }
@@ -889,6 +893,7 @@ const defaultJudgementDeps: JudgementDeps = {
   },
   show: (dir, sha, path) => gitIn(dir, ["show", `${sha}:${path}`]),
   scopeActs: scopeActsFromHistory,
+  persist: (key, record) => ({ appended: appendRecord("selfFactAggregate", key, record).appended }),
   now: () => Date.now(),
   log: (line) => console.log(line),
 };
@@ -941,6 +946,18 @@ export function ledgerRegressedSettlements(deps: Pick<JudgementDeps, "ledger">):
     out.set(r.key, { key: r.key, attempt_id: String(rec["attempt_id"] ?? ""), gap_id: typeof rec["gap_id"] === "string" ? rec["gap_id"] : "", sha: shas[shas.length - 1] ?? "", at: at === null ? (typeof raw === "string" ? raw : null) : new Date(at).toISOString(), source: String(rec["source"] ?? "settle_regressed") });
   }
   return out;
+}
+/** Append one run's aggregate for a row, append-only (the key names the row, the node and the run). */
+function persistAggregate(deps: JudgementDeps, fact: string, ranAt: string, planted: boolean, aggregate: Record<string, unknown>): { key: string; appended: boolean } {
+  const key = `${fact}@${thisNode()}@${ranAt}@${planted ? "planted" : "recheck"}`;
+  try {
+    const r = deps.persist(key, { fact, node: thisNode(), ran_at: ranAt, planted, ...aggregate });
+    return { key, appended: r.appended };
+  } catch (err) {
+    noteReadError(`selfFactAggregate append for ${fact}`, err);
+    console.warn(`[self-fact] aggregate NOT persisted for ${fact} (${key}): ${String(err).slice(0, 160)}`);
+    return { key, appended: false };
+  }
 }
 const shortKey = (s: string): string => createHash("sha1").update(s).digest("hex").slice(0, 12);
 
@@ -1568,7 +1585,8 @@ const FACTS: Record<string, FactFn> = {
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
     const sinceIso = new Date(nowMs - hours * 3600_000).toISOString();
     const out: SelfFactDivergence[] = [];
-    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: out, note });
+    // An unobserved run is persisted too: a gap in the series is part of the series.
+    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate }; };
     const absent = (["attemptIntent", "landingEvent", "attemptSettlement"] as const).filter((k) => !deps.ledgerPresent(k));
     if (absent.length > 0) return unread(`landing ledger file(s) absent: ${absent.join(", ")} (unknown is never an empty ledger)`);
     let landings: RepairLanding[];
@@ -1637,11 +1655,12 @@ const FACTS: Record<string, FactFn> = {
       deps.log(judgementLine(j));
     }
     const n = (v: RepairVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate: Record<string, unknown> = { checked: n("counted"), expected: landings.length, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
+    const aggregate: Record<string, unknown> = { observed: true, checked: n("counted"), expected: landings.length, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
     if (n("unjudged") > 0) {
       const which = judgements.filter((j) => j.verdict === "unjudged");
       out.push({ fact, key: "unjudged-landings", source: "landing ledger (lane landings in the window)", copy: "repair_autonomy judgements", detail: `${which.length} of ${landings.length} ledger landing(s) over ${hours}h could not be judged, so checked == expected cannot be read for them: ${which.slice(0, 4).map((j) => `${j.gap_id.slice(0, 60)} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
     }
+    aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate);
     let controls: RepairJudgement[] = [];
     if (canary) {
       const mf = judgeRepairClosure(repairControlInputs(nowMs, true));
@@ -1669,7 +1688,7 @@ const FACTS: Record<string, FactFn> = {
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
     const windowStart = nowMs - hours * 3600_000;
     const out: SelfFactDivergence[] = [];
-    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: out, note });
+    const unread = (note: string): SelfFactResult => { const aggregate: Record<string, unknown> = { observed: false, note, window_hours: hours }; aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate); return { fact, source_read: false, copies_read: 0, divergences: out, note, aggregate }; };
     if (!deps.ledgerPresent("attemptSettlement")) return unread("landing ledger file absent: attemptSettlement (unknown is never an empty ledger)");
     let all: Map<string, RegressedSettlement>;
     let marks: LedgerRow[];
@@ -1718,11 +1737,12 @@ const FACTS: Record<string, FactFn> = {
       }
     }
     const n = (v: LaneRevertVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate: Record<string, unknown> = { checked: judgements.filter((j) => j.verdict === "green" && !(j.carried && !inWindow.some((s) => s.key === j.settlement_id))).length, expected, green: n("green"), red: n("red"), pending: n("pending"), unjudged: n("unjudged"), carried: carriedKeys.size, window_hours: hours };
+    const aggregate: Record<string, unknown> = { observed: true, checked: judgements.filter((j) => j.verdict === "green" && !(j.carried && !inWindow.some((s) => s.key === j.settlement_id))).length, expected, green: n("green"), red: n("red"), pending: n("pending"), unjudged: n("unjudged"), carried: carriedKeys.size, window_hours: hours };
     const fresh = judgements.filter((j) => j.verdict === "unjudged" && !j.carried);
     if (fresh.length > 0) {
       out.push({ fact, key: "unjudged-settlements", source: "landing ledger (regressed settlements in the window)", copy: "vessel clones", detail: `${fresh.length} regressed settlement(s) could not be judged: ${fresh.slice(0, 4).map((j) => `${j.settlement_id} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
     }
+    aggregate["persisted"] = persistAggregate(deps, fact, new Date(nowMs).toISOString(), canary, aggregate);
     let controls: LaneRevertJudgement[] = [];
     if (canary) {
       const cs = laneRevertControls(nowMs);

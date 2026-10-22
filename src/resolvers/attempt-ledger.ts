@@ -3,10 +3,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ResolverResult } from './types.js';
 
+// selfFactAggregate: one record per self-fact row per run (self-fact-reconcile repair_autonomy / lane_revert_within_1h),
+// keyed `<row>@<node>@<ran_at>@<planted|recheck>`: the run's checked / expected aggregate, appended so a count rising over
+// days (REALIGNMENT §14 #3) is computable from the system's own store. Append-only like every kind here.
 // attemptRevert: the auto-revert's once-per-landing marker (gap-to-feature autoRevertRegressedLandings), one
 // record per status transition, keyed `<reverted attempt id>#revert:<seq>:<status>` (appendRecord refuses a
 // repeated key, so a transition is a new key, never a rewrite); the reader takes the latest by file order.
-export type LedgerKind = "attemptIntent" | "stateSnapshot" | "attemptOutcome" | "attemptSettlement" | "landingEvent" | "attemptRevert";
+export type LedgerKind = "attemptIntent" | "stateSnapshot" | "attemptOutcome" | "attemptSettlement" | "landingEvent" | "attemptRevert" | "selfFactAggregate";
 
 export function ledgerDir(): string {
   if (process.env.ATTEMPT_LEDGER_DIR) return process.env.ATTEMPT_LEDGER_DIR;
@@ -22,6 +25,7 @@ const VALID_LEDGER_KINDS: ReadonlySet<string> = new Set<LedgerKind>([
   "attemptSettlement",
   "landingEvent",
   "attemptRevert",
+  "selfFactAggregate",
 ]);
 
 type LedgerRecord = {

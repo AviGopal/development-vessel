@@ -3716,7 +3716,14 @@ export function renderConceptPriors(selected: ReadonlyArray<ConceptPrior>): stri
   const rows = selected.filter((c) => CONCEPT_ID_RE.test(c.id) && c.content.trim().length > 0).slice(0, CONCEPT_PRIOR_MAX);
   if (rows.length === 0) return "";
   const line = (c: ConceptPrior) => `- [${c.id}] (source_type: ${String(c.source_type).replace(/[^\w.-]/g, "").slice(0, 40) || "unknown"})${c.name ? ` ${c.name.replace(/\s+/g, " ").trim().slice(0, 120)}:` : ""} ${c.content.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_CHARS)}`;
-  return `\nCONCEPT PRIORS (selected for this change by the substrate's concept graph, concept_select_for_prompt; each is cited by its [id]):\n${rows.map(line).join("\n")}\n`;
+  return `\nCONCEPT PRIORS (selected for this change by the substrate's concept graph, concept_select_for_prompt; each is cited by its [id]):\n${rows.map(line).join("\n")}\nIf your plan applies any of these priors, add a top-level "applied_ids" array to the JSON object naming the id of each prior the plan actually follows (an id not shown above is ignored; omit the field when none applies). The attempt's outcome is credited to exactly those priors.\n`;
+}
+/** The concept ids a plan says it applied, kept only when they were rendered to it: an unknown or invented id is dropped. */
+export function appliedConceptIds(plan: Record<string, unknown> | null, rendered: ReadonlyArray<string>): { applied: string[]; dropped: string[] } {
+  const raw = plan?.["applied_ids"];
+  const cited = (Array.isArray(raw) ? raw : []).filter((x): x is string => typeof x === "string").map((s) => s.trim().replace(/^\[|\]$/g, "")).filter((s) => s.length > 0);
+  const shown = new Set(rendered);
+  return { applied: [...new Set(cited.filter((id) => shown.has(id)))], dropped: [...new Set(cited.filter((id) => !shown.has(id)))].slice(0, 20) };
 }
 /** Ask concept_select_for_prompt for the priors of this change. `block` is "" and `ids` empty when it fails open. */
 export async function conceptPriorsBlock(spec: string, editSite: string | null): Promise<{ block: string; ids: string[]; why?: string }> {
@@ -5567,6 +5574,52 @@ async function ownConceptDbResolveUrl(shape: string): Promise<{ url: string; why
   } catch (err) {
     return { url: null, why: `${shape} lookup failed: ${(err as Error).message}` };
   }
+}
+// THE ATTEMPT OUTCOME GRADES THE PRIORS THE DRAFTER APPLIED (law 7, law 12). Crediting every LOADED prior carries no
+// attribution: the same rows load for most composes, so a prior whose cause is wrong reads as confidently as one whose
+// cause is right. The plan names the rendered priors it applied (appliedConceptIds), and once the compose's own
+// verdict is known each of exactly those ids is credited through the existing concept_usage_record shape, routed by
+// shape to this substrate's own producer, keyed to this compose's trace. A prior that was shown but not applied is not
+// credited either way.
+/** The outcome an attempt credits to the priors it applied: success only for a verified landing, failure only for a
+ *  draft the checks judged (failure_kind "fix"). null (not credited) for an unlanded or dissented pass, an environment
+ *  non-attempt, a terminal refusal or a deferred landing: what those say about the draft is not yet known. */
+export function conceptCreditOutcome(input: { verdict: string; landed: boolean; dissent: boolean; failureKind: string | null }): "success" | "failure" | null {
+  if (input.verdict === "FAVORABLE") return input.landed && !input.dissent ? "success" : null;
+  return input.failureKind === "fix" ? "failure" : null;
+}
+export type ConceptCredit = { concept_id: string; outcome: "success" | "failure"; recorded: boolean; detail: string };
+type ConceptUsageResolve = (pointer: { type: "concept_usage_record"; concept_id: string; trace_id: string; outcome: "success" | "failure" }) => Promise<{ shape: string; body: Record<string, unknown> }>;
+/** concept_usage_record through this substrate's own producer (the same discovery read as the lesson recall). */
+async function resolveConceptUsageByShape(pointer: Parameters<ConceptUsageResolve>[0]): Promise<{ shape: string; body: Record<string, unknown> }> {
+  const target = await ownConceptDbResolveUrl("concept_usage_record");
+  if (!target.url) throw new Error(`skipped (${target.why})`);
+  const res = await fetch(target.url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+    body: JSON.stringify({ impulse: { pointer } }),
+    signal: AbortSignal.timeout(8_000),
+  });
+  const j = (await res.json().catch(() => ({}))) as { shape?: unknown; body?: unknown; content?: unknown; error?: unknown };
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${JSON.stringify(j.error ?? j.body ?? "").slice(0, 200)}`);
+  return { shape: String(j.shape ?? ""), body: ((j.body ?? j.content ?? {}) as Record<string, unknown>) };
+}
+/** Credit `outcome` to each applied prior; every result is journalled, a refused or failed credit included. */
+export async function creditAppliedConcepts(ids: ReadonlyArray<string>, outcome: "success" | "failure", traceId: string, resolve: ConceptUsageResolve = resolveConceptUsageByShape): Promise<ConceptCredit[]> {
+  return Promise.all(ids.map(async (id): Promise<ConceptCredit> => {
+    try {
+      const r = await resolve({ type: "concept_usage_record", concept_id: id, trace_id: traceId, outcome });
+      const recorded = r.shape === "conceptUsageRecorded" && r.body["skipped"] !== true && r.body["recorded"] !== false;
+      const detail = recorded ? "" : `${r.shape || "no shape"}: ${JSON.stringify(r.body).slice(0, 200)}`;
+      if (recorded) console.log(`[fc-concepts] credit concept=${id} outcome=${outcome} recorded`);
+      else console.warn(`[fc-concepts] credit concept=${id} outcome=${outcome} NOT recorded: ${detail}`);
+      return { concept_id: id, outcome, recorded, detail };
+    } catch (err) {
+      const detail = (err as Error)?.message ?? String(err);
+      console.warn(`[fc-concepts] credit concept=${id} outcome=${outcome} NOT recorded: ${detail}`);
+      return { concept_id: id, outcome, recorded: false, detail };
+    }
+  }));
 }
 const COMPOSE_FILE_LESSONS_PATH = "/workspace/proposals/compose-file-lessons.jsonl";
 async function fileLessonsBlock(specText?: string, capture?: string[]): Promise<string> {
@@ -7719,6 +7772,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const refused = await unsafeOpPathRefusal(plan, ops);
     if (refused) return refused;
   }
+  // The priors this plan says it applied, against the ids the prompt it answered actually showed.
+  const conceptsApplied = appliedConceptIds(plan, conceptPriors.ids.filter((id) => principles.includes(`[${id}]`)));
+  if (conceptsApplied.applied.length > 0 || conceptsApplied.dropped.length > 0) console.log(`[fc-concepts] plan applied: [${conceptsApplied.applied.join(", ")}]${conceptsApplied.dropped.length > 0 ? `; dropped, not shown to it: [${conceptsApplied.dropped.join(", ")}]` : ""}`);
   // DIAGNOSTIC (localizer): the decompose plan is otherwise unlogged, so a mis-localized
   // edit (e.g. onto a dead top-level function) is invisible. Log, per op, the target path
   // and the old_string prefix, plus whether the GROUNDING the drafter saw even contained
@@ -10741,6 +10797,8 @@ const earlyAttempt = await Promise.race([
           // empty so "no conflicts" is a readable fact rather than an absent key — the whole
           // failure this replaces was invisible precisely because nothing recorded it.
           rollback_conflicts: rollbackConflicts.map((f) => f.replace(`${REPO_ROOT}/`, "")),
+          // The rendered concept priors the plan says it applied (appliedConceptIds): the ids its outcome is credited to.
+          applied_concept_ids: conceptsApplied.applied,
           // OBSERVE: no reach verdict (nothing can land), so the executions route's posterior update reads it as ungraded.
           ...(composeObserveActive() ? { learning_mode: "observe" } : { reached: verdict === "FAVORABLE" && landedVessels.length > 0 }), landed_vessels: landedVessels.filter((v) => v.length > 0),
           cutover_refusals: (cutovers as Array<Record<string, unknown>>)
@@ -10801,6 +10859,17 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
   // The same definition as the flip above (CHANGE-30a); with that flip in place this changes nothing, but a later
   // reassignment of `verdict` cannot reintroduce a deferral read as a refusal.
   const effectiveVerdict = pointer.land && cutovers.length > 0 ? landingVerdictFromCutovers(verdict, cutovers.map((c: unknown) => ((c as Record<string, unknown>)?.result))) : verdict;
+  const composeFailure = composeFailureKind({ verdict: effectiveVerdict, terminal_refusal: terminalRefusal, cutover_env_class: classifyEnvironmentFailure(cutovers), verify, semantic_judge_unavailable: semanticGateInfraRefusal(semantic_gate) });
+  // THE OUTCOME GRADES WHAT WAS APPLIED (conceptCreditOutcome): exactly the cited, rendered priors, once, keyed to this
+  // compose's trace.
+  let conceptCredits: ConceptCredit[] = [];
+  if (conceptsApplied.applied.length > 0 && !composeObserveSkip("concept_usage_credit")) {
+    const conceptOutcome = conceptCreditOutcome({ verdict: effectiveVerdict, landed: anyCutoverPushed, dissent: semanticDissent !== null, failureKind: composeFailure });
+    const creditTrace = emittedExecutionId ?? (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null;
+    if (!conceptOutcome) console.log(`[fc-concepts] credit applied [${conceptsApplied.applied.join(", ")}] not credited: the outcome is not known yet (verdict=${effectiveVerdict} landed=${anyCutoverPushed} dissent=${semanticDissent !== null} failure_kind=${composeFailure ?? "none"})`);
+    else if (!creditTrace) console.warn(`[fc-concepts] credit applied [${conceptsApplied.applied.join(", ")}] NOT credited (${conceptOutcome}): no trace id to key the usage record to`);
+    else conceptCredits = await creditAppliedConcepts(conceptsApplied.applied, conceptOutcome, creditTrace);
+  }
   return {
     shape: "featureComposeReport",
     body: {
@@ -10814,7 +10883,8 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,
-      failure_kind: composeFailureKind({ verdict: effectiveVerdict, terminal_refusal: terminalRefusal, cutover_env_class: classifyEnvironmentFailure(cutovers), verify, semantic_judge_unavailable: semanticGateInfraRefusal(semantic_gate) }),
+      failure_kind: composeFailure,
+      ...(conceptsApplied.applied.length > 0 ? { applied_concept_ids: conceptsApplied.applied, concept_credits: conceptCredits } : {}),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

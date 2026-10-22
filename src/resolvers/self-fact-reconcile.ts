@@ -504,8 +504,9 @@ export const journal = { read: readJournalLines };
  * falling or insufficient_data over 7 days; a falling share files a divergence). Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
  * planted run; only then is the row's canary reported.
  *
- * NAMED LIMITS (said in the judgements): no key class map and no oracle-label reader are served in-system, so today a
- * key-principal write reads unattributable and every closure reads REVIEW (unjudged) on labels; a write forwarded by a
+ * NAMED LIMITS (said in the judgements): no key class map is served in-system, and the oracle labels (read through
+ * readOracleLabels) have no served class context, so today a key-principal write reads unattributable and a closure
+ * with a label on any provenance trace reads REVIEW (unjudged); a write forwarded by a
  * peer is decided only by the forwarding node's own events, which this node does not read; the expected-value-not-
  * derivable subclass of link 2 has no reader here; a scope act is dated by its super-repo commit, earlier than any apply.
  */
@@ -845,6 +846,48 @@ async function scopeActsFromHistory(sites: string[]): Promise<Map<string, ScopeA
   return out;
 }
 type AutonomyScopeLike = { readable: true; reason: string; excluded: string[]; exceptions: string[] };
+/**
+ * THE ORACLE LABELS ON A CLOSURE'S PROVENANCE TRACES, read through the shape their store serves (activity-api
+ * goal_verification_label), routed by discovery to this substrate's own producers at use time, one equality read per
+ * trace id. Strict, as every reader here: no producer, a read that fails, a page that reaches the read's cap (some may
+ * be missing), or a trace whose labels come from more than one org (the read is not org-scoped for an ApiKey caller,
+ * and nothing served tells this vessel its own org, so the labels of one execution must at least agree on theirs)
+ * returns null, which the reader reads as REVIEW. A trace with no label reads none.
+ * The label rule's context is NOT served (fixLiveAt, forwardingKeys, nodeSelfAdminKeys and the key class map have no
+ * producer), so it carries none: classifyOracleLabel then reads every label review, and only a closure whose traces
+ * carry no label at all is judged on labels. Exported, with its transport injectable, for tests.
+ */
+export const ORACLE_LABEL_SHAPE = "goal_verification_label";
+const ORACLE_LABEL_PAGE = 100;
+export interface OracleLabelIo { urls: () => Promise<string[] | null>; post: (url: string, body: unknown) => Promise<Record<string, unknown> | null> }
+const defaultOracleLabelIo: OracleLabelIo = {
+  urls: async () => { const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js"); const d = await discoverOwnResolveUrls(ORACLE_LABEL_SHAPE); return d.ok && d.urls.length > 0 ? d.urls : null; },
+  post: async (url, body) => (await import("../judge/gap-policy.js")).postEnvelopeRead(url, body),
+};
+let oracleLabelIo: OracleLabelIo = defaultOracleLabelIo;
+/** Tests only: replace the label reader's transport (null restores discovery + the envelope read). */
+export function __setOracleLabelIoForTests(io: OracleLabelIo | null): void { oracleLabelIo = io ?? defaultOracleLabelIo; }
+export async function readOracleLabels(traceIds: string[], io: OracleLabelIo = defaultOracleLabelIo): Promise<{ labels: Array<OracleLabelLike & { execution_id?: string | null }>; context: LabelClassContext } | null> {
+  const context: LabelClassContext = { fixLiveAt: "", keymap: [], forwardingKeys: [], nodeSelfAdminKeys: [] };
+  const ids = [...new Set(traceIds.filter((x) => typeof x === "string" && x.length > 0))].sort();
+  if (ids.length === 0) return { labels: [], context };
+  const urls = await io.urls();
+  if (!urls) return null;
+  const labels: Array<OracleLabelLike & { execution_id?: string | null }> = [];
+  for (const id of ids) {
+    let rows: Array<Record<string, unknown>> | null = null;
+    for (const url of urls) {
+      const r = await io.post(url, { impulse: { pointer: { type: ORACLE_LABEL_SHAPE, execution_id: id, limit: ORACLE_LABEL_PAGE } } });
+      if (!r || r["success"] !== true || typeof r["content"] !== "string") continue;
+      try { const v: unknown = JSON.parse(r["content"]); if (Array.isArray(v)) { rows = v as Array<Record<string, unknown>>; break; } } catch { /* the next producer */ }
+    }
+    if (rows === null || rows.length >= ORACLE_LABEL_PAGE) return null;
+    const mine = rows.filter((l) => l && typeof l === "object" && l["execution_id"] === id);
+    if (new Set(mine.map((l) => String(l["org_id"] ?? ""))).size > 1) return null;
+    labels.push(...mine.map((l) => ({ execution_id: id, labeler: (l["labeler"] as string | undefined) ?? null, source: (l["source"] as string | undefined) ?? null, created_at: (l["created_at"] as string | undefined) ?? null, principal_kind: (l["principal_kind"] as string | undefined) ?? null, principal_key_id: (l["principal_key_id"] as string | undefined) ?? null })));
+  }
+  return { labels, context };
+}
 const defaultJudgementDeps: JudgementDeps = {
   ledger: (kind) => readRecords(kind).map((r) => ({ key: r.key, at: r.at, record: r.record as Record<string, unknown> })),
   ledgerPresent: (kind) => existsSync(join(ledgerDir(), `${kind}.jsonl`)),
@@ -874,7 +917,7 @@ const defaultJudgementDeps: JudgementDeps = {
     return r.shape === "gapWriteEvent" && Array.isArray(b?.events) ? { events: b!.events as GapWriteEventLike[], matched: Number(b!.matched ?? (b!.events as unknown[]).length) } : null;
   },
   keymap: async () => null,
-  labels: async () => null,
+  labels: (traceIds) => readOracleLabels(traceIds, oracleLabelIo),
   locate: (sha) => {
     if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
     let names: string[] = [];

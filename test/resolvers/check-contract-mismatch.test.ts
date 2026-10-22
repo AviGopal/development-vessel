@@ -409,3 +409,102 @@ describe("LIVE: the test_writing verify refuses an expectation nothing the check
     expect(j).toMatchObject({ ok: true, stage: null });
   });
 });
+
+// A PROPERTY READ ON A RETURN THAT IS NOT AN OBJECT IS REFUSED BEFORE IT LANDS (2026-10-22).
+//
+// goal-host 725638cc landed a goal-target inference check that reads `.shapes` off what inferGoalTargetShapes
+// returns: `expect(Array.isArray(decision?.shapes) ? decision!.shapes : []).toContain("shellResult")`. The function is
+// declared `Promise<string[]>` (its sibling inferGoalTargetDecision returns the object with `shapes`), so the read is
+// undefined on every tree, the subject is [] whatever the fix, and the check is red forever: an assertion red, so it
+// passed the verify. The rule (`check_asserts_contract_mismatch:property.<X>`) reads every named property the failing
+// assertion's subject reads (through the locals it is computed from) off a called export's result, and refuses one the
+// function's DECLARED return type can never have (arrays, primitives, null / undefined, and unions of those; a
+// Promise<T> read as T when awaited), else the return walk's kinds when they hold no object.
+//
+// FIXTURES: 725638cc's check verbatim, goal-target-inference.ts as it was at 725638cc, and a control reading `.shapes`
+// off inferGoalTargetDecision (an object return; red today too); *-run-bun142.txt are bun 1.4.2 runs of them (paths
+// rewritten to /tmp/fx). The fixture vessel stubs the module's eight imports.
+const GTI_REL = "src/goal-target-inference.ts";
+const GTI_SRC = fixture("goal-target-inference.at-725638cc.ts.txt");
+const GTI_TREE = readerOf({ [GTI_REL]: GTI_SRC });
+const CHECK_725 = fixture("725638cc-goal-target-inference.check.ts.txt");
+const CHECK_OBJECT_READ = fixture("object-return-read.check.ts.txt");
+const REL_725 = "test/checks/725638cc-goal-target-inference.check.ts";
+const REL_OBJECT_READ = "test/checks/object-return-read.check.ts";
+const RUN_725 = "725638cc-run-bun142.txt";
+const RUN_OBJECT_READ = "object-return-read-run-bun142.txt";
+
+describe("contractMismatchRefusal: a property read on a return that is not an object", () => {
+  test("[FIXTURE] 725638cc's red is its own toContain(), Received []", () => {
+    const c = classify(fixture(RUN_725));
+    expect(c.compared?.[0]).toMatchObject({ file: `/tmp/fx/${REL_725}`, line: 23, received: "[]" });
+  });
+
+  test("[MUST-FAIL] 725638cc's check is refused: .shapes off a function declared Promise<string[]>", () => {
+    expect(typeof refusal).toBe("function");
+    const r = refusal!(CHECK_725, REL_725, classify(fixture(RUN_725)), GTI_TREE);
+    expect(r).toMatchObject({ module: GTI_REL, fn: "inferGoalTargetShapes", reads: "property.shapes" });
+    expect(r!.reason).toContain("check_asserts_contract_mismatch:property.shapes");
+    expect(r!.reason).toContain("declared Promise<string[]>");
+  });
+
+  test("[CONTROL] the same read off inferGoalTargetDecision (an object return) is not refused", () => {
+    expect(typeof refusal).toBe("function");
+    expect(refusal!(CHECK_OBJECT_READ, REL_OBJECT_READ, classify(fixture(RUN_OBJECT_READ)), GTI_TREE)).toBeNull();
+  });
+
+  test("[CONTROL] an array member, an un-awaited Promise, or an undeclared open return decides nothing", () => {
+    expect(typeof refusal).toBe("function");
+    const run = classify(fixture(RUN_725));
+    const edit = (from: string, to: string, src = CHECK_725): string => { expect(src).toContain(from); return src.replace(from, to); };
+    // a real member of the declared array kind
+    expect(refusal!(edit("Array.isArray(decision?.shapes) ? decision!.shapes : []", "decision.length > 0 ? decision : []"), REL_725, run, GTI_TREE)).toBeNull();
+    // the call's Promise itself (not awaited): then is a real member
+    expect(refusal!(edit("const decision = await mod.inferGoalTargetShapes(goal, knownShapes);", "const decision = mod.inferGoalTargetShapes(goal, knownShapes);"), REL_725, run, GTI_TREE)).toBeNull();
+    // no declared return type and a return walk that cannot close: decides nothing
+    const undeclared = GTI_SRC.replace("  opts: InferGoalTargetShapesOpts = {},\n): Promise<string[]> {", "  opts: InferGoalTargetShapesOpts = {},\n) {");
+    expect(undeclared).not.toBe(GTI_SRC);
+    expect(refusal!(CHECK_725, REL_725, run, readerOf({ [GTI_REL]: undeclared }))).toBeNull();
+  });
+
+  test("[MUST-FAIL] the read moved into a local the subject is computed from is still refused", () => {
+    expect(typeof refusal).toBe("function");
+    const run = classify(fixture(RUN_725));
+    const edit = (from: string, to: string, src = CHECK_725): string => { expect(src).toContain(from); return src.replace(from, to); };
+    const viaLocal = edit("    expect(Array.isArray(decision?.shapes) ? decision!.shapes : []).toContain(\"shellResult\");", "    const shapes = Array.isArray(decision?.shapes) ? decision!.shapes : []; expect(shapes).toContain(\"shellResult\");");
+    expect(refusal!(viaLocal, REL_725, run, GTI_TREE)).toMatchObject({ reads: "property.shapes" });
+  });
+});
+
+describe("LIVE: the test_writing verify refuses a property read on a return that is not an object", () => {
+  const GTI_STUBS: Record<string, string> = {
+    "src/registry-field.ts": "export function registryFieldFor(..._a: unknown[]): null { return null; }\nexport function registryRatioFor(..._a: unknown[]): null { return null; }\n",
+    "src/verbatim-read.ts": "export function verbatimReadTarget(..._a: unknown[]): null { return null; }\n",
+    "src/judge/shapes.ts": "export function isMutationShape(_s: string): boolean { return false; }\n",
+    "src/read-goal.ts": "export function goalDemandsArtifact(_g: string): boolean { return false; }\nexport function isReadQuestionGoal(_g: string): boolean { return false; }\n",
+    "src/shape-name.ts": "export function isShapeName(_s: string): boolean { return false; }\n",
+    "src/beta-sample.ts": "export function betaSample(a: number, b: number): number { return a / (a + b); }\n",
+    "src/described-producers.ts": "export type Candidate = unknown; export type ChooserTier = unknown; export type ShapeCatalog = unknown;\nexport function describedCandidatesBlock(..._a: unknown[]): string { return \"\"; }\nexport function lexicalChoice(..._a: unknown[]): null { return null; }\nexport function validity(..._a: unknown[]): null { return null; }\n",
+    "src/novel-target.ts": "export type NovelTarget = unknown; export const NOVEL_OPTION = \"__novel__\"; export const RESIDUAL_OPTION = \"__residual__\";\nexport function parseNovel(..._a: unknown[]): null { return null; }\nexport function parseResidual(..._a: unknown[]): null { return null; }\n",
+  };
+  const verdictOf = async (gapId: string, check: string): Promise<Judgement> => {
+    const root = mkdtempSync(join(tmpdir(), "contract-mismatch-property-"));
+    for (const [rel, text] of Object.entries({ [GTI_REL]: GTI_SRC, ...GTI_STUBS, [`test/checks/${checkFile(gapId)}`]: check })) {
+      mkdirSync(join(root, rel, ".."), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return judge({ gapId, vesselRoot: root, editSite: null, run: runner(root), runs: 3 });
+  };
+
+  test("[MUST-FAIL] 725638cc's check is refused at the verify: check_asserts_contract_mismatch:property.shapes", async () => {
+    const j = await verdictOf("contract-mismatch-property-on-array", CHECK_725);
+    expect(j.ok).toBe(false);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("check_asserts_contract_mismatch:property.shapes");
+  });
+
+  test("[CONTROL] the object-return read passes the verify", async () => {
+    const j = await verdictOf("contract-mismatch-property-on-object", CHECK_OBJECT_READ);
+    expect(j).toMatchObject({ ok: true, stage: null });
+  });
+});

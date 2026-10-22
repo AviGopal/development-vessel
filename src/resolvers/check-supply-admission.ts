@@ -797,6 +797,16 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
  *     numbers inside strings included) or in the called module: no code path can produce the value from them.
  * Known limit (accepted): a function that COMPUTES a composite sharing no datum with its mocked inputs (a normalised
  * vector, say), or a check whose mocks compute their data, is refused.
+ * A PROPERTY READ ON A RETURN THAT IS NOT AN OBJECT (725638cc, a goal-target inference check: it reads `.shapes` off
+ * a function declared `Promise<string[]>`, whose sibling returns the object with `shapes`; the read is undefined on every
+ * tree, so its subject is [] whatever the fix). Last, it refuses `check_asserts_contract_mismatch:property.<X>` when the
+ * failing assertion's subject (and the locals it is computed from, a bounded walk) reads a named property X off the
+ * result of a call to a src export, found as above, and X is no member of any kind that result can be: the kinds of the
+ * function's DECLARED return type (arrays and tuples, string / number / boolean, null / undefined / void, literals and
+ * unions of those; Promise<T> read as T, and only when the call is awaited), or, with no declared type, the return
+ * walk's kinds when they are closed and hold no object. A declared object type, an interface or alias, any or unknown,
+ * and an un-awaited Promise decide nothing. Known limit (accepted): a gap whose fix changes the return to an object
+ * writes exactly this check, and it is refused.
  * Applied where missingExportRefusal is: at the verify of a test_writing compose (so a refused check never lands) and at
  * the arm step. null = no refusal.
  */
@@ -869,6 +879,61 @@ function returnedContract(ts: TsModule, sf: TS.SourceFile, fnName: string): Retu
   for (const r of returnsOf(root)) value(r);
   return { shapes: shapesOpen ? null : shapes, bodyKeys: bodyOpen ? null : bodyKeys, kinds: kindsOpen ? null : kinds };
 }
+/** The function or arrow `fnName` declares at the top of its module, or null. */
+function topLevelFunction(ts: TsModule, sf: TS.SourceFile, fnName: string): TS.FunctionLikeDeclaration | null {
+  for (const s of sf.statements) {
+    if (ts.isFunctionDeclaration(s) && s.name?.text === fnName && s.body) return s;
+    if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && d.name.text === fnName && d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) return d.initializer;
+  }
+  return null;
+}
+/** Whether calling `fnName` yields a Promise (it is async, or declares a Promise return). */
+function returnsPromise(ts: TsModule, sf: TS.SourceFile, fnName: string): boolean {
+  const fn = topLevelFunction(ts, sf, fnName);
+  if (!fn) return false;
+  if ((ts.canHaveModifiers(fn) ? ts.getModifiers(fn) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return true;
+  return !!fn.type && ts.isTypeReferenceNode(fn.type) && ts.isIdentifier(fn.type.typeName) && /^Promise(?:Like)?$/.test(fn.type.typeName.text);
+}
+/**
+ * The kinds of value `fnName`'s DECLARED return type allows (a Promise<T> read as T, `promise` set), when none of them
+ * is an object: arrays and tuples, string / number / boolean, void / undefined / null and their literals, and unions of
+ * those. null when no return type is declared or it allows an object (an object type, an interface or alias, any,
+ * unknown), which decides nothing.
+ */
+function declaredReturnKinds(ts: TsModule, sf: TS.SourceFile, fnName: string): { kinds: Set<ValueKind>; text: string; promise: boolean } | null {
+  const fn = topLevelFunction(ts, sf, fnName);
+  if (!fn?.type) return null;
+  const kinds = new Set<ValueKind>();
+  let promise = false;
+  const visit = (t: TS.TypeNode, top: boolean): boolean => {
+    if (ts.isParenthesizedTypeNode(t)) return visit(t.type, top);
+    if (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName)) {
+      const n = t.typeName.text;
+      if (top && (n === "Promise" || n === "PromiseLike") && t.typeArguments?.length === 1) { promise = true; return visit(t.typeArguments[0]!, false); }
+      if (n === "Array" || n === "ReadonlyArray") { kinds.add("array"); return true; }
+      return false;
+    }
+    if (ts.isArrayTypeNode(t) || ts.isTupleTypeNode(t)) { kinds.add("array"); return true; }
+    if (ts.isTypeOperatorNode(t) && t.operator === ts.SyntaxKind.ReadonlyKeyword) return visit(t.type, false);
+    if (ts.isUnionTypeNode(t)) return t.types.every((u) => visit(u, false));
+    if (ts.isLiteralTypeNode(t)) {
+      const l = t.literal;
+      if (l.kind === ts.SyntaxKind.NullKeyword) kinds.add("null");
+      else if (ts.isStringLiteral(l) || ts.isNoSubstitutionTemplateLiteral(l)) kinds.add("string");
+      else if (ts.isNumericLiteral(l) || ts.isPrefixUnaryExpression(l)) kinds.add("number");
+      else if (l.kind === ts.SyntaxKind.TrueKeyword || l.kind === ts.SyntaxKind.FalseKeyword) kinds.add("boolean");
+      else return false;
+      return true;
+    }
+    const k: ValueKind | null = t.kind === ts.SyntaxKind.StringKeyword ? "string" : t.kind === ts.SyntaxKind.NumberKeyword ? "number" : t.kind === ts.SyntaxKind.BooleanKeyword ? "boolean" : t.kind === ts.SyntaxKind.VoidKeyword || t.kind === ts.SyntaxKind.UndefinedKeyword ? "undefined" : t.kind === ts.SyntaxKind.NullKeyword ? "null" : null;
+    if (k) kinds.add(k);
+    return k !== null;
+  };
+  return visit(fn.type, true) && kinds.size > 0 ? { kinds, text: fn.type.getText(sf), promise } : null;
+}
+/** The named properties a value of each kind has (its prototype chain's own names); an object's are open. */
+const protoNames = (p: object): Set<string> => new Set([...Object.getOwnPropertyNames(p), ...Object.getOwnPropertyNames(Object.prototype)]);
+const VALUE_MEMBERS: Record<ValueKind, Set<string>> = { array: protoNames(Array.prototype), string: protoNames(String.prototype), number: protoNames(Number.prototype), boolean: protoNames(Boolean.prototype), null: new Set(), undefined: new Set(), object: new Set() };
 export function contractMismatchRefusal(source: string, checkRel: string, redReason: unknown, reader: SrcReader): { test: string; module: string; fn: string; reads: string; reason: string } | null {
   const compared = (redReason as { compared?: unknown } | null | undefined)?.compared;
   if (!Array.isArray(compared) || compared.length === 0) return null;
@@ -1099,6 +1164,44 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     const test = String(c["name"] ?? "");
     const shown = leaves.slice(0, 6).map((l) => JSON.stringify(l)).join(", ") + (leaves.length > 6 ? ", …" : "");
     return { test, module: called.mod.rel, fn: called.fn, reads: "expected_not_derivable", reason: `${CONTRACT_MISMATCH_STAGE}:expected_not_derivable: the failing assertion of "${test.slice(0, 120)}" (line ${c["line"]}) expects from ${called.fn} in ${called.mod.rel} a value none of whose ${leaves.length} datum${leaves.length === 1 ? "" : "s"} (${shown}) appears in what the check supplies (its mocks, fixtures and arguments) or in ${called.mod.rel}: the check stands in for the dependencies, so no code path can produce that value from them, and the check is red on every tree, not for the defect` };
+  }
+  // A PROPERTY READ ON A VALUE THAT IS NOT AN OBJECT (the third pass, after every rule above): a named property the
+  // called function's return can never have (its declared return type, else the return walk) reads undefined on
+  // every tree.
+  for (const c of compared as Array<Record<string, unknown>>) {
+    const at = placed(c);
+    if (!at) continue;
+    // Every named property read in the subject, and in the locals it is computed from (bounded), with its base.
+    const propReads: Array<{ name: string; base: TS.Expression }> = [];
+    const followed = new Set<string>();
+    const walk = (n: TS.Node, depth: number): void => {
+      if (ts.isPropertyAccessExpression(n)) propReads.push({ name: n.name.text, base: n.expression });
+      else if (ts.isElementAccessExpression(n) && (ts.isStringLiteral(n.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(n.argumentExpression))) propReads.push({ name: n.argumentExpression.text, base: n.expression });
+      else if (ts.isIdentifier(n) && depth < 3 && !followed.has(n.text) && !(n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
+        const d = initOf(n, n.text);
+        if (d && !calledExport(d)) { followed.add(n.text); walk(d, depth + 1); }
+      }
+      ts.forEachChild(n, (k) => walk(k, depth));
+    };
+    walk(at.subject, 0);
+    for (const r of propReads) {
+      const b = unwrap(r.base);
+      const init = ts.isIdentifier(b) ? initOf(b, b.text) : r.base;
+      const called = calledExport(init);
+      if (!called || !init) continue;
+      // An un-awaited call of an async function is its Promise, whose then / catch / finally are real.
+      let w: TS.Expression = init;
+      while (ts.isParenthesizedExpression(w) || ts.isAsExpression(w) || ts.isNonNullExpression(w) || ts.isSatisfiesExpression(w) || ts.isTypeAssertionExpression(w)) w = w.expression;
+      const declared = declaredReturnKinds(ts, called.msf, called.fn);
+      if (!declared && !ts.isAwaitExpression(w) && returnsPromise(ts, called.msf, called.fn)) continue;
+      if (declared?.promise && !ts.isAwaitExpression(w)) continue;
+      const walked = declared ? null : returnedContract(ts, called.msf, called.fn)?.kinds ?? null;
+      const kinds = declared?.kinds ?? (walked && walked.size > 0 && !walked.has("object") ? walked : null);
+      if (!kinds || [...kinds].some((k) => VALUE_MEMBERS[k].has(r.name))) continue;
+      const test = String(c["name"] ?? "");
+      const what = [...kinds].sort().join(" | ");
+      return { test, module: called.mod.rel, fn: called.fn, reads: `property.${r.name}`, reason: `${CONTRACT_MISMATCH_STAGE}:property.${r.name}: the failing assertion of "${test.slice(0, 120)}" (line ${c["line"]}) reads .${r.name} off what ${called.fn} in ${called.mod.rel} returns, ${declared ? `declared ${declared.text.slice(0, 80)}` : "which only ever returns"} (${what}), a value with no property ${r.name}: the read is undefined on every tree, so the check is red, not for the defect` };
+    }
   }
   return null;
 }

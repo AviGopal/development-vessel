@@ -65,17 +65,28 @@ function land(gapId: string, s: string, at: string, att: string, intent: Row = {
   (LEDGER["landingEvent"] ??= []).push({ key: `spool:${att}`, at, record: { event: "commit", repo: "/workspace/git/vessels/v", sha: s, at, attempt_id: att, author: "Substrate Autonomous <x@y>" } });
 }
 const systemArm = (gapId: string, at = h(90)) => ({ gap_id: gapId, outcome: "written", fields_changed: ["classification_metadata.check_supply"], principal_kind: "in-process", key_id: null, operator_marker: false, store: "local", ts: at });
+/** Every gap's creating write (status_from "absent"), so its events reach back to its filing. */
+const created = (gapId: string) => ({ gap_id: gapId, outcome: "written", fields_changed: ["status"], status_from: "absent", principal_kind: "in-process", key_id: null, operator_marker: false, store: "local", ts: h(100) });
+let FIX: { author: string; at: string; files: string[]; on_origin_dev: boolean | null } | null = null;
+let LABELS: { labels: Array<Record<string, unknown>>; context: { fixLiveAt: string; keymap: never[]; forwardingKeys: string[]; nodeSelfAdminKeys: string[] } } | null = null;
 function reset(): void {
-  LEDGER = {}; STORE = []; EVENTS = {}; REVERTS = {}; COMMITS = {}; SITE_COMMITS = []; SCOPE = []; KEYMAP = null; LOG.length = 0;
+  LEDGER = { attemptIntent: [], landingEvent: [], attemptSettlement: [] }; STORE = []; EVENTS = {}; REVERTS = {}; COMMITS = {}; SITE_COMMITS = []; SCOPE = []; KEYMAP = null; LOG.length = 0;
   CHECK_FIRST = { sha: sha("e"), author: "Substrate Autonomous", at: h(95), lane: true, files: [CHECK] };
+  FIX = { author: "Substrate Autonomous", at: h(50), files: ["src/thing.ts"], on_origin_dev: true };
+  LABELS = { labels: [], context: { fixLiveAt: h(500), keymap: [], forwardingKeys: [], nodeSelfAdminKeys: [] } };
 }
 const deps: Deps = {
   ledger: (kind) => LEDGER[kind] ?? [],
+  ledgerPresent: (kind) => Array.isArray(LEDGER[kind]),
+  spool: () => [],
   readGaps: async () => STORE,
-  readEvents: async (id) => (EVENTS[id] ?? []) as never,
+  readEvents: async (id) => { const ev = [...(STORE.some((g) => g["id"] === id) ? [created(id)] : []), ...(EVENTS[id] ?? [])]; return { events: ev as never, matched: ev.length }; },
   keymap: async () => KEYMAP,
+  labels: async () => LABELS as never,
   locate: (s) => /^[0-9a-f]{40}$/.test(s) ? { repo: "v", dir: "/clones/v", fullSha: s } : null,
   cloneOf: (v) => (v === "v" ? "/clones/v" : null),
+  revParse: (_d, s) => (/^[0-9a-f]{40}$/.test(s) ? s : null),
+  fixCommit: () => FIX,
   siteCommits: () => SITE_COMMITS,
   firstCommit: () => CHECK_FIRST,
   revertsOf: (_d, s) => REVERTS[s] ?? [],
@@ -129,6 +140,7 @@ describe("registration and the must-fail controls", () => {
     expect(lane.map((j) => [j["settlement_id"], j.verdict])).toEqual([
       ["fixture:regressed-settlement-no-revert", "red"], ["fixture:regressed-settlement-timely-lane-revert", "green"],
       ["fixture:regressed-settlement-late-lane-revert", "red"], ["fixture:regressed-settlement-shaless-lane-revert", "red"],
+      ["fixture:regressed-settlement-expired-unreverted", "red"],
     ]);
     // the controls are journalled, never counted in the aggregate
     expect(LOG.some((l) => l.includes('"gap_id":"fixture:operator-armed-verified-landing"'))).toBe(true);
@@ -261,8 +273,11 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
     EVENTS = { "g-commit": [systemArm("g-commit")] };
     SITE_COMMITS = [{ sha: sha("7"), author: "An Operator", at: h(60), lane: false, files: ["src/thing.ts"] }];
     expect(judged(await run(), "g-commit").failing_link).toBe("operator_act:edit-site-commit");
-    // after the fix it is not the fix's provenance
+    // after the fix but before close + 24 h it is still in the provenance window (link 5)
     SITE_COMMITS = [{ sha: sha("7"), author: "An Operator", at: h(40), lane: false, files: ["src/thing.ts"] }];
+    expect(judged(await run(), "g-commit").failing_link).toBe("operator_act:edit-site-commit");
+    // after close + 24 h it is not
+    SITE_COMMITS = [{ sha: sha("7"), author: "An Operator", at: h(10), lane: false, files: ["src/thing.ts"] }];
     expect(judged(await run(), "g-commit").verdict).toBe("counted");
 
     reset();
@@ -278,7 +293,7 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
     EVENTS = { "g-scope": [systemArm("g-scope")] };
     SCOPE = [{ id: "super-repo 123456789abc (An Operator)", opened: [SITE], effective_at: h(60) }];
     expect(judged(await run(), "g-scope").failing_link).toBe("operator_act:3");
-    SCOPE = [{ id: "later", opened: [SITE], effective_at: h(40) }]; // opened after the fix landed: not its provenance
+    SCOPE = [{ id: "later", opened: [SITE], effective_at: h(10) }]; // opened after close + 24 h: not its provenance
     expect(judged(await run(), "g-scope").verdict).toBe("counted");
   });
   it("addendum 3 from the super-repo's own history: an operator commit that drops the edit site from the scope opens it", async () => {
@@ -313,7 +328,7 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
     EVENTS = { "g-route": [systemArm("g-route"), { ...systemArm("g-route", h(80)), principal_kind: "node-self", fields_changed: ["updated_at"] }] };
     const j = judged(await run(), "g-route");
     expect(j.verdict).toBe("counted");
-    expect(j["route_unverifiable"]).toBe(2);
+    expect(j["route_unverifiable"]).toBe(3); // the creating write, the arm and the node-self write
     expect(j.reason).toContain("ROUTE UNVERIFIABLE");
   });
   it("a key-principal write with no class map is unjudged, and the unjudged landings are the one filed finding", async () => {

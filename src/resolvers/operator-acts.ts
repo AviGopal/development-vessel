@@ -3,7 +3,8 @@
  *
  * A closure is counted as the system's own repair only when no operator act is in its provenance. Two readers used to
  * decide that separately (the research watcher and goal reach), and each missed acts the other saw. This module is the
- * reader both use: the standing evaluator's repair_autonomy row (self-fact-reconcile.ts) and goal-reach-tick.
+ * one reader qa ruled for: today its only caller is the standing evaluator's repair_autonomy row (self-fact-reconcile.ts).
+ * goal-reach-tick does NOT read it yet; moving goal reach onto it is separate work.
  *
  * PURE. Every input is passed in: the gap rows (for lineage), the gap-write events, the commits touching the edit site
  * and the check file, the scope acts, and the key class map. Nothing here reads the store, git, the journal or the
@@ -22,6 +23,12 @@
  *   -    an operator-filed row (source operator:* or human_reported, or filed_by operator:*).
  *   4/4a an in-process or node-self gap write counts as SYSTEM, flagged route-unverifiable while the write event
  *        carries no route (the /resolvers/execute fix has not landed).
+ * THE WINDOW is the row's FILING to its close + 24 h (link 5), not the fix: a post-fix re-arm, a hand close, an edit
+ * of a deadline or of the evidence, all count. An undated hold flag (operator_hold with no _at), an operator-only row
+ * field (deadline_status, date_status, latest_by), a hand close (closed_by operator:*, close_basis
+ * operator_exercised_falsifier), an operator write on an ANCESTOR row, and an operator oracle label on a provenance
+ * trace count too. UNKNOWN IS NEVER CLEAN: events that are unread, capped, or do not reach back to the filing, an
+ * unparsable time, and unread labels are reported (unread / unattributable / review), never read as "no act".
  * The arm write is read through the same events: an arm (a write changing check_supply or evidence_resolve) by an
  * operator principal is the act the repair row exists to see ("arm writer not an operator route"). Any other operator
  * gap write in the provenance counts too, and so does an attempt registered directed (an operator:direct grant): both
@@ -85,7 +92,7 @@ export function isoMs(v: unknown): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-export type OperatorActKind = "2a" | "2a-at-without-by" | "3" | "edit-site-commit" | "check-authored" | "operator-filed" | "arm" | "gap-write" | "directed";
+export type OperatorActKind = "2a" | "2a-at-without-by" | "hold-undated" | "3" | "edit-site-commit" | "check-authored" | "operator-filed" | "arm" | "gap-write" | "ancestor-gap-write" | "directed" | "hand-close" | "operator-field" | "operator-label";
 export interface OperatorAct {
   /** Which accepted addendum this act falls under; `operator_act:<addendum>` is the failing link it names. */
   readonly addendum: OperatorActKind;
@@ -96,8 +103,8 @@ export interface OperatorAct {
 }
 
 /**
- * Addendum 2a and 2a′: operator acts stamped as fields on the row or its lineage ancestors, at or before `untilMs`
- * (the fix). An unreadable stamp time counts (conservatively), and so does an operator_<x>_at with no _by.
+ * Addendum 2a and 2a′: operator acts stamped as fields on the row or its lineage ancestors, at or before `untilMs`.
+ * An unreadable stamp time counts (conservatively), and so does an operator_<x>_at with no _by, dated or not.
  */
 export function rowFieldOperatorActs(gid: string, byId: ReadonlyMap<string, GapRow>, untilMs: number | null): OperatorAct[] {
   const out: OperatorAct[] = [];
@@ -117,8 +124,9 @@ export function rowFieldOperatorActs(gid: string, byId: ReadonlyMap<string, GapR
     for (const [f, v] of Object.entries(m)) {
       if (!(f.startsWith("operator_") && f.endsWith("_at")) || seenAt.has(f) || !v) continue;
       const at = isoMs(v);
-      if (at !== null && (untilMs === null || at <= untilMs)) {
-        out.push({ addendum: "2a-at-without-by", on: k, at: new Date(at).toISOString(), detail: `row field ${f}=${String(v).slice(0, 24)} (no _by stamped; counted) on ${where}` });
+      // An unparsable time is unknown, and unknown is never clean: the stamp counts.
+      if (at === null || untilMs === null || at <= untilMs) {
+        out.push({ addendum: "2a-at-without-by", on: k, at: at === null ? null : new Date(at).toISOString(), detail: `row field ${f}=${String(v).slice(0, 24)} (no _by stamped; counted${at === null ? ", time unparsable" : ""}) on ${where}` });
       }
     }
   }
@@ -226,13 +234,26 @@ export interface ScopeAct { readonly id: string; readonly opened: readonly strin
 /** A commit touching the edit site or the check file. `lane` is true for the lane's own author. */
 export interface SiteCommit { readonly sha: string; readonly author: string; readonly at: string; readonly lane: boolean; readonly files: readonly string[] }
 
+/**
+ * THE AUTONOMOUS-INTENT RULE, as the auto-revert states it (gap-landing-verdict.ts, autoRevertRegressedLandings guard 2,
+ * and recordFalsifiedAutonomousLanding): an attempt is autonomous only when its attemptIntent says `directed === false`
+ * EXACTLY; absent or unknown (null) is not autonomous. Restated here rather than imported because that module keeps it
+ * inline (`intent.directed !== false`); one predicate, the same three cases.
+ */
+export function intentIsAutonomous(directed: unknown): boolean { return directed === false; }
+
+/** Row fields only an operator writes (no system writer sets them): a deadline, a dated ruling, a filing note. */
+export const OPERATOR_ONLY_FIELDS = ["deadline_status", "date_status", "latest_by", "filed_by"] as const;
+/** Row fields that name the traces a gap derives from (oracle labels on them are operator feedback in its provenance). */
+export const PROVENANCE_TRACE_FIELDS = ["execution_id", "example_trace_ids", "sample_exec_ids", "representative_trace_ids", "first_failed_task_id", "closed_by_trace"] as const;
+
 export interface OperatorActsContext {
   /** Every gap row the store holds (lineage reads ancestors from it). */
   readonly byId: ReadonlyMap<string, GapRow>;
-  /** The fix commit time; acts after it are outside the fix's provenance. null: no fix (every act counts). */
-  readonly fixAt: string | null;
-  /** The row's filing time; commits and writes before it are not its provenance. */
+  /** The provenance window, FILING to close + 24 h (link 5): every act inside it counts, before or after the fix.
+   *  null untilAt = no upper bound (the closure is still open, or its close cannot be dated). */
   readonly filedAt: string | null;
+  readonly untilAt: string | null;
   /** The repo-relative edit site and check file paths, as the commits list their files. */
   readonly editSitePath?: string | null;
   readonly checkPath?: string | null;
@@ -240,13 +261,23 @@ export interface OperatorActsContext {
   readonly scopeActs?: readonly ScopeAct[] | null;
   /** Commits touching the edit site or the check file. null: unreadable. */
   readonly siteCommits?: readonly SiteCommit[] | null;
-  /** The commit that ADDED the check file. null: unreadable or no check. */
+  /** The commit that ADDED the check file. null: unreadable; undefined: never added. */
   readonly checkFirstCommit?: SiteCommit | null;
-  /** The row's gap-write events from the holder's file (and a forwarding node's, as source "origin"). null: unreadable. */
+  /** Gap-write events of the row AND of its lineage ancestors (holder's file; a forwarding node's as source "origin").
+   *  null: unreadable. */
   readonly events?: ReadonlyArray<GapWriteEventLike & { readonly source?: "holder" | "origin" }> | null;
+  /** The events read were cut by the read cap: some may be missing. */
+  readonly eventsCapped?: boolean;
+  /** The events reach back to the row's filing (its creating write, status_from "absent", is among them). */
+  readonly eventsFromFiling?: boolean;
   readonly originPresent?: boolean;
-  /** The landing's attempt was registered directed (attemptIntent.directed === true): the operator directed it. */
-  readonly directed?: boolean | null;
+  /** The landing attempt's attemptIntent.directed, as stored (true, false, null or absent). */
+  readonly directed?: unknown;
+  /** Extra provenance traces (the landing's authoring execution). */
+  readonly traceIds?: readonly string[];
+  /** Oracle labels on the provenance traces. null: unreadable, so operator feedback cannot be ruled out (REVIEW). */
+  readonly labels?: ReadonlyArray<OracleLabelLike & { readonly execution_id?: string | null }> | null;
+  readonly labelContext?: LabelClassContext | null;
   /** The key class map. null or absent: no map, so a key-principal write is unattributable. */
   readonly keymap?: readonly KeyMapEntry[] | null;
   readonly peerKeys6?: readonly string[];
@@ -257,78 +288,116 @@ export interface OperatorActsResult {
   readonly arm_writes: Array<{ readonly at: string | null; readonly writer: string }>;
   /** Writes whose writer cannot be classed: while any stands and no act is found, the closure is unattributable. */
   readonly unattributable: string[];
+  /** Label (or other) readings that need review before anything counts. */
+  readonly review: string[];
   /** Addendum 4a: system-principal writes (in-process, node-self) with no recorded route. */
   readonly route_unverifiable: number;
-  /** Inputs that were unreadable, by name: an act there cannot be ruled out. */
+  /** Inputs that were unreadable or incomplete, by name: an act there cannot be ruled out. */
   readonly unread: string[];
 }
 
 const ARM_FIELDS = ["classification_metadata.check_supply", "classification_metadata.evidence_resolve"];
 
-/** Every operator act in `row`'s provenance (see the module comment for what counts). */
+/** Every operator act in `row`'s provenance, FILING to close + 24 h (see the module comment for what counts). */
 export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorActsResult {
   const gid = String(row["id"] ?? "");
   const m = metaOf(row);
-  const fixMs = isoMs(ctx.fixAt);
   const filedMs = isoMs(ctx.filedAt);
+  const untilMs = isoMs(ctx.untilAt);
   const acts: OperatorAct[] = [];
   const unread: string[] = [];
   const unattributable: string[] = [];
+  const review: string[] = [];
   const armWrites: Array<{ at: string | null; writer: string }> = [];
   let routeUnverifiable = 0;
-  const inProvenance = (ms: number | null): boolean => ms !== null && (filedMs === null || ms >= filedMs) && (fixMs === null || ms <= fixMs);
+  if (filedMs === null) unread.push("the row's filing time (unset or unparsable)");
+  if (ctx.untilAt !== null && untilMs === null) unread.push("the provenance window's end (unparsable)");
+  const inWindow = (ms: number) => (filedMs === null || ms >= filedMs) && (untilMs === null || ms <= untilMs);
 
-  // operator-filed row
+  // an operator-filed row
   const src = String(row["source"] ?? "");
   const filedBy = String(m["filed_by"] ?? "");
   if (src.startsWith("operator:") || src === "human_reported" || filedBy.startsWith("operator:")) {
     acts.push({ addendum: "operator-filed", at: ctx.filedAt, detail: `filed by ${src.startsWith("operator:") || src === "human_reported" ? src : filedBy}` });
   }
-  if (ctx.directed === true) acts.push({ addendum: "directed", at: ctx.fixAt, detail: "the landing's attempt was registered directed under an operator:direct grant" });
-  // 2a, 2a′ (the row map must hold the row itself for its own stamps)
+  if (ctx.directed === true) acts.push({ addendum: "directed", at: null, detail: "the landing's attempt was registered directed under an operator:direct grant" });
+  // 2a, 2a′, and a hold flag with no stamp, on the row and every lineage ancestor
   const byId = ctx.byId.has(gid) ? ctx.byId : new Map([...ctx.byId, [gid, row]]);
-  acts.push(...rowFieldOperatorActs(gid, byId, fixMs));
-  // 3: an operator scope act opening the edit site, effective at or before the fix
+  const lineage = [gid, ...[...lineageAncestors(gid, byId)].sort()];
+  acts.push(...rowFieldOperatorActs(gid, byId, untilMs));
+  for (const k of lineage) {
+    const km = metaOf(byId.get(k));
+    if (km["operator_hold"] === true && !km["operator_hold_at"]) acts.push({ addendum: "hold-undated", on: k, at: null, detail: `operator_hold set with no operator_hold_at on ${k === gid ? "this row" : `ancestor ${k.slice(-60)}`} (an undated hold counts)` });
+  }
+  // operator-only row fields and a hand close
+  for (const f of OPERATOR_ONLY_FIELDS) if (f !== "filed_by" && m[f] !== undefined && m[f] !== null && m[f] !== "") acts.push({ addendum: "operator-field", at: null, detail: `row field ${f} is set (only an operator writes it)` });
+  if (String(m["closed_by"] ?? "").startsWith("operator:") || m["close_basis"] === "operator_exercised_falsifier") acts.push({ addendum: "hand-close", at: String(row["closed_at"] ?? m["closed_at"] ?? "") || null, detail: `closed by hand (${String(m["closed_by"] ?? m["close_basis"])})` });
+  // 3: an operator scope act opening the edit site, effective inside the window
   const site = String(m["edit_site"] ?? "");
   if (ctx.scopeActs === null) unread.push("scope acts");
   for (const a of ctx.scopeActs ?? []) {
     const eff = isoMs(a.effective_at);
-    if (site && a.opened.includes(site) && eff !== null && (fixMs === null || fixMs >= eff)) {
-      acts.push({ addendum: "3", at: new Date(eff).toISOString(), detail: `edit_site opened to the lane by operator scope act ${a.id} effective ${new Date(eff).toISOString()}` });
-    }
+    if (!site || !a.opened.includes(site)) continue;
+    if (eff === null) { acts.push({ addendum: "3", at: null, detail: `edit_site opened to the lane by operator scope act ${a.id} (time unparsable; counted)` }); continue; }
+    if (untilMs === null || eff <= untilMs) acts.push({ addendum: "3", at: new Date(eff).toISOString(), detail: `edit_site opened to the lane by operator scope act ${a.id} effective ${new Date(eff).toISOString()}` });
   }
-  // operator commits to the edit site or the check file before the fix
+  // operator commits to the edit site or the check file inside the window (after the fix too)
   if (ctx.siteCommits === null) unread.push("edit-site and check-file commits");
   for (const c of ctx.siteCommits ?? []) {
     if (c.lane) continue;
-    const at = isoMs(c.at);
-    if (at === null || (filedMs !== null && at < filedMs) || (fixMs !== null && at > fixMs)) continue;
     const onSite = !!ctx.editSitePath && c.files.includes(ctx.editSitePath);
     const onCheck = !!ctx.checkPath && c.files.includes(ctx.checkPath);
-    if (onSite || onCheck) acts.push({ addendum: "edit-site-commit", at: new Date(at).toISOString(), detail: `operator commit ${c.sha.slice(0, 8)} by ${c.author} @ ${new Date(at).toISOString()} on the ${onSite ? "edit_site" : "check file"}` });
+    if (!onSite && !onCheck) continue;
+    const at = isoMs(c.at);
+    if (at !== null && !inWindow(at)) continue;
+    acts.push({ addendum: "edit-site-commit", at: at === null ? null : new Date(at).toISOString(), detail: `operator commit ${c.sha.slice(0, 8)} by ${c.author} @ ${at === null ? "unparsable time" : new Date(at).toISOString()} on the ${onSite ? "edit_site" : "check file"}` });
   }
   // an operator-authored check file
   if (ctx.checkPath) {
     if (ctx.checkFirstCommit === null) unread.push("check file history");
     else if (ctx.checkFirstCommit && !ctx.checkFirstCommit.lane) acts.push({ addendum: "check-authored", at: ctx.checkFirstCommit.at, detail: `check ${ctx.checkPath} was added by ${ctx.checkFirstCommit.author} (${ctx.checkFirstCommit.sha.slice(0, 8)} @ ${ctx.checkFirstCommit.at})` });
   }
-  // gap-write events: the arm writer, operator writes, 4/4a
+  // gap-write events of the row and its ancestors: the arm writer, operator writes (re-arms, edits, closes), 4/4a
   if (ctx.events === null) unread.push("gap-write events");
+  else {
+    if (ctx.eventsCapped) unread.push("gap-write events (the read cap was reached)");
+    if (ctx.eventsFromFiling !== true) unread.push("gap-write events (they do not reach back to the row's filing)");
+  }
+  const lineageSet = new Set(lineage);
   for (const ev of ctx.events ?? []) {
-    if (ev.gap_id !== undefined && ev.gap_id !== null && ev.gap_id !== gid) continue;
+    const evGap = ev.gap_id ?? gid;
+    if (!lineageSet.has(evGap)) continue;
     if (!String(ev.outcome ?? "").startsWith("written")) continue; // a refused or thrown write changed nothing
     const at = isoMs(ev.ts);
-    if (!inProvenance(at)) continue;
+    if (at === null) { unattributable.push(`${ev.source ?? "holder"}: event time unparsable (${String(ev.ts).slice(0, 30)})`); continue; }
+    if (!inWindow(at)) continue;
     const cls = classifyGapWriteEvent(ev, ev.source ?? "holder", ctx.originPresent === true, ctx.keymap ?? [], ctx.peerKeys6 ?? []);
     const isArm = (ev.fields_changed ?? []).some((f) => ARM_FIELDS.includes(f));
-    const when = at === null ? null : new Date(at).toISOString();
-    if (isArm) armWrites.push({ at: when, writer: `${cls} (${ev.principal_kind ?? "?"}${ev.key_id ? `:${ev.key_id}` : ""}${ev.operator_marker ? ", marker" : ""})` });
+    const when = new Date(at).toISOString();
+    const onAncestor = evGap !== gid;
+    if (isArm && !onAncestor) armWrites.push({ at: when, writer: `${cls} (${ev.principal_kind ?? "?"}${ev.key_id ? `:${ev.key_id}` : ""}${ev.operator_marker ? ", marker" : ""})` });
     if (cls === "operator") {
-      acts.push({ addendum: isArm ? "arm" : "gap-write", at: when, detail: `operator gap write (${ev.source ?? "holder"}, ${ev.principal_kind ?? "?"}:${ev.key_id ?? "-"}, marker=${ev.operator_marker === true}) @ ${when ?? "?"} fields=${(ev.fields_changed ?? []).slice(0, 4).join(",")}` });
-    } else if (cls.startsWith("unattributable")) {
-      unattributable.push(`${ev.source ?? "holder"}: ${cls}`);
+      acts.push({ addendum: onAncestor ? "ancestor-gap-write" : isArm ? "arm" : "gap-write", on: evGap, at: when, detail: `operator gap write (${ev.source ?? "holder"}, ${ev.principal_kind ?? "?"}:${ev.key_id ?? "-"}, marker=${ev.operator_marker === true}) @ ${when} on ${onAncestor ? `ancestor ${evGap.slice(-60)}` : "this row"} fields=${(ev.fields_changed ?? []).slice(0, 4).join(",")}` });
+    } else if (cls.startsWith("unattributable") || cls.startsWith("forwarded")) {
+      unattributable.push(`${ev.source ?? "holder"}${onAncestor ? ` (ancestor ${evGap.slice(-40)})` : ""}: ${cls}`);
     }
     if ((ev.principal_kind === "in-process" || ev.principal_kind === "node-self") && !ev.route) routeUnverifiable += 1;
   }
-  return { acts, arm_writes: armWrites, unattributable, route_unverifiable: routeUnverifiable, unread };
+  // oracle labels on the provenance traces (operator feedback there is an operator act)
+  const traces = new Set<string>(ctx.traceIds ?? []);
+  for (const f of PROVENANCE_TRACE_FIELDS) {
+    const v = m[f] ?? row[f];
+    for (const x of Array.isArray(v) ? v : [v]) if (typeof x === "string" && x) traces.add(x);
+  }
+  if (ctx.labels === null || ctx.labels === undefined || !ctx.labelContext) {
+    review.push("oracle labels unread: operator feedback on a provenance trace cannot be ruled out");
+  } else {
+    for (const lab of ctx.labels) {
+      if (!lab.execution_id || !traces.has(lab.execution_id)) continue;
+      const c = classifyOracleLabel(lab, ctx.labelContext);
+      if (c.startsWith("operator")) acts.push({ addendum: "operator-label", at: lab.created_at ?? null, detail: `${c} on trace ${lab.execution_id}` });
+      else if (c.startsWith("review")) review.push(`${c} on trace ${lab.execution_id}`);
+    }
+  }
+  return { acts, arm_writes: armWrites, unattributable, review, route_unverifiable: routeUnverifiable, unread };
 }

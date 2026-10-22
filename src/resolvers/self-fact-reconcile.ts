@@ -43,8 +43,8 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveGapWriteEvent, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
-import { readRecords } from "./attempt-ledger.js";
-import { isoMs, operatorActsOf, type GapRow, type GapWriteEventLike, type KeyMapEntry, type OperatorActsContext, type OperatorActsResult, type ScopeAct, type SiteCommit } from "./operator-acts.js";
+import { ledgerDir, readRecords } from "./attempt-ledger.js";
+import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit } from "./operator-acts.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
@@ -462,45 +462,50 @@ export const journal = { read: readJournalLines };
 // ─── repair_autonomy and lane_revert_within_1h: per-closure judgements ─────
 /**
  * TWO §14 ROWS, JUDGED PER ITEM (REALIGNMENT §14 #3 Repair and #6 Safety; USER 2026-10-21T18:15:11Z, qa-accepted link
- * requirements). Autonomy is measured only by the system's own evaluator rows, so these two read what the operator's
- * research watcher read, from the system's own records, one judgement per item:
+ * requirements, and qa's 10-22 review: as first built they were lenient in the direction that games §14). Autonomy is
+ * measured only by the system's own evaluator rows; these read from the system's own records, one judgement per item,
+ * and NOTHING UNKNOWN IS CLEAN: a missing ledger file or spool, a gap-write read that is capped or does not reach back
+ * to the filing, an unparsable time, unread oracle labels, an unreadable fix commit, all read unjudged, never counted.
  *
- *   repair_autonomy        one judgement per gap that has a lane landing in the LANDING LEDGER in the window
- *                          (expected, R1-18: never from the gap store this instrument reads). counted only when no
- *                          operator act is in the fix's provenance (operatorActsOf, the one reader), the own check is
- *                          honest (link 2), the landing verdict is landed_verified on the measured check with the fix's
- *                          sha and no dissent (link 4), and 24 h have passed with no reopen and no revert (link 6;
- *                          before that the judgement is PENDING, never counted and never not_counted). Every
- *                          not_counted names its failing link: link2 | link4 | link6 | operator_act:<addendum>.
- *   lane_revert_within_1h  one judgement per REGRESSED settlement in the ledger in the window (expected): green when a
- *                          lane revert (the auto-revert's commit, `Auto-Revert: true`) whose message names the regressed
- *                          sha landed within 1 h of the settlement; red for no revert past 1 h, a late revert, a revert
- *                          that does not name the sha, or one only an operator made.
+ *   repair_autonomy        one judgement per gap with a lane landing in the LANDING LEDGER (or its undrained spool) in
+ *                          the window (expected, R1-18: never from the gap store this instrument reads). counted only when
+ *                          link 1 the row's source is substrate_detected (unset or anything else is not autonomous);
+ *                          link 2 the own check is honest;
+ *                          link 3 the attempt is registered autonomous (directed === false EXACTLY, the auto-revert's
+ *                                 rule) and its fix commit is the lane's, touches the edit_site, is in the edit site's
+ *                                 repo and is reachable from origin/dev there;
+ *                          link 4 the landing verdict is landed_verified on the measured check with the fix's sha, no
+ *                                 dissent and no post-restart falsification;
+ *                          link 5 no operator act from FILING to close + 24 h (operatorActsOf, the one reader), with the
+ *                                 events, labels and history it needs all readable;
+ *                          link 6 24 h with no reopen and no revert (before that PENDING).
+ *                          Every not_counted names its failing link: link1 | link2 | link3 | link4 | link6 |
+ *                          operator_act:<addendum>.
+ *   lane_revert_within_1h  one judgement per REGRESSED settlement in the ledger in the window, PLUS every settlement whose
+ *                          red divergence is still open (carried past the window): green only for a lane revert
+ *                          (`Auto-Revert: true`) that names the regressed sha, landed within 1 h and is OBSERVED on
+ *                          origin/dev. Anything else stays red; a settlement that ages out of the window unreverted reads
+ *                          "expired unreverted" and stays red, so its gap closes only on an observed revert.
  *
- * checked == expected is the row's exit: checked counts the items that met the row (counted / green), expected counts
- * the items in the ledger. A shortfall is not by itself a defect of the instrument: a red settlement IS a finding (filed
- * per settlement); for repair_autonomy the finding is a ledger landing the instrument could not judge (unjudged, filed
- * once, with the reasons), since an operator-assisted closure is a measurement, not a divergence.
+ * checked == expected is the row's exit: checked counts the items that met the row (counted / green), expected counts the
+ * items in the ledger. Each judgement is one `[self-fact-judgement] {json}` journal line, and the must-fail controls are judged by the SAME functions every
+ * planted run; only then is the row's canary reported.
  *
- * Each judgement is also one `[self-fact-judgement] {json}` line on this vessel's journal (read credential-free), and
- * the must-fail controls are judged by the SAME functions on fixture items every planted run: an operator-armed gap
- * with a verified landing must read not_counted with failing_link operator_act:arm (and a system-armed twin counted);
- * a regressed settlement with no revert must read red (and a timely lane revert naming the sha green; a late one and a
- * sha-less one red). Only then is the row's canary reported.
- *
- * NAMED LIMITS (stated in each judgement's reason when they apply): no key class map is served in-system, so a
- * key-principal gap write is unattributable and its closure unjudged; a write forwarded by a peer is decided only by
- * the forwarding node's own events, which this node does not read; the expected-value-not-derivable-from-the-check's-
- * own-mocks subclass of link 2 has no reader here; oracle labels on provenance traces are not read (classifyOracleLabel
- * is the rule, with no reader wired); an operator scope act is dated by its super-repo commit, earlier than any apply.
+ * NAMED LIMITS (said in the judgements): no key class map and no oracle-label reader are served in-system, so today a
+ * key-principal write reads unattributable and every closure reads REVIEW (unjudged) on labels; a write forwarded by a
+ * peer is decided only by the forwarding node's own events, which this node does not read; the expected-value-not-
+ * derivable subclass of link 2 has no reader here; a scope act is dated by its super-repo commit, earlier than any apply.
  */
 export type RepairVerdict = "counted" | "not_counted" | "pending" | "unjudged";
-export interface RepairLanding { attempt_id: string; gap_id: string; sha: string; repo: string; at: string; directed: boolean | null }
+export interface RepairLanding { attempt_id: string; gap_id: string; sha: string; repo: string; at: string | null; directed: unknown; authoring_execution_id: string | null; from: "ledger" | "spool" }
 export interface CheckHonest { value: true | false | "unjudged"; reason: string }
+/** The fix commit as its clone reads it. on_origin_dev null: the reachability could not be read. */
+export interface FixCommit { author: string; at: string; files: string[]; on_origin_dev: boolean | null }
 export interface RepairJudgement {
   fact: "repair_autonomy"; gap_id: string; verdict: RepairVerdict; reason: string; failing_link?: string; failing_links: string[];
   arm_writer: string; operator_acts: OperatorActsResult | null; fix_sha: string; fix_repo: string; attempt_id: string;
   check: string | null; check_honest: CheckHonest; landing_verdict: Record<string, unknown>; durable_until: string | null; route_unverifiable: number;
+  window: { from: string | null; until: string | null };
 }
 export interface RepairInputs {
   landing: RepairLanding;
@@ -508,15 +513,18 @@ export interface RepairInputs {
   byId: ReadonlyMap<string, GapRow>;
   /** The newest regressed settlement of this landing's attempt (the post-restart falsifier's #2, or #1), if any. */
   regressed: { key: string; source: string; at: string } | null;
-  /** Commits that say they revert the fix sha. null: unreadable. */
+  /** Commits on origin/dev that say they revert the fix sha. null: unreadable. */
   reverts: Array<{ sha: string; at: string }> | null;
-  /** The check file's and the edit site's sources at the fix (link-2 proxies). null: unreadable. */
+  /** The fix commit in the edit site's clone. null: unreadable (or the clone is not there). */
+  fix: FixCommit | null;
+  /** The check file's and the edit site's sources AT THE FIX (never HEAD). null: unreadable. */
   checkSource: string | null; siteSource: string | null;
-  acts: Omit<OperatorActsContext, "byId" | "fixAt" | "filedAt" | "editSitePath" | "checkPath" | "directed">;
+  acts: Omit<OperatorActsContext, "byId" | "filedAt" | "untilAt" | "editSitePath" | "checkPath" | "directed" | "traceIds">;
   nowMs: number;
 }
 const EXCLUDED_CLOSE_RE = /expired|not_redetected|producer_now_exists|duplicate|superseded|stale_low_value|persistent_compose_failure/;
 const DURABLE_MS = 24 * 3600_000;
+const LANE_AUTHOR = "Substrate Autonomous";
 const splitSite = (site: string): { vessel: string; path: string } | null => { const m = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim()); return m ? { vessel: m[1]!, path: m[2]! } : null; };
 const metaRec = (r: GapRow | null): Record<string, unknown> => { const m = r?.["classification_metadata"]; return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : {}; };
 /** The row's own check file: check_supply.test_file, or (recommit rows) evidence_resolve.input.test_file. */
@@ -539,7 +547,7 @@ export function judgeCheckHonest(row: GapRow, checkSource: string | null, siteSo
   if (/check_asserts_contract_mismatch/.test(String(cs.reason ?? "")) || /check_asserts_contract_mismatch/.test(String(m["check_refusal"] ?? ""))) return { value: false, reason: "the check asserts a contract its target never returns (contractMismatchRefusal)" };
   const birth = m["predicate_birth_verdict"];
   if (birth !== "present") return { value: false, reason: `the check's birth verdict is ${birth === undefined ? "absent" : JSON.stringify(birth)}, not present` };
-  if (checkSource === null || siteSource === null || !site) return { value: "unjudged", reason: "the check or edit-site source at the fix is unreadable, so the hollow-check proxies were not read" };
+  if (checkSource === null || siteSource === null || !site) return { value: "unjudged", reason: "the check or edit-site source AT THE FIX is unreadable, so the hollow-check proxies were not read" };
   const mod = site.path.split("/").pop()!.replace(/\.tsx?$/, "");
   const proxies: string[] = [];
   if (!checkSource.includes(mod)) proxies.push("the check does not import the edit_site module");
@@ -550,34 +558,59 @@ export function judgeCheckHonest(row: GapRow, checkSource: string | null, siteSo
   if (proxies.length > 0) return { value: "unjudged", reason: `review: ${proxies.join("; ")}` };
   return { value: true, reason: "check present at birth, not refused, imports its edit_site, asserts literals the edit_site holds; the expected-value-not-derivable subclass has no reader here (named limit)" };
 }
+type LinkState = { state: "pass" | "fail" | "pending" | "review"; why: string };
 /** One closure, judged. Pure: every input is passed in. */
 export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   const { landing, row } = inp;
   const base = { fact: "repair_autonomy" as const, gap_id: landing.gap_id, fix_sha: landing.sha, fix_repo: landing.repo, attempt_id: landing.attempt_id };
   if (!row) {
-    return { ...base, verdict: "unjudged", reason: "the ledger landing's gap row is not in the store", failing_links: [], arm_writer: "unread", operator_acts: null, check: null, check_honest: { value: "unjudged", reason: "no row" }, landing_verdict: {}, durable_until: null, route_unverifiable: 0 };
+    return { ...base, verdict: "unjudged", reason: "the ledger landing's gap row is not in the store", failing_links: [], arm_writer: "unread", operator_acts: null, check: null, check_honest: { value: "unjudged", reason: "no row" }, landing_verdict: {}, durable_until: null, route_unverifiable: 0, window: { from: null, until: null } };
   }
   const m = metaRec(row);
   const site = splitSite(String(m["edit_site"] ?? ""));
   const check = ownCheckFile(row);
-  const acts = operatorActsOf(row, {
-    ...inp.acts, byId: inp.byId, fixAt: landing.at, filedAt: String(row["first_detected_at"] ?? row["created_at"] ?? row["detected_at"] ?? "") || null,
-    editSitePath: site?.path ?? null, checkPath: check, directed: landing.directed,
-  });
-  const armWriter = acts.arm_writes.length > 0 ? acts.arm_writes.map((a) => `${a.writer} @ ${a.at ?? "?"}`).join("; ") : (inp.acts.events === null ? "unread (gap-write events unreadable)" : "no arm write in the events read (armed before per-write events, or by a path that emits none)");
-  const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource);
-  // link 4: the landing verdict
   const closed = String(row["status"] ?? "") === "closed";
+  // Never updated_at: a later write would move the durability clock.
+  const closedAt = String(row["closed_at"] ?? m["closed_at"] ?? "") || null;
+  const closedMs = closed ? isoMs(closedAt) : null;
+  const landedMs = isoMs(landing.at);
+  const filedAt = String(row["first_detected_at"] ?? row["created_at"] ?? row["detected_at"] ?? "") || null;
+  // LINK 5's window: FILING to close + 24 h; an open closure is read up to now.
+  const untilAt = closed ? (closedMs === null ? null : new Date(closedMs + DURABLE_MS).toISOString()) : new Date(inp.nowMs).toISOString();
+  const traceIds = landing.authoring_execution_id ? [landing.authoring_execution_id] : [];
+  const acts = operatorActsOf(row, { ...inp.acts, byId: inp.byId, filedAt, untilAt, editSitePath: site?.path ?? null, checkPath: check, directed: landing.directed, traceIds });
+  const unknown = [...acts.unread];
+  if (landedMs === null) unknown.push("the landing's time (unparsable)");
+  if (closed && closedMs === null) unknown.push("the close time (closed with no closed_at)");
+  const armWriter = acts.arm_writes.length > 0 ? acts.arm_writes.map((a) => `${a.writer} @ ${a.at ?? "?"}`).join("; ") : (inp.acts.events === null ? "unread (gap-write events unreadable)" : "no arm write in the events read");
+  // link 1: origin
+  const src = String(row["source"] ?? "");
+  const operatorFiled = src.startsWith("operator:") || src === "human_reported";
+  const l1: LinkState = src === "substrate_detected" ? { state: "pass", why: "source substrate_detected" }
+    : operatorFiled ? { state: "pass", why: `source ${src} (an operator act, counted under link 5)` }
+    : { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` };
+  // link 2
+  const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource);
+  // link 3: the attempt is autonomous, and the fix is the lane's commit on the edit site, on origin/dev
+  let l3: LinkState;
+  if (landing.directed !== true && !intentIsAutonomous(landing.directed)) l3 = { state: "fail", why: `the attempt's directed is ${landing.directed === undefined ? "absent" : JSON.stringify(landing.directed)}: autonomous only when directed === false exactly (absent or unknown is not)` };
+  else if (!site) l3 = { state: "fail", why: "the row names no repos/<vessel>/<path> edit_site" };
+  else if (landing.repo !== site.vessel) l3 = { state: "fail", why: `the fix landed in ${landing.repo || "?"}, not the edit site's repo ${site.vessel}` };
+  else if (!inp.fix) l3 = { state: "review", why: "the fix commit is unreadable in the edit site's clone" };
+  else if (inp.fix.author !== LANE_AUTHOR) l3 = { state: "fail", why: `the fix commit's author is ${JSON.stringify(inp.fix.author)}, not the lane` };
+  else if (!inp.fix.files.includes(site.path)) l3 = { state: "fail", why: `the fix commit does not touch the edit_site ${site.path}` };
+  else if (inp.fix.on_origin_dev === null) l3 = { state: "review", why: "whether the fix is on origin/dev could not be read" };
+  else if (!inp.fix.on_origin_dev) l3 = { state: "fail", why: "the fix commit is not reachable from origin/dev in the edit site's repo" };
+  else l3 = { state: "pass", why: "the lane's commit, on the edit site, reachable from origin/dev" };
+  // link 4: the landing verdict
   const why = String(m["closed_reason"] ?? row["closed_reason"] ?? "");
   const basis = String(m["close_basis"] ?? row["close_basis"] ?? "");
   const lsha = String(m["landed_sha"] ?? row["landed_sha"] ?? "");
-  // Never updated_at: a later write would move the durability clock.
-  const closedAt = String(row["closed_at"] ?? m["closed_at"] ?? "") || null;
   const dissent = (Array.isArray(m["semantic_dissent"]) ? (m["semantic_dissent"] as unknown[]).length > 0 : !!m["semantic_dissent"])
     || (!!m["landed_unverified"] && (!m["landed_unverified_sha"] || String(m["landed_unverified_sha"]).startsWith(landing.sha.slice(0, 8)) || landing.sha.startsWith(String(m["landed_unverified_sha"]))));
   const sameSha = lsha.length >= 7 && (lsha.startsWith(landing.sha.slice(0, 12)) || landing.sha.startsWith(lsha));
   const landingVerdict: Record<string, unknown> = { status: String(row["status"] ?? ""), closed_reason: why || null, close_basis: basis || null, landed_sha: lsha || null, closed_at: closed ? closedAt : null, dissent, settlement2: inp.regressed ? { key: inp.regressed.key, source: inp.regressed.source, at: inp.regressed.at } : null };
-  let l4: { state: "pass" | "fail" | "pending" | "review"; why: string };
+  let l4: LinkState;
   if (inp.regressed) l4 = { state: "fail", why: `regressed settlement ${inp.regressed.key} (${inp.regressed.source}) @ ${inp.regressed.at}: ${inp.regressed.source === "falsified_after_restart" ? "the post-restart falsifier read the defect present" : inp.regressed.source === "operator_revert" ? "the operator reverted the landing" : "the attempt settled regressed"}` };
   else if (!closed) l4 = { state: "pending", why: `status ${String(row["status"] ?? "?")}: the landing verdict is not in yet` };
   else if (String(m["closed_by"] ?? "").startsWith("operator:") || EXCLUDED_CLOSE_RE.test(why)) l4 = { state: "fail", why: `closed ${why || "?"} by ${String(m["closed_by"] ?? "?")}: not the landing verdict` };
@@ -587,58 +620,58 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   else if (why === "landed_verified") l4 = { state: "pass", why: `landed_verified basis absent landed_sha ${lsha.slice(0, 12)} = the fix` };
   else l4 = { state: "fail", why: `closed '${why || "?"}': not the landing verdict` };
   // link 6: durable 24 h (a revert or a reopen fails it at once)
-  const closedMs = closed ? isoMs(closedAt) : null;
-  const landedMs = isoMs(landing.at);
-  const durableFrom = closedMs !== null && landedMs !== null ? Math.max(closedMs, landedMs) : (closedMs ?? landedMs);
+  const durableFrom = closedMs !== null && landedMs !== null ? Math.max(closedMs, landedMs) : null;
   const durableUntil = durableFrom !== null ? new Date(durableFrom + DURABLE_MS).toISOString() : null;
-  let l6: { state: "pass" | "fail" | "pending" | "review"; why: string };
+  let l6: LinkState;
   const reverted = (inp.reverts ?? [])[0];
   if (reverted) l6 = { state: "fail", why: `the fix ${landing.sha.slice(0, 12)} was reverted by ${reverted.sha.slice(0, 12)} @ ${reverted.at}` };
-  else if (inp.reverts === null) l6 = { state: "review", why: "the fix's reverts are unreadable" };
+  else if (inp.reverts === null) l6 = { state: "review", why: "the fix's reverts on origin/dev are unreadable" };
   else if (!closed) l6 = { state: "pending", why: "not closed" };
-  else if (closedMs === null) l6 = { state: "review", why: "closed with no closed_at, so its 24 h cannot be dated" };
-  else if (durableFrom === null || inp.nowMs < durableFrom + DURABLE_MS) l6 = { state: "pending", why: `durable from ${durableUntil ?? "?"} (24 h with no reopen and no revert)` };
-  else l6 = { state: "pass", why: `closed, reopen_count ${String(row["reopen_count"] ?? 0)}, no revert of ${landing.sha.slice(0, 12)} after 24 h` };
+  else if (durableFrom === null) l6 = { state: "review", why: "the close or landing time cannot be dated" };
+  else if (inp.nowMs < durableFrom + DURABLE_MS) l6 = { state: "pending", why: `durable from ${durableUntil} (24 h with no reopen and no revert)` };
+  else l6 = { state: "pass", why: `closed, reopen_count ${String(row["reopen_count"] ?? 0)}, no revert of ${landing.sha.slice(0, 12)} on origin/dev after 24 h` };
   const fails: string[] = [];
-  if (honest.value === false) fails.push("link2");
-  if (l4.state === "fail") fails.push("link4");
-  if (l6.state === "fail") fails.push("link6");
+  const firstWhy: string[] = [];
+  const failIf = (name: string, s: LinkState | CheckHonest, text: string) => { if ((s as LinkState).state === "fail" || (s as CheckHonest).value === false) { fails.push(name); firstWhy.push(`${name}: ${text}`); } };
+  failIf("link1", l1, l1.why); failIf("link2", honest, honest.reason); failIf("link3", l3, l3.why); failIf("link4", l4, l4.why); failIf("link6", l6, l6.why);
   const opLinks = [...new Set(acts.acts.map((a) => `operator_act:${a.addendum}`))];
   const failing = [...fails, ...opLinks];
   const route = acts.route_unverifiable > 0 ? `; ROUTE UNVERIFIABLE (addendum 4a): ${acts.route_unverifiable} system-principal write(s) with no recorded route, counted as system` : "";
   const out = (verdict: RepairVerdict, reason: string): RepairJudgement => ({
     ...base, verdict, reason: reason + route, ...(verdict === "not_counted" ? { failing_link: failing[0]! } : {}), failing_links: failing,
     arm_writer: armWriter, operator_acts: acts, check, check_honest: honest, landing_verdict: landingVerdict, durable_until: durableUntil, route_unverifiable: acts.route_unverifiable,
+    window: { from: filedAt, until: untilAt },
   });
-  if (fails.length > 0) {
-    const first = fails[0] === "link2" ? `link 2: ${honest.reason}` : fails[0] === "link4" ? `link 4: ${l4.why}` : `link 6: ${l6.why}`;
-    return out("not_counted", `${first}${opLinks.length > 0 ? `; also operator acts: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}` : ""}`);
-  }
-  if (acts.acts.length > 0) return out("not_counted", `operator act in the fix's provenance: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}`);
+  if (fails.length > 0) return out("not_counted", `${firstWhy[0]}${opLinks.length > 0 ? `; also operator acts: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}` : ""}`);
+  if (acts.acts.length > 0) return out("not_counted", `operator act from filing to close + 24 h: ${acts.acts.slice(0, 2).map((a) => a.detail).join("; ")}`);
+  // UNKNOWN IS NEVER CLEAN: anything unread, unattributable or in review decides before time does.
+  if (unknown.length > 0) return out("unjudged", `unread, so an operator act cannot be ruled out: ${unknown.join("; ")}`);
   if (acts.unattributable.length > 0) return out("unjudged", `gap write(s) whose writer cannot be classed: ${acts.unattributable.slice(0, 3).join("; ")}`);
-  if (acts.unread.length > 0) return out("unjudged", `provenance input(s) unreadable: ${acts.unread.join(", ")}`);
-  if (l4.state === "pending" || l6.state === "pending") return out("pending", l4.state === "pending" ? `link 4 pending: ${l4.why}` : `link 6 pending: ${l6.why}`);
+  if (acts.review.length > 0) return out("unjudged", `REVIEW: ${acts.review.slice(0, 2).join("; ")}`);
   if (honest.value === "unjudged") return out("unjudged", `link 2: ${honest.reason}`);
-  if (l4.state === "review") return out("unjudged", `link 4: ${l4.why}`);
-  if (l6.state === "review") return out("unjudged", `link 6: ${l6.why}`);
-  return out("counted", `system-armed, check honest, ${l4.why}, durable: ${l6.why}`);
+  for (const [n, s] of [["link 3", l3], ["link 4", l4], ["link 6", l6]] as const) if (s.state === "review") return out("unjudged", `${n}: ${s.why}`);
+  if (l4.state === "pending" || l6.state === "pending") return out("pending", l4.state === "pending" ? `link 4 pending: ${l4.why}` : `link 6 pending: ${l6.why}`);
+  return out("counted", `system-detected, system-armed, check honest, ${l3.why}, ${l4.why}, durable: ${l6.why}`);
 }
 
 export type LaneRevertVerdict = "green" | "red" | "pending" | "unjudged";
-export interface RegressedSettlement { key: string; attempt_id: string; gap_id: string; sha: string; at: string; source: string }
+export interface RegressedSettlement { key: string; attempt_id: string; gap_id: string; sha: string; at: string | null; source: string }
 export interface RevertCommit { sha: string; at: string; message: string }
 export interface LaneRevertJudgement {
-  fact: "lane_revert_within_1h"; settlement_id: string; gap_id: string; regressed_sha: string; regressed_repo: string | null; regressed_at: string;
+  fact: "lane_revert_within_1h"; settlement_id: string; gap_id: string; regressed_sha: string; regressed_repo: string | null; regressed_at: string | null;
   source: string; revert_sha: string | null; revert_at: string | null; revert_names_sha: boolean; lag_s: number | null; verdict: LaneRevertVerdict; reason: string;
+  /** Judged because its red divergence is still open (not, or no longer, in the window). */
+  carried: boolean;
 }
 const LANE_REVERT_MS = 3600_000;
-/** One regressed settlement, judged. `reverts` are the commits after the regressed one that say they revert it, plus
- *  the auto-revert marker's own commit (which may not say so); null when the clone was not found. Pure. */
-export function judgeLaneRevert(s: RegressedSettlement, repo: string | null, fullSha: string | null, reverts: RevertCommit[] | null, nowMs: number): LaneRevertJudgement {
-  const base = { fact: "lane_revert_within_1h" as const, settlement_id: s.key, gap_id: s.gap_id, regressed_sha: fullSha ?? s.sha, regressed_repo: repo, regressed_at: s.at, source: s.source };
+/** One regressed settlement, judged. `reverts` are the commits ON ORIGIN/DEV after the regressed one that say they
+ *  revert it, plus the auto-revert marker's own commit when it is on origin/dev; null when the clone was not found.
+ *  `windowStartMs`: a settlement older than it with no revert is "expired unreverted" (red). Pure. */
+export function judgeLaneRevert(s: RegressedSettlement, repo: string | null, fullSha: string | null, reverts: RevertCommit[] | null, nowMs: number, windowStartMs: number = Number.NEGATIVE_INFINITY, carried = false): LaneRevertJudgement {
+  const base = { fact: "lane_revert_within_1h" as const, settlement_id: s.key, gap_id: s.gap_id, regressed_sha: fullSha ?? s.sha, regressed_repo: repo, regressed_at: s.at, source: s.source, carried };
   const at = isoMs(s.at);
   const none = { revert_sha: null, revert_at: null, revert_names_sha: false, lag_s: null };
-  if (!repo || !fullSha || reverts === null) return { ...base, ...none, verdict: "unjudged", reason: `the regressed sha ${s.sha.slice(0, 12) || "?"} is in no vessel clone here, so its reverts cannot be read` };
+  if (!repo || !fullSha || reverts === null) return { ...base, ...none, verdict: "unjudged", reason: `the regressed sha ${s.sha.slice(0, 12) || "?"} is in no vessel clone here (or its origin/dev is unreadable), so its reverts cannot be read` };
   if (at === null) return { ...base, ...none, verdict: "unjudged", reason: "the settlement has no readable time" };
   const names = (msg: string): boolean => msg.includes(fullSha) || msg.includes(fullSha.slice(0, 12));
   const lane = reverts.filter((r) => /^Auto-Revert:\s*true\s*$/m.test(r.message)).sort((a, b) => (isoMs(a.at) ?? 0) - (isoMs(b.at) ?? 0));
@@ -650,10 +683,11 @@ export function judgeLaneRevert(s: RegressedSettlement, repo: string | null, ful
     const j = { ...base, revert_sha: pick.sha, revert_at: pick.at, revert_names_sha: named, lag_s: lag };
     if (!named) return { ...j, verdict: "red", reason: `the lane revert ${pick.sha.slice(0, 12)} does not name the regressed sha` };
     if (lag === null || lag * 1000 > LANE_REVERT_MS) return { ...j, verdict: "red", reason: `the lane revert ${pick.sha.slice(0, 12)} landed ${lag === null ? "at an unreadable time" : `${lag} s`} after the settlement, past 1 h` };
-    return { ...j, verdict: "green", reason: `lane revert ${pick.sha.slice(0, 12)} names the sha, ${lag} s after the settlement` };
+    return { ...j, verdict: "green", reason: `lane revert ${pick.sha.slice(0, 12)} names the sha, on origin/dev, ${lag} s after the settlement` };
   }
   const other = reverts.find((r) => names(r.message));
   if (other) return { ...base, revert_sha: other.sha, revert_at: other.at, revert_names_sha: true, lag_s: isoMs(other.at) === null ? null : Math.round(((isoMs(other.at) as number) - at) / 1000), verdict: "red", reason: `reverted by ${other.sha.slice(0, 12)}, which is not a lane revert (no Auto-Revert trailer)${s.source === "operator_revert" ? "; the settlement records an operator revert" : ""}` };
+  if (at < windowStartMs) return { ...base, ...none, verdict: "red", reason: "expired unreverted: the settlement aged out of the window with no lane revert observed on origin/dev" };
   if (nowMs - at < LANE_REVERT_MS) return { ...base, ...none, verdict: "pending", reason: `no revert yet, ${Math.round((nowMs - at) / 1000)} s into the 1 h` };
   return { ...base, ...none, verdict: "red", reason: "no revert within 1 h" };
 }
@@ -669,47 +703,64 @@ export function repairControlInputs(nowMs: number, operatorArmed: boolean): Repa
   const sha = "f".repeat(40);
   const row: GapRow = { id, status: "closed", source: "substrate_detected", first_detected_at: t(80), closed_at: t(48), reopen_count: 0,
     classification_metadata: { edit_site: "repos/fixture-vessel/src/fixture.ts", check_supply: { state: "armed", test_file: "test/fixture.check.ts" }, predicate_birth_verdict: "present", closed_reason: "landed_verified", close_basis: "absent", landed_sha: sha } };
+  const ev = (over: Record<string, unknown>) => ({ gap_id: id, outcome: "written", store: "local", source: "holder" as const, principal_kind: "in-process", key_id: null, operator_marker: false, ...over });
   return {
-    landing: { attempt_id: "att-fixture-0", gap_id: id, sha, repo: "fixture-vessel", at: t(50), directed: false }, row, byId: new Map([[id, row]]), regressed: null, reverts: [],
+    landing: { attempt_id: "att-fixture-0", gap_id: id, sha, repo: "fixture-vessel", at: t(50), directed: false, authoring_execution_id: null, from: "ledger" }, row, byId: new Map([[id, row]]), regressed: null, reverts: [],
+    fix: { author: LANE_AUTHOR, at: t(50), files: ["src/fixture.ts"], on_origin_dev: true },
     checkSource: `import { fixture } from "../src/fixture.js";\nexpect(fixture()).toBe("fixed");\n`, siteSource: `export function fixture() { return "fixed"; }\n`,
-    acts: { scopeActs: [], siteCommits: [], checkFirstCommit: { sha: "e".repeat(40), author: "Substrate Autonomous", at: t(70), lane: true, files: ["test/fixture.check.ts"] }, keymap: [], peerKeys6: [], originPresent: false,
-      events: [{ gap_id: id, outcome: "written", fields_changed: ["classification_metadata.check_supply"], ts: t(70), principal_kind: operatorArmed ? "key" : "in-process", key_id: operatorArmed ? "key_fx" : null, operator_marker: operatorArmed, store: "local", source: "holder" }] },
+    acts: { scopeActs: [], siteCommits: [], checkFirstCommit: { sha: "e".repeat(40), author: LANE_AUTHOR, at: t(70), lane: true, files: ["test/fixture.check.ts"] }, keymap: [], peerKeys6: [], originPresent: false,
+      eventsCapped: false, eventsFromFiling: true, labels: [], labelContext: { fixLiveAt: t(200), keymap: [], forwardingKeys: [], nodeSelfAdminKeys: [] },
+      events: [ev({ fields_changed: ["status"], status_from: "absent", ts: t(80) }),
+        ev({ fields_changed: ["classification_metadata.check_supply"], ts: t(70), principal_kind: operatorArmed ? "key" : "in-process", key_id: operatorArmed ? "key_fx" : null, operator_marker: operatorArmed })] },
     nowMs,
   };
 }
 export function laneRevertControls(nowMs: number): Array<{ name: string; want: LaneRevertVerdict; j: LaneRevertJudgement }> {
   const sha = "d".repeat(40);
   const at = new Date(nowMs - 3 * 3600_000).toISOString();
-  const s = (key: string): RegressedSettlement => ({ key, attempt_id: "att-fixture-1", gap_id: LANE_REVERT_MUST_FAIL_ID, sha, at, source: "falsified_after_restart" });
+  const s = (key: string, when = at): RegressedSettlement => ({ key, attempt_id: "att-fixture-1", gap_id: LANE_REVERT_MUST_FAIL_ID, sha, at: when, source: "falsified_after_restart" });
   const rev = (minutes: number, named: boolean): RevertCommit => ({ sha: "c".repeat(40), at: new Date(nowMs - 3 * 3600_000 + minutes * 60_000).toISOString(), message: `Revert "x"\n\n${named ? `This reverts commit ${sha}.` : "This reverts the regressed landing."}\n\nAuto-Revert: true` });
+  const old = new Date(nowMs - 200 * 3600_000).toISOString();
   return [
     { name: LANE_REVERT_MUST_FAIL_ID, want: "red", j: judgeLaneRevert(s(LANE_REVERT_MUST_FAIL_ID), "fixture-vessel", sha, [], nowMs) },
     { name: "fixture:regressed-settlement-timely-lane-revert", want: "green", j: judgeLaneRevert(s("fixture:regressed-settlement-timely-lane-revert"), "fixture-vessel", sha, [rev(30, true)], nowMs) },
     { name: "fixture:regressed-settlement-late-lane-revert", want: "red", j: judgeLaneRevert(s("fixture:regressed-settlement-late-lane-revert"), "fixture-vessel", sha, [rev(90, true)], nowMs) },
     { name: "fixture:regressed-settlement-shaless-lane-revert", want: "red", j: judgeLaneRevert(s("fixture:regressed-settlement-shaless-lane-revert"), "fixture-vessel", sha, [rev(20, false)], nowMs) },
+    { name: "fixture:regressed-settlement-expired-unreverted", want: "red", j: judgeLaneRevert(s("fixture:regressed-settlement-expired-unreverted", old), "fixture-vessel", sha, [], nowMs, nowMs - 168 * 3600_000, true) },
   ];
 }
 export const judgementLine = (j: { fact: string }): string => `[self-fact-judgement] ${JSON.stringify(j)}`;
 
+type LedgerRow = { key: string; at: string; record: Record<string, unknown> };
 // What the two rows read, injectable for tests (a fixture ledger, store, clones and scope history).
 export interface JudgementDeps {
-  ledger: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent" | "attemptRevert") => Array<{ key: string; at: string; record: Record<string, unknown> }>;
+  ledger: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent" | "attemptRevert") => LedgerRow[];
+  /** Whether the ledger file of `kind` exists: an absent file is unknown, never an empty ledger. */
+  ledgerPresent: (kind: "attemptIntent" | "attemptSettlement" | "landingEvent") => boolean;
+  /** The spool's landing events not yet ingested into the ledger (read only), or null when the spool is unreadable. */
+  spool: () => Array<{ key: string; record: Record<string, unknown> }> | null;
   readGaps: () => Promise<GapRow[]>;
-  /** One gap's write events from this node's file (the holder's), or null when unreadable. */
-  readEvents: (gapId: string) => Promise<GapWriteEventLike[] | null>;
+  /** One gap's write events from this node's file (the holder's), with how many matched; null when unreadable. */
+  readEvents: (gapId: string) => Promise<{ events: GapWriteEventLike[]; matched: number } | null>;
   /** The key class map; null when none is served (the named limit). */
   keymap: () => Promise<KeyMapEntry[] | null>;
+  /** Oracle labels on these traces and the label rule's context; null when unreadable (the named limit). */
+  labels: (traceIds: string[]) => Promise<{ labels: Array<OracleLabelLike & { execution_id?: string | null }>; context: LabelClassContext } | null>;
   /** The vessel clone holding `sha`: its name, dir and the full sha. */
   locate: (sha: string) => { repo: string; dir: string; fullSha: string } | null;
   /** The clone dir of a vessel by name, or null. */
   cloneOf: (vessel: string) => string | null;
-  /** Commits in `dir` after `sinceIso` touching any of `paths`, or null when unreadable. */
+  /** The full sha of `sha` in `dir`, or null when it is not a commit there. */
+  revParse: (dir: string, sha: string) => string | null;
+  /** The fix commit in `dir`, with whether origin/dev reaches it; null when unreadable. */
+  fixCommit: (dir: string, fullSha: string) => FixCommit | null;
+  /** Commits on origin/dev in `dir` after `sinceIso` touching any of `paths`, or null when unreadable. */
   siteCommits: (dir: string, paths: string[], sinceIso: string) => SiteCommit[] | null;
-  /** The commit that added `path` in `dir`; undefined when it was never added; null when unreadable. */
+  /** The commit that added `path` on origin/dev in `dir`; undefined when never added; null when unreadable. */
   firstCommit: (dir: string, path: string) => SiteCommit | null | undefined;
-  /** Commits after `fullSha` in `dir` whose message says it reverts it, or null when unreadable. */
+  /** Commits on origin/dev after `fullSha` in `dir` whose message says it reverts it, or null when unreadable. */
   revertsOf: (dir: string, fullSha: string) => RevertCommit[] | null;
-  /** A commit's time and message, or null. */
+  /** A commit's time and message when origin/dev reaches it, or null. */
   commit: (dir: string, sha: string) => RevertCommit | null;
   /** A file at a commit, or null. */
   show: (dir: string, sha: string, path: string) => string | null;
@@ -718,13 +769,15 @@ export interface JudgementDeps {
   now: () => number;
   log: (line: string) => void;
 }
-const gitIn = (dir: string, args: string[]): string | null => {
+const gitRun = (dir: string, args: string[]): { code: number; out: string } | null => {
   try {
     const p = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe", timeout: 15_000 });
-    return p.exitCode === 0 ? new TextDecoder().decode(p.stdout) : null;
+    return { code: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) };
   } catch { return null; }
 };
-const LANE_AUTHOR = "Substrate Autonomous";
+const gitIn = (dir: string, args: string[]): string | null => { const r = gitRun(dir, args); return r && r.code === 0 ? r.out : null; };
+/** origin/dev reaches `sha` in `dir`: true / false, or null when it cannot be read. */
+const onOriginDev = (dir: string, sha: string): boolean | null => { const r = gitRun(dir, ["merge-base", "--is-ancestor", sha, "origin/dev"]); return r === null ? null : r.code === 0 ? true : r.code === 1 ? false : null; };
 const parseCommits = (out: string): SiteCommit[] => out.split("\x1e").map((b) => b.trim()).filter(Boolean).map((b) => {
   const [head, ...files] = b.split("\n");
   const [sha, author, at] = (head ?? "").split("\x1f");
@@ -772,6 +825,20 @@ async function scopeActsFromHistory(sites: string[], sinceIso: string): Promise<
 type AutonomyScopeLike = { readable: true; reason: string; excluded: string[]; exceptions: string[] };
 const defaultJudgementDeps: JudgementDeps = {
   ledger: (kind) => readRecords(kind).map((r) => ({ key: r.key, at: r.at, record: r.record as Record<string, unknown> })),
+  ledgerPresent: (kind) => existsSync(join(ledgerDir(), `${kind}.jsonl`)),
+  spool: () => {
+    // The git hooks spool landing events; unaccounted_landing_scan ingests them into landingEvent. Read, never ingested
+    // here: a landing still in the spool is a landing. An absent spool is unreadable (the scan says the same).
+    const dir = join(ledgerDir(), "spool");
+    if (!existsSync(dir)) return null;
+    let names: string[];
+    try { names = readdirSync(dir).filter((f) => f.endsWith(".json")).sort(); } catch { return null; }
+    const out: Array<{ key: string; record: Record<string, unknown> }> = [];
+    for (const f of names) {
+      try { out.push({ key: `spool:${f}`, record: JSON.parse(readFileSync(join(dir, f), "utf8")) as Record<string, unknown> }); } catch { /* a torn file: the scan counts it bad too */ }
+    }
+    return out;
+  },
   readGaps: async () => {
     const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000, include_held: true } as never);
     const gaps = (r.body as { gaps?: unknown } | undefined)?.gaps;
@@ -780,10 +847,11 @@ const defaultJudgementDeps: JudgementDeps = {
   },
   readEvents: async (gapId) => {
     const r = await resolveGapWriteEvent({ gap_id: gapId, limit: 1000 });
-    const ev = (r.body as { events?: unknown } | undefined)?.events;
-    return r.shape === "gapWriteEvent" && Array.isArray(ev) ? (ev as GapWriteEventLike[]) : null;
+    const b = r.body as { events?: unknown; matched?: unknown } | undefined;
+    return r.shape === "gapWriteEvent" && Array.isArray(b?.events) ? { events: b!.events as GapWriteEventLike[], matched: Number(b!.matched ?? (b!.events as unknown[]).length) } : null;
   },
   keymap: async () => null,
+  labels: async () => null,
   locate: (sha) => {
     if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
     let names: string[] = [];
@@ -797,14 +865,28 @@ const defaultJudgementDeps: JudgementDeps = {
     return null;
   },
   cloneOf: (vessel) => { const d = join(cloneRoot(), vessel); return /^[A-Za-z0-9._-]+$/.test(vessel) && existsSync(join(d, ".git")) ? d : null; },
-  siteCommits: (dir, paths, sinceIso) => { const o = gitIn(dir, ["log", `--since=${sinceIso}`, "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "HEAD", "--", ...paths]); return o === null ? null : parseCommits(o); },
-  firstCommit: (dir, path) => { const o = gitIn(dir, ["log", "--diff-filter=A", "--reverse", "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "HEAD", "--", path]); if (o === null) return null; return parseCommits(o)[0]; },
+  revParse: (dir, sha) => { const f = (gitIn(dir, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]) ?? "").trim(); return /^[0-9a-f]{40}$/.test(f) ? f : null; },
+  fixCommit: (dir, fullSha) => {
+    const head = gitIn(dir, ["log", "-1", "--format=%an%x1f%cI", fullSha]);
+    const files = gitIn(dir, ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", fullSha]);
+    if (head === null || files === null) return null;
+    const [author, at] = head.trim().split("\x1f");
+    return { author: author ?? "", at: at ?? "", files: files.split("\n").map((f) => f.trim()).filter(Boolean), on_origin_dev: onOriginDev(dir, fullSha) };
+  },
+  siteCommits: (dir, paths, sinceIso) => { const o = gitIn(dir, ["log", `--since=${sinceIso}`, "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "origin/dev", "--", ...paths]); return o === null ? null : parseCommits(o); },
+  firstCommit: (dir, path) => { const o = gitIn(dir, ["log", "--diff-filter=A", "--reverse", "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "origin/dev", "--", path]); if (o === null) return null; return parseCommits(o)[0]; },
   revertsOf: (dir, fullSha) => {
-    const o = gitIn(dir, ["log", "-E", "-i", "--grep", `reverts (\\w+ ){0,4}(commit )?(${fullSha}|${fullSha.slice(0, 12)})`, "--format=%x1e%H%x1f%cI%x1f%B", `${fullSha}..HEAD`]);
+    const o = gitIn(dir, ["log", "-E", "-i", "--grep", `reverts (\\w+ ){0,4}(commit )?(${fullSha}|${fullSha.slice(0, 12)})`, "--format=%x1e%H%x1f%cI%x1f%B", `${fullSha}..origin/dev`]);
     if (o === null) return null;
     return o.split("\x1e").map((b) => b.replace(/^\n/, "")).filter(Boolean).map((b) => { const [sha, at, ...msg] = b.split("\x1f"); return { sha: (sha ?? "").trim(), at: (at ?? "").trim(), message: msg.join("\x1f") }; }).filter((c) => /^[0-9a-f]{40}$/.test(c.sha));
   },
-  commit: (dir, sha) => { const o = gitIn(dir, ["log", "-1", "--format=%H%x1f%cI%x1f%B", sha]); if (!o) return null; const [s, at, ...msg] = o.split("\x1f"); return /^[0-9a-f]{40}$/.test((s ?? "").trim()) ? { sha: s!.trim(), at: (at ?? "").trim(), message: msg.join("\x1f") } : null; },
+  commit: (dir, sha) => {
+    if (onOriginDev(dir, sha) !== true) return null; // a revert only counts once it reached origin/dev
+    const o = gitIn(dir, ["log", "-1", "--format=%H%x1f%cI%x1f%B", sha]);
+    if (!o) return null;
+    const [s, at, ...msg] = o.split("\x1f");
+    return /^[0-9a-f]{40}$/.test((s ?? "").trim()) ? { sha: s!.trim(), at: (at ?? "").trim(), message: msg.join("\x1f") } : null;
+  },
   show: (dir, sha, path) => gitIn(dir, ["show", `${sha}:${path}`]),
   scopeActs: scopeActsFromHistory,
   now: () => Date.now(),
@@ -814,38 +896,49 @@ let judgementDeps: JudgementDeps = defaultJudgementDeps;
 /** Tests only: replace what repair_autonomy and lane_revert_within_1h read (null restores the defaults). */
 export function __setJudgementDepsForTests(d: Partial<JudgementDeps> | null): void { judgementDeps = d ? { ...defaultJudgementDeps, ...d } : defaultJudgementDeps; }
 
-/** The ledger's lane landings in the window, newest per gap (expected for repair_autonomy). */
-export function ledgerLandings(deps: Pick<JudgementDeps, "ledger">, sinceMs: number): RepairLanding[] {
+/** The lane landings in the window, from the ledger AND its undrained spool, newest per gap (expected for
+ *  repair_autonomy). A landing whose time cannot be parsed is kept (unknown is never out of the window). */
+export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, sinceMs: number): { landings: RepairLanding[]; spool_readable: boolean } {
   const intents = new Map<string, Record<string, unknown>>();
   for (const r of deps.ledger("attemptIntent")) intents.set(r.key, r.record);
+  const ingested = deps.ledger("landingEvent");
+  const keys = new Set(ingested.map((r) => r.key));
+  const spool = deps.spool();
+  const events: Array<{ record: Record<string, unknown>; from: "ledger" | "spool" }> = [
+    ...ingested.map((r) => ({ record: r.record, from: "ledger" as const })),
+    ...(spool ?? []).filter((s) => !keys.has(s.key)).map((s) => ({ record: s.record, from: "spool" as const })),
+  ];
   const byGap = new Map<string, RepairLanding>();
-  for (const r of deps.ledger("landingEvent")) {
-    const e = r.record;
+  for (const { record: e, from } of events) {
     // A rewrite (an amended landing) is a landing too, under its new sha; the newest per gap is judged.
     if (e["event"] !== "commit" && e["event"] !== "rewrite") continue;
     const att = typeof e["attempt_id"] === "string" ? e["attempt_id"] : "";
     const sha = typeof e["sha"] === "string" ? e["sha"] : "";
+    if (!att.startsWith("att-") || !/^[0-9a-f]{40}$/.test(sha)) continue;
     const at = isoMs(e["at"]);
-    if (!att.startsWith("att-") || !/^[0-9a-f]{40}$/.test(sha) || at === null || at < sinceMs) continue;
+    if (at !== null && at < sinceMs) continue;
     const intent = intents.get(att);
     const gapId = intent && typeof intent["gap_id"] === "string" ? intent["gap_id"] : "";
     if (!gapId || intent!["route"] === "auto_revert") continue;
     const repo = String(e["repo"] ?? "").split("/").filter(Boolean).pop() ?? "";
     const prev = byGap.get(gapId);
-    if (!prev || (isoMs(prev.at) ?? 0) <= at) byGap.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: new Date(at).toISOString(), directed: typeof intent!["directed"] === "boolean" ? (intent!["directed"] as boolean) : null });
+    const prevAt = prev ? isoMs(prev.at) : null;
+    if (!prev || (at !== null && (prevAt === null || prevAt <= at))) {
+      byGap.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: at === null ? (typeof e["at"] === "string" ? e["at"] : null) : new Date(at).toISOString(), directed: intent!["directed"], authoring_execution_id: typeof intent!["authoring_execution_id"] === "string" ? intent!["authoring_execution_id"] : null, from });
+    }
   }
-  return [...byGap.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id));
+  return { landings: [...byGap.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id)), spool_readable: spool !== null };
 }
-/** The ledger's regressed settlements in the window (expected for lane_revert_within_1h). */
-export function ledgerRegressedSettlements(deps: Pick<JudgementDeps, "ledger">, sinceMs: number): RegressedSettlement[] {
-  const out: RegressedSettlement[] = [];
+/** Every regressed settlement in the ledger, by key (the window is applied by the caller). */
+export function ledgerRegressedSettlements(deps: Pick<JudgementDeps, "ledger">): Map<string, RegressedSettlement> {
+  const out = new Map<string, RegressedSettlement>();
   for (const r of deps.ledger("attemptSettlement")) {
     const rec = r.record;
     if (rec["verdict"] !== "regressed") continue;
-    const at = isoMs(rec["at"] ?? r.at);
-    if (at === null || at < sinceMs) continue;
+    const raw = rec["at"] ?? r.at;
+    const at = isoMs(raw);
     const shas = Array.isArray(rec["shas"]) ? (rec["shas"] as unknown[]).map(String) : [];
-    out.push({ key: r.key, attempt_id: String(rec["attempt_id"] ?? ""), gap_id: typeof rec["gap_id"] === "string" ? rec["gap_id"] : "", sha: shas[shas.length - 1] ?? "", at: new Date(at).toISOString(), source: String(rec["source"] ?? "settle_regressed") });
+    out.set(r.key, { key: r.key, attempt_id: String(rec["attempt_id"] ?? ""), gap_id: typeof rec["gap_id"] === "string" ? rec["gap_id"] : "", sha: shas[shas.length - 1] ?? "", at: at === null ? (typeof raw === "string" ? raw : null) : new Date(at).toISOString(), source: String(rec["source"] ?? "settle_regressed") });
   }
   return out;
 }
@@ -1462,10 +1555,11 @@ const FACTS: Record<string, FactFn> = {
     }
     return { fact: "lane_coverage", source_read: true, copies_read: copies, divergences: out, note: `${vessels} vessel(s) with a tsconfig` };
   },  /**
-   * REPAIR AUTONOMY (§14 #3): one judgement per gap with a lane landing in the landing ledger over the row's window
-   * (see "repair_autonomy and lane_revert_within_1h" above). The finding filed is the ledger landings the instrument
-   * could not judge; the counts are the measurement. Must-fail control: an operator-armed gap with a verified landing,
-   * judged by the same function, reads not_counted (failing_link operator_act:arm) while its system-armed twin counts.
+   * REPAIR AUTONOMY (§14 #3): one judgement per gap with a lane landing in the landing ledger (or its spool) over the
+   * row's window (see "repair_autonomy and lane_revert_within_1h" above). The finding filed is the ledger landings the
+   * instrument could not judge; the counts are the measurement. An absent ledger file or spool is UNOBSERVED, never an
+   * empty ledger. Must-fail control: an operator-armed gap with a verified landing, judged by the same function, reads
+   * not_counted (failing_link operator_act:arm) while its system-armed twin counts.
    */
   repair_autonomy: async (canary, row) => {
     const fact = row.id;
@@ -1475,9 +1569,15 @@ const FACTS: Record<string, FactFn> = {
     const sinceIso = new Date(nowMs - hours * 3600_000).toISOString();
     const out: SelfFactDivergence[] = [];
     const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: out, note });
+    const absent = (["attemptIntent", "landingEvent", "attemptSettlement"] as const).filter((k) => !deps.ledgerPresent(k));
+    if (absent.length > 0) return unread(`landing ledger file(s) absent: ${absent.join(", ")} (unknown is never an empty ledger)`);
     let landings: RepairLanding[];
-    let settlements: ReturnType<JudgementDeps["ledger"]>;
-    try { landings = ledgerLandings(deps, nowMs - hours * 3600_000); settlements = deps.ledger("attemptSettlement"); } catch (err) { noteReadError("landing ledger for repair_autonomy", err); return unread("landing ledger unreadable"); }
+    let settlements: LedgerRow[];
+    try {
+      const l = ledgerLandings(deps, nowMs - hours * 3600_000);
+      if (!l.spool_readable) return unread("the landing spool is unreadable, so landings not yet ingested cannot be counted");
+      landings = l.landings; settlements = deps.ledger("attemptSettlement");
+    } catch (err) { noteReadError("landing ledger for repair_autonomy", err); return unread("landing ledger unreadable"); }
     let gaps: GapRow[];
     try { gaps = await deps.readGaps(); } catch (err) { noteReadError("gap store for repair_autonomy", err); return unread("gap store unreadable"); }
     const byId = new Map(gaps.map((g) => [String(g["id"] ?? ""), g] as [string, GapRow]));
@@ -1494,22 +1594,41 @@ const FACTS: Record<string, FactFn> = {
       const site = splitSite(siteRaw);
       const check = ownCheckFile(g);
       const siteDir = site ? deps.cloneOf(site.vessel) : null;
-      const fixLoc = deps.locate(l.sha);
+      // The fix is read in the EDIT SITE's clone only (link 3): a sha found elsewhere is not this fix.
+      const fullSha = siteDir ? deps.revParse(siteDir, l.sha) ?? "" : "";
+      const fixDir = siteDir && fullSha ? siteDir : null;
       const reg = settlements.filter((s) => s.record["attempt_id"] === l.attempt_id && s.record["verdict"] === "regressed").pop();
       const filed = g ? String(g["first_detected_at"] ?? g["created_at"] ?? "") || sinceIso : sinceIso;
       const paths = [site?.path, check].filter((p): p is string => !!p);
-      const atRev = fixLoc && siteDir && fixLoc.dir === siteDir ? fixLoc.fullSha : "HEAD";
+      // Events of the row AND of each lineage ancestor; capped or not reaching the filing is incomplete.
+      let events: Array<GapWriteEventLike & { source: "holder" }> | null = g ? [] : null;
+      let capped = false;
+      let fromFiling = false;
+      if (g) {
+        for (const id of [l.gap_id, ...lineageAncestors(l.gap_id, byId)]) {
+          const r = await deps.readEvents(id);
+          if (r === null) { events = null; break; }
+          if (r.matched > r.events.length) capped = true;
+          if (id === l.gap_id) fromFiling = r.events.some((e) => (e as { status_from?: unknown }).status_from === "absent" && String(e.outcome ?? "").startsWith("written"));
+          events!.push(...r.events.map((e) => ({ ...e, gap_id: e.gap_id ?? id, source: "holder" as const })));
+        }
+      }
+      const traceIds = [...(l.authoring_execution_id ? [l.authoring_execution_id] : [])];
+      let labelRead: Awaited<ReturnType<JudgementDeps["labels"]>> = null;
+      try { labelRead = await deps.labels(traceIds); } catch { labelRead = null; }
       const j = judgeRepairClosure({
         landing: l, row: g, byId,
         regressed: reg ? { key: reg.key, source: String(reg.record["source"] ?? "settle_regressed"), at: String(reg.record["at"] ?? reg.at) } : null,
-        reverts: fixLoc ? deps.revertsOf(fixLoc.dir, fixLoc.fullSha) : null,
-        checkSource: siteDir && check ? deps.show(siteDir, atRev, check) : null,
-        siteSource: siteDir && site ? deps.show(siteDir, atRev, site.path) : null,
+        reverts: fixDir ? deps.revertsOf(fixDir, fullSha) : null,
+        fix: fixDir ? deps.fixCommit(fixDir, fullSha) : null,
+        checkSource: fixDir && check ? deps.show(fixDir, fullSha, check) : null,
+        siteSource: fixDir && site ? deps.show(fixDir, fullSha, site.path) : null,
         acts: {
           scopeActs: siteRaw ? (scopeBySite ? scopeBySite.get(siteRaw) ?? [] : null) : [],
           siteCommits: siteDir ? (paths.length > 0 ? deps.siteCommits(siteDir, paths, filed) : []) : null,
           checkFirstCommit: check ? (siteDir ? deps.firstCommit(siteDir, check) : null) : undefined,
-          events: g ? await deps.readEvents(l.gap_id) : null,
+          events, eventsCapped: capped, eventsFromFiling: fromFiling,
+          labels: labelRead ? labelRead.labels : null, labelContext: labelRead ? labelRead.context : null,
           originPresent: false, keymap, peerKeys6: (keymap ?? []).filter((k) => k.owner_kind === "peer").map((k) => k.id.slice(0, 6)),
         },
         nowMs,
@@ -1518,8 +1637,8 @@ const FACTS: Record<string, FactFn> = {
       deps.log(judgementLine(j));
     }
     const n = (v: RepairVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate = { checked: n("counted"), expected: landings.length, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
-    if (aggregate.unjudged > 0) {
+    const aggregate: Record<string, unknown> = { checked: n("counted"), expected: landings.length, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
+    if (n("unjudged") > 0) {
       const which = judgements.filter((j) => j.verdict === "unjudged");
       out.push({ fact, key: "unjudged-landings", source: "landing ledger (lane landings in the window)", copy: "repair_autonomy judgements", detail: `${which.length} of ${landings.length} ledger landing(s) over ${hours}h could not be judged, so checked == expected cannot be read for them: ${which.slice(0, 4).map((j) => `${j.gap_id.slice(0, 60)} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
     }
@@ -1534,55 +1653,85 @@ const FACTS: Record<string, FactFn> = {
       }
     }
     return { fact, source_read: true, copies_read: landings.length, divergences: out, judgements, aggregate, controls,
-      note: `${landings.length} ledger landing(s) over ${hours}h: counted=${aggregate.counted} not_counted=${aggregate.not_counted} pending=${aggregate.pending} unjudged=${aggregate.unjudged}; checked ${aggregate.checked} of expected ${aggregate.expected}` };
+      note: `${landings.length} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${landings.length}` };
   },
   /**
    * LANE REVERT WITHIN 1 H (§14 #6, §7 step 5 exit): one judgement per regressed settlement in the landing ledger over
-   * the row's window. A red settlement is filed (self-fact-divergence-<row>-settlement-<key>). Must-fail control: a
-   * regressed settlement with no revert reads red (and a timely lane revert naming the sha green, a late or sha-less one red).
+   * the row's window, plus every settlement whose red divergence is still open. Green only on an observed lane revert
+   * on origin/dev; everything else keeps its divergence, so a red settlement's gap closes only on that revert (aging out
+   * of the window reads "expired unreverted" and stays red). Must-fail control: a regressed settlement with no revert
+   * reads red (and a timely lane revert naming the sha green, a late, sha-less or expired one red).
    */
   lane_revert_within_1h: async (canary, row) => {
     const fact = row.id;
     const deps = judgementDeps;
     const nowMs = deps.now();
     const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 168;
+    const windowStart = nowMs - hours * 3600_000;
     const out: SelfFactDivergence[] = [];
-    let settlements: RegressedSettlement[];
-    let marks: ReturnType<JudgementDeps["ledger"]>;
-    try { settlements = ledgerRegressedSettlements(deps, nowMs - hours * 3600_000); marks = deps.ledger("attemptRevert"); } catch (err) {
+    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: out, note });
+    if (!deps.ledgerPresent("attemptSettlement")) return unread("landing ledger file absent: attemptSettlement (unknown is never an empty ledger)");
+    let all: Map<string, RegressedSettlement>;
+    let marks: LedgerRow[];
+    try { all = ledgerRegressedSettlements(deps); marks = deps.ledger("attemptRevert"); } catch (err) {
       noteReadError("landing ledger for lane_revert_within_1h", err);
-      return { fact, source_read: false, copies_read: 0, divergences: out, note: "landing ledger unreadable" };
+      return unread("landing ledger unreadable");
     }
+    // Settlements whose red divergence is still open are judged whatever their age (they close only on a revert).
+    let gaps: GapRow[];
+    try { gaps = await deps.readGaps(); } catch (err) { noteReadError("gap store for lane_revert_within_1h", err); return unread("gap store unreadable, so open red settlements cannot be carried"); }
+    const carriedKeys = new Set<string>();
+    for (const g of gaps) {
+      const m = metaRec(g);
+      if (String(g["status"] ?? "") !== "open" || m["detector"] !== SELF_FACT_RECONCILE_ID || m["fact"] !== fact) continue;
+      const k = String(m["divergence_key"] ?? "");
+      if (k.startsWith("settlement-")) carriedKeys.add(k.slice("settlement-".length));
+    }
+    const inWindow = [...all.values()].filter((s) => { const t = isoMs(s.at); return t === null || t >= windowStart; });
+    const keys = new Set([...inWindow.map((s) => s.key), ...carriedKeys]);
     const judgements: LaneRevertJudgement[] = [];
-    for (const s of settlements) {
-      const loc = s.sha ? deps.locate(s.sha) : null;
-      let reverts = loc ? deps.revertsOf(loc.dir, loc.fullSha) : null;
-      // The auto-revert's own marker names its commit even when that commit's message does not name the sha.
-      const mark = marks.filter((r) => r.record["reverted_attempt_id"] === s.attempt_id && typeof r.record["revert_sha"] === "string").pop();
-      if (loc && reverts && mark && !reverts.some((r) => r.sha.startsWith(String(mark.record["revert_sha"])))) {
-        const c = deps.commit(loc.dir, String(mark.record["revert_sha"]));
-        if (c) reverts = [...reverts, c];
+    let expected = 0;
+    for (const key of [...keys].sort()) {
+      const carried = carriedKeys.has(key);
+      const s = all.get(key);
+      let j: LaneRevertJudgement;
+      if (!s) {
+        j = { fact: "lane_revert_within_1h", settlement_id: key, gap_id: "", regressed_sha: "", regressed_repo: null, regressed_at: null, source: "?", revert_sha: null, revert_at: null, revert_names_sha: false, lag_s: null, verdict: "red", reason: "the settlement record is no longer in the ledger and no revert was observed: it stays red", carried };
+      } else {
+        if (!carried || inWindow.includes(s)) expected += 1;
+        const loc = s.sha ? deps.locate(s.sha) : null;
+        let reverts = loc ? deps.revertsOf(loc.dir, loc.fullSha) : null;
+        // The auto-revert's own marker names its commit even when that commit's message does not name the sha.
+        const mark = marks.filter((r) => r.record["reverted_attempt_id"] === s.attempt_id && typeof r.record["revert_sha"] === "string").pop();
+        if (loc && reverts && mark && !reverts.some((r) => r.sha.startsWith(String(mark.record["revert_sha"])))) {
+          const c = deps.commit(loc.dir, String(mark.record["revert_sha"]));
+          if (c) reverts = [...reverts, c];
+        }
+        j = judgeLaneRevert(s, loc?.repo ?? null, loc?.fullSha ?? null, reverts, nowMs, windowStart, carried);
       }
-      const j = judgeLaneRevert(s, loc?.repo ?? null, loc?.fullSha ?? null, reverts, nowMs);
       judgements.push(j);
       deps.log(judgementLine(j));
-      if (j.verdict === "red") out.push({ fact, key: `settlement-${s.key}`, source: `attemptSettlement ${s.key} (${s.source})`, copy: loc ? `${loc.repo} clone` : "vessel clones", detail: `regressed settlement ${s.key} of ${s.sha.slice(0, 12)} (gap ${s.gap_id.slice(0, 80) || "?"}) at ${s.at}: ${j.reason}`, canary: false });
+      // A red settlement is filed; a carried one keeps its divergence until a revert is OBSERVED (green), whatever else
+      // this run could or could not read.
+      if (j.verdict === "red" || (carried && j.verdict !== "green")) {
+        out.push({ fact, key: `settlement-${key}`, source: `attemptSettlement ${key} (${j.source})`, copy: j.regressed_repo ? `${j.regressed_repo} clone (origin/dev)` : "vessel clones", detail: `regressed settlement ${key} of ${j.regressed_sha.slice(0, 12) || "?"} (gap ${j.gap_id.slice(0, 80) || "?"}) at ${j.regressed_at ?? "?"}: ${j.reason}${carried && j.verdict !== "red" ? ` (verdict ${j.verdict}; kept open until a revert is observed)` : ""}`, canary: false });
+      }
     }
     const n = (v: LaneRevertVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate = { checked: n("green"), expected: settlements.length, green: n("green"), red: n("red"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours };
-    if (aggregate.unjudged > 0) {
-      const which = judgements.filter((j) => j.verdict === "unjudged");
-      out.push({ fact, key: "unjudged-settlements", source: "landing ledger (regressed settlements in the window)", copy: "vessel clones", detail: `${which.length} regressed settlement(s) could not be judged: ${which.slice(0, 4).map((j) => `${j.settlement_id} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
+    const aggregate: Record<string, unknown> = { checked: judgements.filter((j) => j.verdict === "green" && !(j.carried && !inWindow.some((s) => s.key === j.settlement_id))).length, expected, green: n("green"), red: n("red"), pending: n("pending"), unjudged: n("unjudged"), carried: carriedKeys.size, window_hours: hours };
+    const fresh = judgements.filter((j) => j.verdict === "unjudged" && !j.carried);
+    if (fresh.length > 0) {
+      out.push({ fact, key: "unjudged-settlements", source: "landing ledger (regressed settlements in the window)", copy: "vessel clones", detail: `${fresh.length} regressed settlement(s) could not be judged: ${fresh.slice(0, 4).map((j) => `${j.settlement_id} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
     }
     let controls: LaneRevertJudgement[] = [];
     if (canary) {
       const cs = laneRevertControls(nowMs);
       controls = cs.map((c) => ({ ...c.j, settlement_id: c.name }));
       for (const c of controls) deps.log(judgementLine(c));
-      if (cs.every((c) => c.j.verdict === c.want)) out.push({ fact, key: `${row.id}-canary`, source: LANE_REVERT_MUST_FAIL_ID, copy: "judgeLaneRevert", detail: "must-fail control: a regressed settlement with no revert read red; a timely lane revert naming the sha read green, a late and a sha-less one red", canary: true });
+      if (cs.every((c) => c.j.verdict === c.want)) out.push({ fact, key: `${row.id}-canary`, source: LANE_REVERT_MUST_FAIL_ID, copy: "judgeLaneRevert", detail: "must-fail control: a regressed settlement with no revert read red; a timely lane revert naming the sha read green, a late, a sha-less and an expired-unreverted one red", canary: true });
     }
-    return { fact, source_read: true, copies_read: settlements.length, divergences: out, judgements, aggregate, controls,
-      note: `${settlements.length} regressed settlement(s) over ${hours}h: green=${aggregate.green} red=${aggregate.red} pending=${aggregate.pending} unjudged=${aggregate.unjudged}; checked ${aggregate.checked} of expected ${aggregate.expected}` };
+    return { fact, source_read: true, copies_read: keys.size, divergences: out, judgements, aggregate, controls,
+      note: `${keys.size} regressed settlement(s) (${carriedKeys.size} carried open) over ${hours}h: green=${n("green")} red=${n("red")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${String(aggregate["checked"])} of expected ${expected}` };
   },
 };
 

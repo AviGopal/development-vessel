@@ -95,7 +95,8 @@ describe("addendum 2a / 2a′ beyond the frozen cases (controls on the reader it
     ]);
     expect(rowFieldOperatorActs("g-released", m, after).map((a) => a.addendum)).toEqual(["2a"]);
     expect(rowFieldOperatorActs("g-at-only", m, after).map((a) => a.addendum)).toEqual(["2a-at-without-by"]);
-    // A bare operator_hold flag with no stamp is not datable as an operator act (the system's strike-limit hold writes one).
+    // A bare operator_hold flag has no stamp to date: rowFieldOperatorActs reads stamps only. operatorActsOf counts the
+    // undated flag on its own (addendum "hold-undated"; self-fact-repair-review-fixes [item 3]).
     expect(rowFieldOperatorActs("g-clean", m, after)).toEqual([]);
   });
   it("a root_gap_id link on an ancestor is followed transitively", () => {

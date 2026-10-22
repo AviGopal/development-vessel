@@ -328,3 +328,84 @@ describe("LIVE: the test_writing verify refuses a wrapped inverted check before 
     expect(j).toMatchObject({ ok: true, stage: null });
   });
 });
+
+// AN EXPECTED VALUE NOTHING THE CHECK SUPPLIES CAN PRODUCE IS REFUSED BEFORE IT LANDS (2026-10-22).
+//
+// c2ab3e0 (substrate-authored, an activity-api lookup check) mocks the URL resolver and global.fetch so the search the
+// function calls returns a hit WITHOUT its embedding, then expects the function to return the embedding
+// [0.1, 0.2, 0.3, 0.4]. Nothing the check supplies carries those numbers, and neither does the module, so no code path
+// can produce them: red forever, an assertion red, so it passed the verify and the arm guards. The rule
+// (`check_asserts_contract_mismatch:expected_not_derivable`) refuses an equality assertion on a called export's result
+// whose expected array or object literal shares not one datum with the check's own text (its mocks, fixtures and
+// arguments) or the called module, when the check stands in for a dependency and reads no data from outside its text.
+//
+// FIXTURES: c2ab3e0's check verbatim, embedding-lookup-cache.ts as it was at c2ab3e0, and a control whose mocked hit
+// carries the vector under a field the function does not read (red today, derivable); *-run-bun142.txt are bun 1.4.2
+// runs of both (paths rewritten to /tmp/fx). The fixture vessel stubs the URL resolver the check mocks.
+const EMB_REL = "src/lib/embedding-lookup-cache.ts";
+const EMB_SRC = fixture("embedding-lookup-cache.at-c2ab3e0.ts.txt");
+const EMB_STUBS: Record<string, string> = { "src/lib/prior-seed.ts": "export async function resolveConceptDbUrl(): Promise<string | null> { return null; }\n" };
+const EMB_TREE = readerOf({ [EMB_REL]: EMB_SRC, ...EMB_STUBS });
+const CHECK_C2A = fixture("c2ab3e0-embedding-lookup-cache.check.ts.txt");
+const CHECK_DERIVABLE = fixture("derivable-embedding.check.ts.txt");
+const REL_C2A = "test/checks/c2ab3e0-embedding-lookup-cache.check.ts";
+const REL_DERIVABLE = "test/checks/derivable-embedding.check.ts";
+const RUN_C2A = "c2ab3e0-run-bun142.txt";
+const RUN_DERIVABLE = "derivable-embedding-run-bun142.txt";
+
+describe("contractMismatchRefusal: an expected value nothing the check supplies can produce", () => {
+  test("[FIXTURE] c2ab3e0's red compared the expected embedding with null at its own expect()", () => {
+    const c = classify(fixture(RUN_C2A));
+    expect(c.compared?.[0]).toMatchObject({ file: `/tmp/fx/${REL_C2A}`, line: 66, received: "null" });
+  });
+
+  test("[MUST-FAIL] c2ab3e0's check is refused: its expected embedding is in nothing it supplies", () => {
+    expect(typeof refusal).toBe("function");
+    const r = refusal!(CHECK_C2A, REL_C2A, classify(fixture(RUN_C2A)), EMB_TREE);
+    expect(r).toMatchObject({ module: EMB_REL, fn: "lookupEmbeddingForSignature", reads: "expected_not_derivable" });
+    expect(r!.reason).toContain("check_asserts_contract_mismatch:expected_not_derivable");
+    expect(r!.reason).toContain("(0.1, 0.2, 0.3, 0.4)");
+  });
+
+  test("[CONTROL] the same check whose mocked hit carries the vector (red today, derivable) is not refused", () => {
+    expect(typeof refusal).toBe("function");
+    expect(refusal!(CHECK_DERIVABLE, REL_DERIVABLE, classify(fixture(RUN_DERIVABLE)), EMB_TREE)).toBeNull();
+  });
+
+  test("[CONTROL] no stand-in, a negated or non-equality matcher, an open literal, a datum in the module, or outside data decides nothing", () => {
+    expect(typeof refusal).toBe("function");
+    const run = classify(fixture(RUN_C2A));
+    const edit = (from: string, to: string, src = CHECK_C2A): string => { expect(src).toContain(from); return src.replace(from, to); };
+    // the stand-ins removed (line numbers kept): what the function reads is the real dependency's
+    const real = edit("global.fetch = originalFetch;", "void originalFetch;", edit("global.fetch = mockFetch as any;", "void mockFetch;", edit("const mockFetch = mock(async", "const mockFetch = (async", edit("mock.module('../../src/lib/prior-seed',", "void ('../../src/lib/prior-seed',"))));
+    expect(refusal!(real, REL_C2A, run, EMB_TREE)).toBeNull();
+    expect(refusal!(edit("expect(result).toEqual(", "expect(result).not.toEqual("), REL_C2A, run, EMB_TREE)).toBeNull();
+    expect(refusal!(edit("expect(result).toEqual(", "expect(result).toContain("), REL_C2A, run, EMB_TREE)).toBeNull();
+    expect(refusal!(edit("[0.1, 0.2, 0.3, 0.4]", "[0.1, 0.2, 0.3, signature.length]"), REL_C2A, run, EMB_TREE)).toBeNull();
+    expect(refusal!(CHECK_C2A, REL_C2A, run, readerOf({ [EMB_REL]: `${EMB_SRC}\nexport const SAMPLE = [0.4];\n`, ...EMB_STUBS }))).toBeNull();
+    expect(refusal!(`${CHECK_C2A}\nconst recorded = readFileSync("search-hit.json", "utf8");\n`, REL_C2A, run, EMB_TREE)).toBeNull();
+  });
+});
+
+describe("LIVE: the test_writing verify refuses an expectation nothing the check supplies can produce", () => {
+  const verdictOf = async (gapId: string, check: string): Promise<Judgement> => {
+    const root = mkdtempSync(join(tmpdir(), "contract-mismatch-derivable-"));
+    for (const [rel, text] of Object.entries({ [EMB_REL]: EMB_SRC, ...EMB_STUBS, [`test/checks/${checkFile(gapId)}`]: check })) {
+      mkdirSync(join(root, rel, ".."), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return judge({ gapId, vesselRoot: root, editSite: null, run: runner(root), runs: 3 });
+  };
+
+  test("[MUST-FAIL] c2ab3e0's check is refused at the verify: check_asserts_contract_mismatch:expected_not_derivable", async () => {
+    const j = await verdictOf("contract-mismatch-expected-not-derivable", CHECK_C2A);
+    expect(j.ok).toBe(false);
+    expect(j.stage).toBe("check_asserts_contract_mismatch");
+    expect(j.reason).toContain("check_asserts_contract_mismatch:expected_not_derivable");
+  });
+
+  test("[CONTROL] the derivable check passes the verify", async () => {
+    const j = await verdictOf("contract-mismatch-expected-derivable", CHECK_DERIVABLE);
+    expect(j).toMatchObject({ ok: true, stage: null });
+  });
+});

@@ -783,6 +783,20 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
  * An assertion it cannot place, a value it cannot trace, or an open contract decides nothing. Known limit (accepted, as
  * for a missing export): a gap whose fix ADDS the shape or the body field, or makes the function return a value of a
  * new kind, writes exactly this check, and it is refused.
+ * THE EXPECTED VALUE MUST BE DERIVABLE FROM WHAT THE CHECK SUPPLIES (c2ab3e0, a lookup check: it mocks the search the
+ * function calls to return a hit WITHOUT the embedding, then expects the function to return the embedding
+ * [0.1, 0.2, 0.3, 0.4], a value nothing it supplies carries; red forever, yet it passed the arm guards). After every rule
+ * above, it refuses `check_asserts_contract_mismatch:expected_not_derivable` when
+ *   - the check stands in for a dependency (mock.module, mock(), spyOn, jest/vi fakes, or an assignment to a global such
+ *     as global.fetch) and reads no data from outside its own text (no file read, no JSON import, no require, no
+ *     non-relative dynamic import), so what the code under test is given is what the check's text holds;
+ *   - the failing assertion is toBe / toEqual / toStrictEqual (not negated) on the result of a call to a src export (or a
+ *     member of it), found as above; and its Expected is an array or object literal, inline or through a local, whose
+ *     leaves are literals;
+ *   - and not one number or string at those leaves appears anywhere else in the check (its mocks, fixtures, arguments,
+ *     numbers inside strings included) or in the called module: no code path can produce the value from them.
+ * Known limit (accepted): a function that COMPUTES a composite sharing no datum with its mocked inputs (a normalised
+ * vector, say), or a check whose mocks compute their data, is refused.
  * Applied where missingExportRefusal is: at the verify of a test_writing compose (so a refused check never lands) and at
  * the arm step. null = no refusal.
  */
@@ -884,14 +898,15 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
   };
   bind(sf);
   // Every expect(<subject>)…<matcher>(…) call: the matcher name's position is where bun's stack frame points.
-  const expects: Array<{ subject: TS.Expression; line: number; col: number; matcher: string; negated: boolean }> = [];
+  const expects: Array<{ subject: TS.Expression; line: number; col: number; matcher: string; negated: boolean; args: readonly TS.Expression[] }> = [];
   const findExpects = (n: TS.Node): void => {
     if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "expect" && n.arguments[0]) {
       let m: TS.Node = n;
       while (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m && m.parent.name.text === "not") m = m.parent;
       if (m.parent && ts.isPropertyAccessExpression(m.parent) && m.parent.expression === m) {
         const pos = sf.getLineAndCharacterOfPosition(m.parent.name.getStart(sf));
-        expects.push({ subject: n.arguments[0], line: pos.line + 1, col: pos.character + 1, matcher: m.parent.name.text, negated: m !== n });
+        const mc = m.parent.parent;
+        expects.push({ subject: n.arguments[0], line: pos.line + 1, col: pos.character + 1, matcher: m.parent.name.text, negated: m !== n, args: mc && ts.isCallExpression(mc) && mc.expression === m.parent ? mc.arguments : [] });
       }
     }
     ts.forEachChild(n, findExpects);
@@ -932,46 +947,57 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     return e;
   };
   const parseValue = (v: string | null): string | null => { if (v === null || !v.startsWith("\"")) return null; try { const s = JSON.parse(v) as unknown; return typeof s === "string" ? s : null; } catch { return null; } };
-  for (const c of compared as Array<Record<string, unknown>>) {
+  /** The one expect() a compared entry's frame points at in the check, or null. */
+  const placed = (c: Record<string, unknown>): (typeof expects)[number] | null => {
     const file = typeof c["file"] === "string" ? c["file"].replace(/\\/g, "/") : "";
-    if (!(file === checkRel || file.endsWith(`/${checkRel}`)) || typeof c["line"] !== "number") continue;
+    if (!(file === checkRel || file.endsWith(`/${checkRel}`)) || typeof c["line"] !== "number") return null;
     // One expect() on the frame's line is that assertion; several are told apart by the frame's column.
     const onLine = expects.filter((x) => x.line === c["line"]);
     const at = onLine.length > 1 ? onLine.filter((x) => x.col === c["col"]) : onLine;
-    if (at.length !== 1) continue;
+    return at.length === 1 ? at[0]! : null;
+  };
+  // The callee: a named import, a member of a namespace (through a cast: `(ns as any).fn`), or one local alias of either.
+  const calleeOf = (call: TS.Node, raw: TS.Expression, aliased: boolean): { spec: string; fn: string } | null => {
+    const callee = unwrap(raw);
+    if (ts.isIdentifier(callee)) {
+      if (named.has(callee.text)) return { spec: named.get(callee.text)!.spec, fn: named.get(callee.text)!.imported };
+      const alias = aliased ? null : initOf(call, callee.text);
+      return alias ? calleeOf(call, alias, true) : null;
+    }
+    const obj = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? unwrap(callee.expression) : null;
+    if (!obj || !ts.isIdentifier(obj) || !ns.has(obj.text)) return null;
+    if (ts.isPropertyAccessExpression(callee)) return { spec: ns.get(obj.text)!, fn: callee.name.text };
+    if (ts.isElementAccessExpression(callee) && ts.isStringLiteral(callee.argumentExpression)) return { spec: ns.get(obj.text)!, fn: callee.argumentExpression.text };
+    return null;
+  };
+  /** The src module export a value is the result of (`init` passed through every value-preserving wrapper), or null. */
+  const calledExport = (init: TS.Expression | null): { fn: string; mod: { rel: string; source: string }; msf: TS.SourceFile } | null => {
+    const call = init ? passThrough(init) : null;
+    if (!call || !ts.isCallExpression(call)) return null;
+    const target = calleeOf(call, call.expression, false);
+    if (!target) return null;
+    const mod = resolveModule(checkRel, target.spec, reader);
+    if (!mod || !mod.rel.startsWith("src/")) return null;
+    return { fn: target.fn, mod, msf: ts.createSourceFile(mod.rel, mod.source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(mod.rel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS) };
+  };
+  for (const c of compared as Array<Record<string, unknown>>) {
+    const at = placed(c);
+    if (!at) continue;
     // The subject's member path (r.body.X -> ["body", "X"]) and its root.
     const path: string[] = [];
-    let e = unwrap(at[0]!.subject);
+    let e = unwrap(at.subject);
     for (;;) {
       if (ts.isPropertyAccessExpression(e)) { path.unshift(e.name.text); e = unwrap(e.expression); continue; }
       if (ts.isElementAccessExpression(e) && (ts.isStringLiteral(e.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(e.argumentExpression))) { path.unshift(e.argumentExpression.text); e = unwrap(e.expression); continue; }
       break;
     }
-    const equality = !at[0]!.negated && (at[0]!.matcher === "toBe" || at[0]!.matcher === "toEqual" || at[0]!.matcher === "toStrictEqual");
+    const equality = !at.negated && (at.matcher === "toBe" || at.matcher === "toEqual" || at.matcher === "toStrictEqual");
     const reads = path[0] === "shape" && path.length === 1 ? "shape" : path[0] === "body" && path.length >= 2 ? `body.${path[1]}` : path.length === 0 && equality ? "value" : null;
     if (!reads) continue;
-    const init = ts.isIdentifier(e) ? initOf(at[0]!.subject, e.text) : e;
-    const call = init ? passThrough(init) : null;
-    if (!call || !ts.isCallExpression(call)) continue;
-    // The callee: a named import, a member of a namespace (through a cast: `(ns as any).fn`), or one local alias of either.
-    const calleeOf = (raw: TS.Expression, aliased: boolean): { spec: string; fn: string } | null => {
-      const callee = unwrap(raw);
-      if (ts.isIdentifier(callee)) {
-        if (named.has(callee.text)) return { spec: named.get(callee.text)!.spec, fn: named.get(callee.text)!.imported };
-        const alias = aliased ? null : initOf(call, callee.text);
-        return alias ? calleeOf(alias, true) : null;
-      }
-      const obj = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? unwrap(callee.expression) : null;
-      if (!obj || !ts.isIdentifier(obj) || !ns.has(obj.text)) return null;
-      if (ts.isPropertyAccessExpression(callee)) return { spec: ns.get(obj.text)!, fn: callee.name.text };
-      if (ts.isElementAccessExpression(callee) && ts.isStringLiteral(callee.argumentExpression)) return { spec: ns.get(obj.text)!, fn: callee.argumentExpression.text };
-      return null;
-    };
-    const target = calleeOf(call.expression, false);
-    if (!target) continue;
-    const mod = resolveModule(checkRel, target.spec, reader);
-    if (!mod || !mod.rel.startsWith("src/")) continue;
-    const msf = ts.createSourceFile(mod.rel, mod.source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(mod.rel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const called = calledExport(ts.isIdentifier(e) ? initOf(at.subject, e.text) : e);
+    if (!called) continue;
+    const { mod, msf } = called;
+    const target = { fn: called.fn };
     const contract = returnedContract(ts, msf, target.fn);
     if (!contract) continue;
     const test = String(c["name"] ?? "");
@@ -1010,6 +1036,69 @@ export function contractMismatchRefusal(source: string, checkRel: string, redRea
     if (c["received"] !== "undefined" || !contract.bodyKeys || contract.bodyKeys.has(field)) continue;
     const keys = [...contract.bodyKeys].slice(0, 12).join(", ");
     return { test, module: mod.rel, fn: target.fn, reads, reason: `${CONTRACT_MISMATCH_STAGE}:body.${field}: ${where} reads body.${field} from ${target.fn} in ${mod.rel}, whose returned body never sets ${field} (it sets ${contract.bodyKeys.size} field${contract.bodyKeys.size === 1 ? "" : "s"}${keys ? `: ${keys}${contract.bodyKeys.size > 12 ? ", …" : ""}` : ""}), so the check is red on every tree, not for the defect` };
+  }
+  // THE EXPECTED VALUE MUST BE DERIVABLE FROM WHAT THE CHECK SUPPLIES (a second pass: every rule above decides first).
+  // Does the check stand its own value in for a dependency, and does it read data from outside its own text?
+  let substitutes = false, readsOutside = false;
+  const scan = (n: TS.Node): void => {
+    if (ts.isCallExpression(n)) {
+      const f = n.expression;
+      const name = ts.isIdentifier(f) ? f.text : ts.isPropertyAccessExpression(f) ? `${ts.isIdentifier(f.expression) ? f.expression.text : ""}.${f.name.text}` : "";
+      if (/^(?:mock|spyOn|mock\.module|(?:jest|vi)\.(?:fn|mock|spyOn))$/.test(name)) substitutes = true;
+      if (/^(?:readFileSync|readFile|require|\w*\.readFileSync|\w*\.readFile|Bun\.file)$/.test(name)) readsOutside = true;
+      if (f.kind === ts.SyntaxKind.ImportKeyword && !/^\.(?!.*\.json$)/.test(relSpec(n.arguments[0]) ?? "")) readsOutside = true;
+    }
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && /\.json$/.test(n.moduleSpecifier.text)) readsOutside = true;
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(n.left) && ts.isIdentifier(n.left.expression) && /^(?:global|globalThis|window)$/.test(n.left.expression.text)) substitutes = true;
+    ts.forEachChild(n, scan);
+  };
+  scan(sf);
+  for (const c of (substitutes && !readsOutside ? compared : []) as Array<Record<string, unknown>>) {
+    const at = placed(c);
+    if (!at || at.negated || !(at.matcher === "toBe" || at.matcher === "toEqual" || at.matcher === "toStrictEqual")) continue;
+    let e = unwrap(at.subject);
+    while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) e = unwrap(e.expression);
+    const called = calledExport(ts.isIdentifier(e) ? initOf(at.subject, e.text) : e);
+    if (!called) continue;
+    // The expected value: an array or object literal, inline or through a local.
+    let x: TS.Expression | null = at.args[0] ? unwrap(at.args[0]) : null;
+    if (x && ts.isIdentifier(x)) { const d = initOf(at.subject, x.text); x = d ? unwrap(d) : null; }
+    if (!x || !(ts.isArrayLiteralExpression(x) || ts.isObjectLiteralExpression(x))) continue;
+    const expectedNode = x;
+    // Its data: every number and string at its leaves (keys, booleans and null are structure, not data).
+    const leaves: Array<number | string> = [];
+    let closed = true;
+    const leaf = (raw: TS.Expression): void => {
+      const v = unwrap(raw);
+      if (ts.isArrayLiteralExpression(v)) { for (const el of v.elements) { if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) closed = false; else leaf(el); } return; }
+      if (ts.isObjectLiteralExpression(v)) { for (const p of v.properties) { if (ts.isPropertyAssignment(p)) leaf(p.initializer); else closed = false; } return; }
+      if (ts.isNumericLiteral(v)) { leaves.push(Number(v.text)); return; }
+      if (ts.isPrefixUnaryExpression(v) && v.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(v.operand)) { leaves.push(-Number(v.operand.text)); return; }
+      if (ts.isStringLiteral(v) || ts.isNoSubstitutionTemplateLiteral(v)) { leaves.push(v.text); return; }
+      if (v.kind === ts.SyntaxKind.TrueKeyword || v.kind === ts.SyntaxKind.FalseKeyword || v.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(v) && v.text === "undefined")) return;
+      closed = false;
+    };
+    leaf(expectedNode);
+    if (!closed || leaves.length === 0) continue;
+    // What the code under test can be given: every literal in the check outside the expected value (its mocks, its
+    // fixtures, its arguments) and in the called module, numbers also as they appear inside strings (a JSON body).
+    const nums = new Set<number>(), strs: string[] = [];
+    const lits = (n: TS.Node): void => {
+      if (n === expectedNode) return;
+      if (ts.isNumericLiteral(n)) nums.add(Math.abs(Number(n.text)));
+      else if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
+        strs.push(n.text);
+        for (const m of n.text.matchAll(/\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)) nums.add(Number(m[0]));
+      }
+      ts.forEachChild(n, lits);
+    };
+    lits(sf);
+    lits(called.msf);
+    const available = (l: number | string): boolean => typeof l === "number" ? nums.has(Math.abs(l)) : strs.some((s) => s === l || (s.length >= 3 && l.includes(s)) || (l.length >= 3 && s.includes(l)));
+    if (leaves.some(available)) continue;
+    const test = String(c["name"] ?? "");
+    const shown = leaves.slice(0, 6).map((l) => JSON.stringify(l)).join(", ") + (leaves.length > 6 ? ", …" : "");
+    return { test, module: called.mod.rel, fn: called.fn, reads: "expected_not_derivable", reason: `${CONTRACT_MISMATCH_STAGE}:expected_not_derivable: the failing assertion of "${test.slice(0, 120)}" (line ${c["line"]}) expects from ${called.fn} in ${called.mod.rel} a value none of whose ${leaves.length} datum${leaves.length === 1 ? "" : "s"} (${shown}) appears in what the check supplies (its mocks, fixtures and arguments) or in ${called.mod.rel}: the check stands in for the dependencies, so no code path can produce that value from them, and the check is red on every tree, not for the defect` };
   }
   return null;
 }

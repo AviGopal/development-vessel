@@ -1,0 +1,30 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/derivable-embedding.check.ts:
+62 |     const result = await embeddingLookupCacheModule.lookupEmbeddingForSignature(signature, orgId);
+63 | 
+64 |     // This assertion will fail. The function returns `null` because `content_embedding`
+65 |     // is undefined in the mocked response. The test expects the actual embedding array,
+66 |     // thereby demonstrating the bug and satisfying the goal of writing a failing test.
+67 |     expect(result).toEqual(expectedEmbedding);
+                        ^
+error: expect(received).toEqual(expected)
+
+- [
+-   0.1,
+-   0.2,
+-   0.3,
+-   0.4,
+- ]
++ null
+
+- Expected  - 6
++ Received  + 1
+
+      at <anonymous> (/tmp/fx/test/checks/derivable-embedding.check.ts:67:20)
+(fail) embedding-lookup-cache derivable expectation > lookupEmbeddingForSignature fails to read embedding because search path omits it [1.67ms]
+
+ 0 pass
+ 1 fail
+ 4 expect() calls
+Ran 1 test across 1 file. [17.00ms]

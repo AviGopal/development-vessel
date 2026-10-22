@@ -1,0 +1,30 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/c2ab3e0-embedding-lookup-cache.check.ts:
+61 |     const result = await embeddingLookupCacheModule.lookupEmbeddingForSignature(signature, orgId);
+62 | 
+63 |     // This assertion will fail. The function returns `null` because `content_embedding`
+64 |     // is undefined in the mocked response. The test expects the actual embedding array,
+65 |     // thereby demonstrating the bug and satisfying the goal of writing a failing test.
+66 |     expect(result).toEqual(expectedEmbedding);
+                        ^
+error: expect(received).toEqual(expected)
+
+- [
+-   0.1,
+-   0.2,
+-   0.3,
+-   0.4,
+- ]
++ null
+
+- Expected  - 6
++ Received  + 1
+
+      at <anonymous> (/tmp/fx/test/checks/c2ab3e0-embedding-lookup-cache.check.ts:66:20)
+(fail) embedding-lookup-cache defective search path > lookupEmbeddingForSignature fails to read embedding because search path omits it [1.73ms]
+
+ 0 pass
+ 1 fail
+ 4 expect() calls
+Ran 1 test across 1 file. [54.00ms]

@@ -331,33 +331,10 @@ export function dispatchGoalHash(d: DispatchObservation): string | null {
  * split is read from the id itself (an obsidian/vault/surface/human id is a surface) or trigger "note".
  * Unverified against every surface; the write guard therefore treats operator AND surface alike.
  */
-/**
- * Operator ids MACHINE dispatchers stamp. goal-host maps any operator id to trigger "operator", so
- * these would read as a human without this list. Census of origin/dev operator literals + live
- * activeDispatches (2026-10-02): rhythm-conductor-tick.ts drain (`rhythm-conductor-drain`),
- * scripts/substrate/learning-liveness-probe.ts, scripts/substrate/substrate-status.sh (known-answer
- * probe), scripts/substrate/learning-loop-selftest-tick.ts (its PROBE_TAG, matched by prefix).
- * Human ids seen live: human-surface, claude-code-operator, codex-operator.
- */
-export const MACHINE_OPERATOR_IDS: ReadonlySet<string> = new Set(["rhythm-conductor-drain", "learning-liveness-probe", "substrate-status"]);
-export function isHumanOperatorId(op: unknown): boolean {
-  if (typeof op !== "string") return false;
-  const o = op.trim();
-  if (!o) return false;
-  return !MACHINE_OPERATOR_IDS.has(o) && !/^learning-loop-selftest/.test(o);
-}
-
-/**
- * The operator id a dispatch's HANDS are read from: the label its caller claimed (operator_label), else `operator` (a
- * record from before goal-host's inbound door, where the two were one field). Since the door, `operator` is AUTHORITY,
- * set only for an operator credential, so reading it alone made a person's cockpit dispatch with an ordinary key look
- * autonomous. A label is attribution only: it confers nothing, and a false claim can only take credit away from the
- * system (it marks hands), never add authority.
- */
-export function handsOperatorId(d: { operator?: string | null; operator_label?: string | null }): string | null {
-  const label = typeof d.operator_label === "string" && d.operator_label.trim() ? d.operator_label : null;
-  return label ?? (typeof d.operator === "string" ? d.operator : null);
-}
+// The operator-id readers live in operator-acts.ts, an evaluator file: the §14 evaluator classes a dispatch SYSTEM or
+// OURS with them, so they may not sit in a lane-editable module. Re-exported here for this module's own callers.
+export { MACHINE_OPERATOR_IDS, isHumanOperatorId, handsOperatorId } from "./operator-acts.js";
+import { isHumanOperatorId, handsOperatorId } from "./operator-acts.js";
 
 export function originOf(d: Pick<DispatchObservation, "operator" | "operator_label" | "trigger">): GoalReachOrigin {
   const op = (handsOperatorId(d) ?? "").trim();

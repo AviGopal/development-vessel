@@ -41,7 +41,35 @@
  * event decides, and without it nobody can say who wrote it.
  */
 
-import { handsOperatorId, isHumanOperatorId, MACHINE_OPERATOR_IDS } from "./goal-reach-tick.js";
+// The operator-id readers, moved here verbatim from goal-reach-tick.ts (which re-exports them), so the evaluator
+// imports nothing the lane can edit (evaluator-grant-scan).
+/**
+ * Operator ids MACHINE dispatchers stamp. goal-host maps any operator id to trigger "operator", so
+ * these would read as a human without this list. Census of origin/dev operator literals + live
+ * activeDispatches (2026-10-02): rhythm-conductor-tick.ts drain (`rhythm-conductor-drain`),
+ * scripts/substrate/learning-liveness-probe.ts, scripts/substrate/substrate-status.sh (known-answer
+ * probe), scripts/substrate/learning-loop-selftest-tick.ts (its PROBE_TAG, matched by prefix).
+ * Human ids seen live: human-surface, claude-code-operator, codex-operator.
+ */
+export const MACHINE_OPERATOR_IDS: ReadonlySet<string> = new Set(["rhythm-conductor-drain", "learning-liveness-probe", "substrate-status"]);
+export function isHumanOperatorId(op: unknown): boolean {
+  if (typeof op !== "string") return false;
+  const o = op.trim();
+  if (!o) return false;
+  return !MACHINE_OPERATOR_IDS.has(o) && !/^learning-loop-selftest/.test(o);
+}
+
+/**
+ * The operator id a dispatch's HANDS are read from: the label its caller claimed (operator_label), else `operator` (a
+ * record from before goal-host's inbound door, where the two were one field). Since the door, `operator` is AUTHORITY,
+ * set only for an operator credential, so reading it alone made a person's cockpit dispatch with an ordinary key look
+ * autonomous. A label is attribution only: it confers nothing, and a false claim can only take credit away from the
+ * system (it marks hands), never add authority.
+ */
+export function handsOperatorId(d: { operator?: string | null; operator_label?: string | null }): string | null {
+  const label = typeof d.operator_label === "string" && d.operator_label.trim() ? d.operator_label : null;
+  return label ?? (typeof d.operator === "string" ? d.operator : null);
+}
 
 export type GapRow = Record<string, unknown>;
 

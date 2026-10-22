@@ -10,6 +10,10 @@
 // F3, the edge: the only src file that imports src/drafter/ is src/resolvers/feature-compose.ts, by ONE dynamic
 //   import() inside resolveFeatureComposeInner that destructures exactly planDrafterReads and assembleDrafterContext;
 //   no src/judge file, retry-evidence.ts or any other file imports it, statically, dynamically or type-only.
+//   The site's specifier may be computed in ONE form only (drafting-as-activities 1.2, USER RULING 2026-10-22 "One
+//   site, computed + allowlist"): `../drafter/variants/${drafterVariantAllowlisted(id)}/index.js`, alone or as one
+//   branch of a conditional whose other branch is a literal into src/drafter/; the guard must be declared in
+//   feature-compose.ts and test the allowlist /^drafter-v[0-9]+[a-z0-9-]*$/. Every other computed specifier is refused.
 // Every checker has a positive control on synthetic source below (the named mutants), so each has been seen red.
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -22,6 +26,10 @@ const CORE = "src/resolvers/feature-compose.ts";
 const ALLOWED_OUTSIDE = ["src/control-bytes.ts", "src/resolvers/region-probe.ts", "src/cross-file-symbols.ts"];
 const FORBIDDEN_NAMES = new Set(["fetch", "Bun", "process", "globalThis", "require", "eval", "Function", "console", "Date", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Worker", "WebAssembly", "XMLHttpRequest", "WebSocket"]);
 const ENTRY_SYMBOLS = ["assembleDrafterContext", "planDrafterReads"];
+const VARIANT_PREFIX = "../drafter/variants/";
+const VARIANT_SUFFIX = "/index.js";
+const VARIANT_GUARD = "drafterVariantAllowlisted";
+const VARIANT_ID_SOURCE = "/^drafter-v[0-9]+[a-z0-9-]*$/";
 
 const sf = (name: string, text: string): ts.SourceFile => ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 function walk(n: ts.Node, visit: (n: ts.Node) => void): void { visit(n); n.forEachChild((c) => walk(c, visit)); }
@@ -102,9 +110,37 @@ export function purityOffenders(rel: string, text: string): string[] {
   return [...new Set(bad)];
 }
 
+const unparen = (e: ts.Expression): ts.Expression => { while (ts.isParenthesizedExpression(e)) e = e.expression; return e; };
+/** The guarded variant template: `../drafter/variants/${drafterVariantAllowlisted(<one arg>)}/index.js`, nothing else. */
+function guardedVariantTemplate(e: ts.Expression): boolean {
+  e = unparen(e);
+  if (!ts.isTemplateExpression(e) || e.head.text !== VARIANT_PREFIX || e.templateSpans.length !== 1) return false;
+  const span = e.templateSpans[0]!;
+  const x = span.expression;
+  return span.literal.text === VARIANT_SUFFIX && ts.isCallExpression(x) && ts.isIdentifier(x.expression) && x.expression.text === VARIANT_GUARD && x.arguments.length === 1;
+}
+/** 1.2: the one computed specifier F3 admits: the guarded template, alone or as a branch of a conditional whose other branch is a literal into src/drafter/. */
+function admittedComputedSpecifier(e: ts.Expression, intoDrafter: (spec: string) => boolean): boolean {
+  e = unparen(e);
+  if (ts.isConditionalExpression(e)) {
+    const branch = (b: ts.Expression): boolean => { const u = unparen(b); return (ts.isStringLiteral(u) && intoDrafter(u.text)) || guardedVariantTemplate(u); };
+    return branch(e.whenTrue) && branch(e.whenFalse) && (guardedVariantTemplate(e.whenTrue) || guardedVariantTemplate(e.whenFalse));
+  }
+  return guardedVariantTemplate(e);
+}
+/** 1.2: the guard a computed site relies on: one top-level declaration in the file, testing exactly the allowlist. */
+export function variantGuardOffenders(rel: string, text: string): string[] {
+  const src = sf(rel, text);
+  const decls = src.statements.filter((st): st is ts.FunctionDeclaration => ts.isFunctionDeclaration(st) && st.name?.text === VARIANT_GUARD);
+  if (decls.length !== 1) return [`${rel}: ${decls.length} top-level declaration(s) of ${VARIANT_GUARD} (exactly 1 expected)`];
+  let tests = false;
+  walk(decls[0]!, (n) => { if (n.kind === ts.SyntaxKind.RegularExpressionLiteral && n.getText(src) === VARIANT_ID_SOURCE) tests = true; });
+  return tests ? [] : [`${rel}: ${VARIANT_GUARD} does not test the allowlist ${VARIANT_ID_SOURCE}`];
+}
+
 /** F3: every runtime-or-type import of src/drafter/ from one non-drafter file, with where it sits. */
-export function drafterEdges(rel: string, text: string): Array<{ kind: "static" | "dynamic" | "type"; fn: string | null; symbols: string[] }> {
-  const out: Array<{ kind: "static" | "dynamic" | "type"; fn: string | null; symbols: string[] }> = [];
+export function drafterEdges(rel: string, text: string): Array<{ kind: "static" | "dynamic" | "type"; fn: string | null; symbols: string[]; computed?: true }> {
+  const out: Array<{ kind: "static" | "dynamic" | "type"; fn: string | null; symbols: string[]; computed?: true }> = [];
   const src = sf(rel, text);
   const intoDrafter = (spec: string): boolean => resolveSpec(rel, spec).startsWith(DRAFTER_DIR);
   walk(src, (n) => {
@@ -114,8 +150,9 @@ export function drafterEdges(rel: string, text: string): Array<{ kind: "static" 
     if (ts.isImportTypeNode(n) && ts.isLiteralTypeNode(n.argument) && ts.isStringLiteral(n.argument.literal) && intoDrafter(n.argument.literal.text)) out.push({ kind: "type", fn: null, symbols: ["*"] });
     if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const a = n.arguments[0];
-      if (!a || !ts.isStringLiteral(a)) { out.push({ kind: "dynamic", fn: null, symbols: ["* (non-literal specifier)"] }); return; }
-      if (!intoDrafter(a.text)) return;
+      const computed = !!a && !ts.isStringLiteral(a) && admittedComputedSpecifier(a, intoDrafter);
+      if (!a || (!ts.isStringLiteral(a) && !computed)) { out.push({ kind: "dynamic", fn: null, symbols: ["* (non-literal specifier)"] }); return; }
+      if (ts.isStringLiteral(a) && !intoDrafter(a.text)) return;
       let fn: string | null = null;
       for (let p: ts.Node | undefined = n.parent; p; p = p.parent) if (ts.isFunctionDeclaration(p) && p.name) { fn = p.name.text; break; }
       let e: ts.Node = n;
@@ -125,7 +162,7 @@ export function drafterEdges(rel: string, text: string): Array<{ kind: "static" 
       if (p && ts.isVariableDeclaration(p) && p.initializer === e && ts.isObjectBindingPattern(p.name)) {
         for (const b of p.name.elements) { const key = b.propertyName ?? b.name; symbols.push(!b.dotDotDotToken && ts.isIdentifier(key) ? key.text : "*"); }
       } else symbols.push("*");
-      out.push({ kind: "dynamic", fn, symbols: symbols.sort() });
+      out.push({ kind: "dynamic", fn, symbols: symbols.sort(), ...(computed ? { computed: true as const } : {}) });
     }
   });
   return out;
@@ -137,6 +174,7 @@ export function edgeOffenders(files: Array<{ rel: string; text: string }>): stri
   for (const f of files) {
     for (const e of drafterEdges(f.rel, f.text)) {
       const ok = f.rel === CORE && e.kind === "dynamic" && e.fn === "resolveFeatureComposeInner" && JSON.stringify(e.symbols) === JSON.stringify(ENTRY_SYMBOLS);
+      if (ok && e.computed) bad.push(...variantGuardOffenders(f.rel, f.text));
       if (ok) sites++;
       else bad.push(`${f.rel}: ${e.kind} import of src/drafter/${e.fn ? ` in ${e.fn}` : ""} taking [${e.symbols.join(", ")}]`);
     }
@@ -222,5 +260,66 @@ describe("F3: only feature-compose.ts imports src/drafter/, dynamically, at one 
     it("MUTANT the dynamic import moved out of resolveFeatureComposeInner (a second site) is red", () => {
       expect(edgeOffenders(swap(CORE, core.text + '\nexport async function early() { const { planDrafterReads, assembleDrafterContext } = await import("../drafter/index.js"); return [planDrafterReads, assembleDrafterContext]; }\n')).join("; ")).toMatch(/in early/);
     });
+  });
+});
+
+// ── drafting-as-activities 1.2: the pins extended over src/drafter/variants/ (NEW cases only) ──────────────────────
+describe("F2 over src/drafter/variants/: a variant is held to the same purity", () => {
+  const okVariant = 'import type { DrafterFacts } from "../../types.js";\nimport { focusedSlice } from "../../windows.js";\nexport function planDrafterReads(f: DrafterFacts): unknown { return { reads: [], n: String(f).length + String(focusedSlice).length }; }\nexport function assembleDrafterContext(f: DrafterFacts): unknown { return { version: "drafter-v2-x", f }; }\n';
+  const VREL = "src/drafter/variants/drafter-v2-x/index.ts";
+  it("every file listed under src/drafter/ includes the variants directory (the listing recurses)", () => {
+    expect(drafterFiles.filter((r) => r.startsWith("src/drafter/variants/")).every((r) => r.startsWith(DRAFTER_DIR))).toBe(true);
+    expect(listTs(DRAFTER_DIR)).toEqual(drafterFiles);
+  });
+  it("CONTROL: a pure variant importing the module's own parts passes", () => { expect(purityOffenders(VREL, okVariant)).toEqual([]); });
+  const mutants: Array<[string, string, RegExp]> = [
+    ["MUTANT a variant importing the closed core", 'import { MAX_DRAFT_PROMPT_BYTES } from "../../../resolvers/feature-compose.js";\n' + okVariant, /import \.\.\/\.\.\/\.\.\/resolvers\/feature-compose\.js/],
+    ["MUTANT a variant calling fetch", okVariant + "export async function h(): Promise<unknown> { return fetch(\"http://x\"); }\n", /names fetch/],
+    ["MUTANT a variant with a dynamic import()", okVariant + "export async function d(): Promise<unknown> { return import(\"../../index.js\"); }\n", /dynamic import/],
+    ["MUTANT a variant re-exporting a closed name", okVariant + 'export { checkOpNoEffect } from "../../../resolvers/retry-evidence.js";\n', /re-export from/],
+  ];
+  for (const [name, text, why] of mutants) it(`${name} is red`, () => { expect(purityOffenders(VREL, text).join("; ")).toMatch(why); });
+});
+
+describe("F3 over src/drafter/variants/: one site, computed only through the allowlist guard", () => {
+  const files = listTs("src/").filter((r) => !r.startsWith(DRAFTER_DIR)).map((rel) => ({ rel, text: read(rel) }));
+  const core = files.find((f) => f.rel === CORE)!;
+  const swap = (rel: string, text: string) => files.map((f) => (f.rel === rel ? { rel, text } : f));
+  const SITE = "`../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`";
+  const mutate = (from: string, to: string): string => { const t = core.text.replace(from, to); expect(t).not.toBe(core.text); return t; };
+  it("the live tree's single site is the admitted computed form, guarded, taking the two entry points", () => {
+    const edges = drafterEdges(CORE, core.text);
+    expect(edges).toEqual([{ kind: "dynamic", fn: "resolveFeatureComposeInner", symbols: ENTRY_SYMBOLS, computed: true }]);
+    expect(core.text).toContain(SITE);
+    expect(variantGuardOffenders(CORE, core.text)).toEqual([]);
+  });
+  it("MUTANT a computed path outside the prefix is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate("`../drafter/variants/${", "`../resolvers/${"))).join("; ")).toMatch(/non-literal specifier/);
+  });
+  it("MUTANT a computed suffix that climbs out of the variant directory is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate("(named)}/index.js`", "(named)}/../../resolvers/x.js`"))).join("; ")).toMatch(/non-literal specifier/);
+  });
+  it("MUTANT an id not checked against the allowlist (unguarded) is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate("${drafterVariantAllowlisted(named)}", "${named}"))).join("; ")).toMatch(/non-literal specifier/);
+  });
+  it("MUTANT the guard's allowlist loosened is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate("!/^drafter-v[0-9]+[a-z0-9-]*$/.test(id)", "!/^drafter-v/.test(id)"))).join("; ")).toMatch(/does not test the allowlist/);
+  });
+  it("MUTANT the guard declared twice (or removed) is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate("export function drafterVariantAllowlisted(id: string): string {", "export function drafterVariantAllowlistedX(id: string): string {"))).join("; ")).toMatch(/0 top-level declaration\(s\) of drafterVariantAllowlisted/);
+  });
+  it("MUTANT the conditional's literal branch pointing outside src/drafter/ is red", () => {
+    expect(edgeOffenders(swap(CORE, mutate('named === null ? "../drafter/index.js" :', 'named === null ? "../resolvers/x.js" :'))).join("; ")).toMatch(/non-literal specifier/);
+  });
+  it("MUTANT a third destructured symbol on the computed site is red (VERSION visible)", () => {
+    expect(edgeOffenders(swap(CORE, mutate("const { planDrafterReads, assembleDrafterContext } = await import(", "const { planDrafterReads, assembleDrafterContext, VERSION } = await import("))).join("; ")).toMatch(/VERSION/);
+  });
+  it("MUTANT a second, computed site (in another function) is red", () => {
+    expect(edgeOffenders(swap(CORE, core.text + "\nexport async function early(named: string) { const { planDrafterReads, assembleDrafterContext } = await import(" + SITE + "); return [planDrafterReads, assembleDrafterContext]; }\n")).join("; ")).toMatch(/in early/);
+  });
+  it("MUTANT another src file importing src/drafter/variants/ is red", () => {
+    const rel = "src/judge/gap-admission.ts";
+    const ga = files.find((f) => f.rel === rel)!;
+    expect(edgeOffenders(swap(rel, 'import { planDrafterReads } from "../drafter/variants/drafter-v2-x/index.js";\n' + ga.text)).join("; ")).toMatch(/gap-admission\.ts: static import/);
   });
 });

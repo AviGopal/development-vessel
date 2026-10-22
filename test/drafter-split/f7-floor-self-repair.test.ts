@@ -42,3 +42,35 @@ describe("F7: a compose targeting src/drafter/ drafts with the floor", () => {
     expect(events).toContain("verify");
   }, 60_000);
 });
+
+// drafting-as-activities 1.2 (NEW case): the pin extends to variants. A compose that names a variant and targets that
+// variant's own file under src/drafter/variants/ drafts with the floor and never loads the variant (nor the module).
+// MUTANT (seen red): the self-target condition removed -> the variant is loaded and called.
+describe("F7 over src/drafter/variants/: a compose targeting a variant's own file does not load that variant", () => {
+  it("the variant is never loaded, the floor drafts, and the record says target_under_src_drafter", async () => {
+    H.install();
+    const VID = "drafter-v9-self";
+    const VTARGET = `repos/${DV}/src/drafter/variants/${VID}/index.ts`;
+    let variantCalls = 0;
+    let moduleCalls = 0;
+    const counted = (bump: () => void) => ({
+      planDrafterReads: (f: unknown) => { bump(); return realDrafter.planDrafterReads(f); },
+      assembleDrafterContext: (f: unknown) => { bump(); return realDrafter.assembleDrafterContext(f); },
+    });
+    for (const ext of ["ts", "js"]) mock.module(`../../src/drafter/variants/${VID}/index.${ext}`, () => counted(() => { variantCalls++; }));
+    mock.module(DRAFTER, () => counted(() => { moduleCalls++; }));
+    const fc = await import("../../src/resolvers/feature-compose.ts?drafter-f7=2");
+    let body: Record<string, any> = {};
+    const rec = await H.run(fc, {
+      name: "f7 variant self-repair",
+      pointer: { spec: `In ${VTARGET}, DRAFTER_FIXTURE must be 2.`, verify_vessels: [`repos/${DV}`], land: false, skip_push: true, directed: true, drafter_variant: VID, gap: { id: "f7-2", summary: `DRAFTER_FIXTURE in ${VTARGET} must be 2` } },
+      plan: "drafter_edit",
+      files: { [`${DV}/package.json`]: "{\"name\":\"development-vessel\",\"type\":\"module\"}\n", [`${DV}/src/drafter/variants/${VID}/index.ts`]: "export const DRAFTER_FIXTURE = 1;\nexport function useIt(): number { return DRAFTER_FIXTURE; }\n", [`${DV}/src/drafter/index.ts`]: "export const DRAFTER_FIXTURE = 1;\n" },
+      store: [{ id: "f7-2", status: "open", category: "code_quality", summary: `DRAFTER_FIXTURE in ${VTARGET} must be 2`, classification_metadata: { edit_site: VTARGET } }],
+    }, (b) => { body = b; });
+    expect({ variantCalls, moduleCalls }).toEqual({ variantCalls: 0, moduleCalls: 0 });
+    expect({ variant: body.drafter?.variant, fell_back: body.drafter?.fell_back }).toEqual({ variant: VID, fell_back: "target_under_src_drafter" });
+    expect(rec.decompose_prompt).toContain(`----- ${VTARGET} -----`);
+    expect(events).toContain("decompose");
+  }, 60_000);
+});

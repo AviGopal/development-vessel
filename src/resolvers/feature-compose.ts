@@ -527,6 +527,10 @@ export interface FeatureComposePointer {
   /** The gap_to_feature pick's approach decision id (dec-…). Recorded on the attempt intent so a landing's
    *  Attempt-Id trailer maps back to the decision its outcome belongs to. */
   decision_id?: string;
+  /** Which drafter assembly drafts this compose (drafting-as-activities 1.2; see drafterVariantChoice). Absent: the
+   *  shipped module (src/drafter/index.ts). "floor": the core's own floor, no module loaded. An id on the allowlist
+   *  (DRAFTER_VARIANT_ID): src/drafter/variants/<id>/index.ts. Anything else: the floor, fell_back "unknown_variant". */
+  drafter_variant?: string;
 }
 
 interface PlanOp {
@@ -6563,6 +6567,26 @@ export type DrafterCheckedContext = {
 export type DrafterRecord = { variant: string; version: string | null; fell_back: string | null; op_budget: number; clamped?: string; dropped?: string[] };
 /** The variant an unnamed compose drafts with: the shipped module, src/drafter/index.ts (its context declares this version). */
 export const DRAFTER_DEFAULT_VARIANT = "drafter-v1";
+/** The allowlist a named variant must match to be loaded, from src/drafter/variants/<id>/index.ts (1.2). */
+export const DRAFTER_VARIANT_ID = /^drafter-v[0-9]+[a-z0-9-]*$/;
+/**
+ * The only id a variant import may name: `id` when it is on the allowlist, else a throw (the import is never made, and
+ * the throw drafts with the floor). F3 (test/drafter-split/) admits a computed import specifier only through this guard,
+ * and only with the static prefix ../drafter/variants/.
+ */
+export function drafterVariantAllowlisted(id: string): string {
+  if (typeof id !== "string" || !/^drafter-v[0-9]+[a-z0-9-]*$/.test(id)) throw new Error(`drafter variant refused: ${String(id).slice(0, 64)} is not on the allowlist`);
+  return id;
+}
+/** What a pointer's drafter_variant selects: the shipped module, the floor, an allowlisted variant, or (anything else) the floor as unknown_variant. */
+export type DrafterVariantChoice = { variant: string; mode: "default" | "floor" | "named" | "unknown" };
+export function drafterVariantChoice(raw: unknown): DrafterVariantChoice {
+  if (raw === undefined || raw === null) return { variant: DRAFTER_DEFAULT_VARIANT, mode: "default" };
+  if (raw === "floor") return { variant: "floor", mode: "floor" };
+  if (typeof raw === "string" && DRAFTER_VARIANT_ID.test(raw)) return { variant: raw, mode: "named" };
+  const shown = typeof raw === "string" ? raw : (() => { try { return JSON.stringify(raw) ?? String(raw); } catch { return String(raw); } })();
+  return { variant: shown.slice(0, 64), mode: "unknown" };
+}
 
 /** A deep-frozen structured copy: the module can neither mutate what a closed gate reads later nor keep a handle. */
 export function drafterDeepFreeze<T>(v: T): T {
@@ -6769,6 +6793,8 @@ export type DrafterRun = {
   selfId: string;
   /** The variant this run drafts with, as recorded (default DRAFTER_DEFAULT_VARIANT). */
   variant?: string;
+  /** How the variant was chosen (drafterVariantChoice): "floor" and "unknown" draft with the floor and load nothing. */
+  mode?: DrafterVariantChoice["mode"];
   load: () => Promise<DrafterModule>;
 };
 
@@ -6805,6 +6831,9 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     ({ ctx: null, budget: run.floorBudget, record: { variant, version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
   const targets = run.scope.targets;
   if (targets.some((t) => t.startsWith(DRAFTER_SELF_PREFIX))) return floor("target_under_src_drafter");
+  // The floor as a declared arm (no module loaded, not a fallback); an id off the allowlist drafts with the floor.
+  if (run.mode === "floor") return { ctx: null, budget: run.floorBudget, record: { variant, version: null, fell_back: null, op_budget: run.floorBudget } };
+  if (run.mode === "unknown") return floor("unknown_variant");
   let mod: DrafterModule;
   try {
     mod = await run.load();
@@ -7545,6 +7574,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       decompose: decomposePrompt(spec, budget, c.grounding, c.principles + c.composeLessons, c.priorFeedback, netNewTargets),
       refine: refineSpecPrompt(spec, c.grounding, c.composeLessons),
     });
+    const variantChoice = drafterVariantChoice(pointer.drafter_variant);
     const drafted = await draftContextThroughOpenModule({
       facts,
       scope: { verifyVessels: [...verifyVessels], targets: [...targetFiles], checkPaths },
@@ -7576,8 +7606,12 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       },
       ancestorStart: typeof composeGap.meta.parent_gap_id === "string" && composeGap.meta.parent_gap_id ? composeGap.meta.parent_gap_id : typeof composeGap.meta.source_gap_id === "string" ? composeGap.meta.source_gap_id : "",
       selfId: String(pointer.gap?.id ?? ""),
+      variant: variantChoice.variant,
+      mode: variantChoice.mode,
       load: async () => {
-        const { planDrafterReads, assembleDrafterContext } = await import("../drafter/index.js");
+        // ONE import site (F3): the shipped module, or an allowlisted variant under src/drafter/variants/.
+        const named = variantChoice.mode === "named" ? variantChoice.variant : null;
+        const { planDrafterReads, assembleDrafterContext } = await import(named === null ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);
         return { planDrafterReads, assembleDrafterContext } as unknown as { planDrafterReads: (f: unknown) => unknown; assembleDrafterContext: (f: unknown) => unknown };
       },
     });

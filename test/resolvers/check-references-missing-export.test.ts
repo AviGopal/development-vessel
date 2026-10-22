@@ -310,7 +310,7 @@ describe("F-ARM: the arm step refuses at attach and records it on the gap", () =
   });
 
   it("[CONTROL] a sound check on a real export of the same module arms as today", async () => {
-    const sound = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/index";\ntest("verifyGoalReached grades a lettercount goal", () => {\n  expect((mod as unknown as Record<string, (x: string) => unknown>)["verifyGoalReached"]("count the letters")).toBe(true);\n});\n`;
+    const sound = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/index";\ntest("verifyGoalReached grades a lettercount goal", () => {\n  expect(mod.verifyGoalReached("count the letters")).toBe(true);\n});\n`;
     const { id } = await landAndTick("me-sound", "goal-host-vessel", "src/index.ts", sound);
     const row = await storeRow(id);
     expect(ledgerOf(row)["state"]).toBe("armed");

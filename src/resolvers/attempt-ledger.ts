@@ -1,4 +1,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
+// Namespace forms for the authoring-execution override below, moved verbatim from attempt-register.ts.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ResolverResult } from './types.js';
@@ -277,4 +280,32 @@ export async function resolveAttemptLedger(pointer: {
     shape: "attemptLedger",
     body: { kind, records },
   };
+}
+
+// The execution that authored an attempt is often known only after registration (a compose
+// emits its own execution row at its end). First write wins, so repeat calls are no-ops.
+function authoringPath(): string { return path.join(ledgerDir(), "attemptAuthoring.jsonl"); }
+export async function setAuthoringExecution(attempt_id: string, execution_id: string): Promise<boolean> {
+  try {
+    if (!attempt_id || !execution_id) return false;
+    if ((await authoringOverride(attempt_id)).authoring_execution_id) return false;
+    fs.mkdirSync(ledgerDir(), { recursive: true });
+    fs.appendFileSync(authoringPath(), JSON.stringify({ attempt_id, execution_id, at: new Date().toISOString() }) + "\n");
+    return true;
+  } catch (e) {
+    console.warn(`[attempt-register] setAuthoringExecution failed for ${attempt_id}: ${(e as Error).message}`);
+    return false;
+  }
+}
+export async function authoringOverride(attempt_id: string): Promise<{ authoring_execution_id?: string }> {
+  try {
+    const p = authoringPath();
+    if (!fs.existsSync(p)) return {};
+    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line) as { attempt_id?: string; execution_id?: string };
+      if (r.attempt_id === attempt_id && typeof r.execution_id === "string") return { authoring_execution_id: r.execution_id };
+    }
+  } catch { /* unreadable override file: fall back to the intent's value */ }
+  return {};
 }

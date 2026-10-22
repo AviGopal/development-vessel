@@ -1076,7 +1076,7 @@ const defaultJudgementDeps: JudgementDeps = {
   },
   show: (dir, sha, path) => gitIn(dir, ["show", `${sha}:${path}`]),
   scopeActs: scopeActsFromHistory,
-  authoring: async (id) => (await (await import("./attempt-register.js")).authoringOverride(id)).authoring_execution_id ?? null,
+  authoring: async (id) => (await (await import("./attempt-ledger.js")).authoringOverride(id)).authoring_execution_id ?? null,
   dispatches: () => readGoalHostDispatches(),
   resolverDispatch: (id) => readGoalHostResolverDispatch(id),
   resolverRequest: (id) => readGoalHostResolverRequest(id),

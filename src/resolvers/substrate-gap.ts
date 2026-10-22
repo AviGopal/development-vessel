@@ -520,17 +520,25 @@ function hasClassifiableId(g: SubstrateGap): boolean {
 }
 
 async function loadGaps(): Promise<SubstrateGap[]> {
+  const raw = await readGapBytes(GAPS_PATH());
+  return raw === null ? [] : parseGapBytes(raw);
+}
+// The store's bytes, or null when the file doesn't exist (an empty store, not an error). Any other failure
+// (permissions, I/O) is unrecoverable, never an empty store.
+async function readGapBytes(path: string): Promise<Buffer | null> {
   try {
-    const raw = await readFile(GAPS_PATH(), "utf-8");
-    const parsed = JSON.parse(raw) as SubstrateGap[];
+    return await readFile(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (err as Error).message);
+  }
+}
+function parseGapBytes(raw: Buffer): SubstrateGap[] {
+  try {
+    const parsed = JSON.parse(raw.toString("utf-8")) as SubstrateGap[];
     if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
     return parsed;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
-      // If the file doesn't exist, this is an empty store, not an error.
-      return [];
-    }
-    // For any other error (parse error, permissions, etc.), treat as an unrecoverable failure.
     throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (err as Error).message);
   }
 }
@@ -545,9 +553,17 @@ async function loadGaps(): Promise<SubstrateGap[]> {
 // the next read. No TTL: an unchanged file is the same store. A file that changes WHILE it is being read (the stat
 // before and after disagree) is returned but not kept. Writers are unchanged: withGapLock -> loadGaps -> modify ->
 // saveGaps still reads the file fresh, so no write is ever computed over a cached copy.
+// THE IDENTITY ALONE CANNOT SEE A SAME-SIZE IN-PLACE OVERWRITE INSIDE ONE TIMESTAMP TICK (2026-10-22). Without
+// multigrain timestamps, mtime and ctime are coarse (one jiffy: 4 ms at HZ=250, 10 ms at HZ=100; a second on some
+// filesystems), and another process's in-place overwrite keeps the inode, so the same size in the same tick left every
+// key field equal and the stale parse was served for the rest of that version. A hit is therefore confirmed on the
+// bytes: every read re-reads the file and compares a hash of ALL of it (not a head/tail sample: a same-size change
+// to one row in the middle is the case) with the kept snapshot's, and re-parses only on a mismatch. The read + hash
+// is a few ms on the holder's store against the parse and its tree, so the snapshot keeps its benefit, and there is
+// no recency window or clock assumption to tune. A burst of reads on one identity shares one read + hash.
 // Readers get COPIES of the rows they are handed (structuredClone of the selected page only), so no caller can
 // mutate the shared snapshot.
-type GapReadSnapshot = { key: string; rows: SubstrateGap[]; byId: Map<string, SubstrateGap[]>; coverage: ReturnType<typeof falsifierCoverage> | null };
+type GapReadSnapshot = { key: string; digest: number | bigint; rows: SubstrateGap[]; byId: Map<string, SubstrateGap[]>; coverage: ReturnType<typeof falsifierCoverage> | null };
 let __gapReadSnapshot: GapReadSnapshot | null = null;
 let __gapReadParses = 0;
 let __gapWriteGeneration = 0; // bumped by every saveGaps in this process: in-process writes change the key whatever the fs timestamp granularity
@@ -567,8 +583,7 @@ const __gapReadInflight = new Map<string, Promise<GapReadSnapshot>>();
 async function loadGapsForRead(): Promise<GapReadSnapshot> {
   const path = GAPS_PATH();
   const before = await gapFileIdentity(path);
-  if (before === null) { __gapReadSnapshot = null; return { key: "", rows: [], byId: new Map(), coverage: null }; }
-  if (__gapReadSnapshot && __gapReadSnapshot.key === before) return __gapReadSnapshot;
+  if (before === null) { __gapReadSnapshot = null; return { key: "", digest: 0, rows: [], byId: new Map(), coverage: null }; }
   const pending = __gapReadInflight.get(before);
   if (pending) return pending;
   const parse = parseGapsForRead(path, before);
@@ -580,7 +595,12 @@ async function loadGapsForRead(): Promise<GapReadSnapshot> {
   }
 }
 async function parseGapsForRead(path: string, before: string): Promise<GapReadSnapshot> {
-  const rows = await loadGaps();
+  const raw = await readGapBytes(path);
+  if (raw === null) { __gapReadSnapshot = null; return { key: "", digest: 0, rows: [], byId: new Map(), coverage: null }; }
+  const digest = Bun.hash(raw);
+  const kept = __gapReadSnapshot;
+  if (kept && kept.key === before && kept.digest === digest) return kept;
+  const rows = parseGapBytes(raw);
   __gapReadParses++;
   const byId = new Map<string, SubstrateGap[]>();
   for (const g of rows) {
@@ -588,7 +608,7 @@ async function parseGapsForRead(path: string, before: string): Promise<GapReadSn
     const list = byId.get(g.id);
     if (list) list.push(g); else byId.set(g.id, [g]);
   }
-  const snap: GapReadSnapshot = { key: before, rows, byId, coverage: null };
+  const snap: GapReadSnapshot = { key: before, digest, rows, byId, coverage: null };
   const after = await gapFileIdentity(path);
   if (after === before) __gapReadSnapshot = snap;
   return snap;

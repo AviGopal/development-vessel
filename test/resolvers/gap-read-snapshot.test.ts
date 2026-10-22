@@ -15,9 +15,18 @@
 //   CONTROL:   rapid successive in-process writes (same second) are each seen by the next read.
 //   CONTROL:   mutating a row a read handed out does not change the next read's row.
 //
+// COARSE TIMESTAMPS (2026-10-22). Without multigrain timestamps, mtime and ctime are one jiffy coarse, so another
+// process's same-size IN-PLACE overwrite inside one tick leaves every identity field equal. The stat the cache keys on
+// is stubbed to repeat the first-observed mtime / ctime, which is that filesystem:
+//   MUST-FAIL: an out-of-process same-size in-place overwrite (a child process, same inode) is seen on the next read
+//              (at the identity-only snapshot: the stale AAAA).
+//   CONTROL:   under the same stub, an unchanged store is parsed ONCE across reads.
+// Each case snapshots the store's bytes and restores them, and restores the real stat, whatever it asserts.
+//
 // Driven through the REAL gap store under a temp WORKSPACE_ROOT. Nothing reads or writes /workspace.
-import { afterAll, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
@@ -161,5 +170,83 @@ describe("the gap store's read path parses each version of the file once", () =>
     const b = await readOne(id);
     expect(b?.summary).toBe("pristine");
     expect(b?.["classification_metadata"]?.["poison"]).toBeUndefined();
+  });
+});
+
+/** A filesystem without multigrain timestamps: every stat of the store reports the mtime / ctime it first reported,
+ *  as two writes inside one timestamp tick do. Every other path, and every other field (ino, size), is the real one. */
+function coarseStoreTimestamps(): { restore: () => void } {
+  const realStat = fsp.stat;
+  let pinned: { mtimeMs: number; ctimeMs: number; mtime: Date; ctime: Date } | null = null;
+  const spy = spyOn(fsp, "stat").mockImplementation((async (p: Parameters<typeof fsp.stat>[0], opts?: Parameters<typeof fsp.stat>[1]) => {
+    const st = await realStat(p, opts as never);
+    if (String(p) !== STORE_FILE) return st;
+    pinned ??= { mtimeMs: Number(st.mtimeMs), ctimeMs: Number(st.ctimeMs), mtime: st.mtime, ctime: st.ctime };
+    return Object.assign(st, pinned);
+  }) as unknown as typeof fsp.stat);
+  return { restore: () => spy.mockRestore() };
+}
+/** Run `fn` with the store's bytes snapshotted, and restore them (or its absence) and the real stat afterwards. */
+async function withRestoredStore(fn: (clock: { restore: () => void }) => Promise<void>): Promise<void> {
+  assertScratch();
+  const saved = existsSync(STORE_FILE) ? readFileSync(STORE_FILE) : null;
+  const clock = coarseStoreTimestamps();
+  try {
+    await fn(clock);
+  } finally {
+    clock.restore();
+    if (saved === null) rmSync(STORE_FILE, { force: true }); else externalRenameWriteBytes(saved);
+    sg.__resetGapReadSnapshotForTests?.();
+  }
+}
+function externalRenameWriteBytes(bytes: Buffer): void {
+  assertScratch();
+  const tmp = `${STORE_FILE}.restore.${RUN}.tmp`;
+  writeFileSync(tmp, bytes);
+  renameSync(tmp, STORE_FILE);
+}
+/** ANOTHER PROCESS overwrites the store IN PLACE: a child `cat > file` truncates and rewrites the same inode. */
+function childInPlaceWrite(rows: Array<Record<string, unknown>>): void {
+  assertScratch();
+  const r = Bun.spawnSync(["sh", "-c", 'cat > "$0"', STORE_FILE], { stdin: Buffer.from(JSON.stringify(rows, null, 2)), stdout: "ignore", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`child in-place write failed: ${r.stderr.toString()}`);
+}
+/** The target row sits between two big fillers, so the change is far from both ends of the file. */
+const padded = (id: string, summary: string): Array<Record<string, unknown>> => [
+  row(`${id}-head`, "h".repeat(16_384)), row(id, summary), row(`${id}-tail`, "t".repeat(16_384)),
+];
+
+describe("the gap store's read snapshot under coarse (non-multigrain) timestamps", () => {
+  it("[MUST-FAIL] an out-of-process same-size in-place overwrite inside one tick is seen on the next read", async () => {
+    await withRestoredStore(async () => {
+      const id = nextId();
+      externalRenameWrite([...padded(id, "AAAA"), ...storedRows()]);
+      sg.__resetGapReadSnapshotForTests();
+      expect((await readOne(id))?.summary).toBe("AAAA");
+      const real = statSync(STORE_FILE);
+      const seen = await fsp.stat(STORE_FILE);
+      childInPlaceWrite(storedRows().map((r) => (r["id"] === id ? { ...r, summary: "BBBB" } : r)));
+      const realAfter = statSync(STORE_FILE);
+      const seenAfter = await fsp.stat(STORE_FILE);
+      // The case is the one the identity cannot see: same inode, same size, same (coarse) mtime and ctime.
+      expect(realAfter.ino).toBe(real.ino);
+      expect(realAfter.size).toBe(real.size);
+      expect([seenAfter.mtimeMs, seenAfter.ctimeMs]).toEqual([seen.mtimeMs, seen.ctimeMs]);
+      expect((await readOne(id))?.summary).toBe("BBBB");
+      expect((await readOne(id))?.summary).toBe("BBBB");
+      expect(sg.__gapReadParsesForTests()).toBe(2); // one parse per version, not one per read
+    });
+  });
+
+  it("[CONTROL] under the same coarse timestamps, an unchanged store is parsed once", async () => {
+    await withRestoredStore(async () => {
+      const id = nextId();
+      externalRenameWrite([...padded(id, "unchanged under coarse timestamps"), ...storedRows()]);
+      sg.__resetGapReadSnapshotForTests();
+      for (let i = 0; i < 3; i++) expect((await readOne(id))?.summary).toBe("unchanged under coarse timestamps");
+      const got = await Promise.all(Array.from({ length: 4 }, () => readOne(id)));
+      for (const g of got) expect(g?.summary).toBe("unchanged under coarse timestamps");
+      expect(sg.__gapReadParsesForTests()).toBe(1);
+    });
   });
 });

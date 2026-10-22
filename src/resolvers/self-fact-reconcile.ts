@@ -477,7 +477,9 @@ export const journal = { read: readJournalLines };
  *
  *   repair_autonomy        one judgement per gap with a lane landing in the LANDING LEDGER (or its undrained spool) in
  *                          the window (expected, R1-18: never from the gap store this instrument reads). counted only when
- *                          link 1 the row's source is substrate_detected (unset or anything else is not autonomous);
+ *                          link 1 the row's source is substrate_detected (unset or anything else is not autonomous;
+ *                                 an operator filing reads "origin: operator-filed"), and no lineage ancestor is
+ *                                 operator-filed or human_reported (followed to the root, the same reading);
  *                          link 2 the own check is honest;
  *                          link 3 the attempt is registered autonomous (directed === false EXACTLY, the auto-revert's
  *                                 rule) and its fix commit is the lane's, touches the edit_site, is in the edit site's
@@ -594,11 +596,22 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   if (landedMs === null) unknown.push("the landing's time (unparsable)");
   if (closed && closedMs === null) unknown.push("the close time (closed with no closed_at)");
   const armWriter = acts.arm_writes.length > 0 ? acts.arm_writes.map((a) => `${a.writer} @ ${a.at ?? "?"}`).join("; ") : (inp.acts.events === null ? "unread (gap-write events unreadable)" : "no arm write in the events read");
-  // link 1: origin
+  // link 1: origin. FOLLOWED TO THE ROOT (USER RULING 2026-10-22, "Follow lineage to the root"): a recommit or narrowed
+  // child is written by the lane as substrate_detected, so an operator-filed or human_reported lineage ancestor (the
+  // explicit links, transitively, and the id rule) is the closure's origin, and link 1 fails on it.
   const src = String(row["source"] ?? "");
   const operatorFiled = src.startsWith("operator:") || src === "human_reported";
-  const l1: LinkState = src === "substrate_detected" ? { state: "pass", why: "source substrate_detected" }
-    : operatorFiled ? { state: "pass", why: `source ${src} (an operator act, counted under link 5)` }
+  const filerOf = (r: GapRow | undefined): string | null => {
+    const s0 = String(r?.["source"] ?? "");
+    const fb = String(metaRec(r ?? null)["filed_by"] ?? "");
+    return s0.startsWith("operator:") || s0 === "human_reported" ? `source ${s0}` : fb.startsWith("operator:") ? `filed_by ${fb}` : null;
+  };
+  const rootFiler = [...lineageAncestors(landing.gap_id, inp.byId)].sort().map((k) => ({ k, by: filerOf(inp.byId.get(k)) })).find((a) => a.by !== null);
+  // The row's own operator filing fails link 1 in the same form (qa ruling 2026-10-22); its filing is still also the
+  // operator act link 5 names.
+  const l1: LinkState = operatorFiled ? { state: "fail", why: `origin: operator-filed (source ${src})` }
+    : rootFiler ? { state: "fail", why: `origin: operator-filed (lineage ancestor ${rootFiler.k.slice(-60)} is ${rootFiler.by})` }
+    : src === "substrate_detected" ? { state: "pass", why: "source substrate_detected, and no operator-filed lineage ancestor" }
     : { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` };
   // link 2
   const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource);

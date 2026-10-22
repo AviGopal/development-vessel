@@ -265,7 +265,8 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
     STORE = [gap("g-filed", { source: "operator:qa" }, { landed_sha: sha("a") })];
     land("g-filed", sha("a"), h(50), "att-f");
     EVENTS = { "g-filed": [systemArm("g-filed")] };
-    expect(judged(await run(), "g-filed").failing_link).toBe("operator_act:operator-filed");
+    // qa ruling 2026-10-22: an operator filing fails link 1 (origin); it is still the operator-filed act too.
+    expect(judged(await run(), "g-filed").failing_links).toEqual(["link1", "operator_act:operator-filed"]);
 
     reset();
     STORE = [gap("g-commit", {}, { landed_sha: sha("a") })];
@@ -356,8 +357,8 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
     land("g-x", sha("a"), h(50), "att-x");
     const j = judged(await run(), "g-x");
     expect(j.verdict).toBe("not_counted");
-    expect(j.failing_link).toBe("link2");
-    expect(j.failing_links).toEqual(["link2", "operator_act:operator-filed"]);
+    expect(j.failing_link).toBe("link1");
+    expect(j.failing_links).toEqual(["link1", "link2", "operator_act:operator-filed"]);
   });
 });
 

@@ -33,8 +33,9 @@
  */
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
-import { isWritePointerType } from "../lib/caller-credential.js";
+import { isWritePointerType, credentialSendRefusal } from "../lib/caller-credential.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
+import { currentCallCredential } from "../lib/call-credential.js";
 import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
@@ -132,13 +133,29 @@ export function gapStoreIsLocal(): boolean { return !process.env["GAP_STORE_ENDP
  *  held-shape routing). */
 export const GAP_STORE_HELD_SHAPES = ["substrateGap", "substrateGap_write", "substrateGapLease_write", "gapWriteEvent", "substrateGapMerge_write"] as const;
 
+/**
+ * FORWARDED CALLS AUTHENTICATE PER CALL, AND NEVER IN CLEARTEXT (2026-10-22).
+ *   - WHOSE KEY. A call this node's route received for a held shape travels with that caller's own credential
+ *     (lib/call-credential.ts), so the holder's identity decides about the caller, per call. A call this node makes
+ *     itself travels with the node key.
+ *   - WHERE A KEY MAY GO. Any key goes only over https, or over http to a host that cannot be on the public
+ *     internet: the same check identity calls use (lib/caller-credential.ts credentialSendRefusal). Otherwise the call
+ *     goes WITHOUT a key. A read still answers. A write is refused at the holder, and the answer is typed
+ *     gap_store_cleartext_refused. That refusal is a placement error, not an outage, so it is never retried.
+ */
 export async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];
   if (!ep) return null;
-  const key = process.env["METABOB_API_KEY"] ?? process.env["API_KEY"];
+  const callAuth = currentCallCredential();
+  const nodeKey = process.env["METABOB_API_KEY"] ?? process.env["API_KEY"];
+  const auth = callAuth ?? (nodeKey ? `ApiKey ${nodeKey}` : null);
+  const withheld = auth ? await credentialSendRefusal(ep, "gap-store holder") : null;
   try {
-    const r = await fetch(ep, { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) }, body: JSON.stringify({ impulse: { pointer } }), signal: AbortSignal.timeout(15_000) });
-    const j = await r.json() as { shape?: string; body?: unknown };
+    const r = await fetch(ep, { method: "POST", headers: { "Content-Type": "application/json", ...(auth && !withheld ? { Authorization: auth } : {}) }, body: JSON.stringify({ impulse: { pointer } }), signal: AbortSignal.timeout(15_000) });
+    const j = await r.json() as { shape?: string; body?: unknown; success?: unknown };
+    if (withheld && (j.success === false || !r.ok || !j.shape || j.shape === "structuredError")) {
+      return { shape: "structuredError", body: { resolver: "substrateGap", failure_mode: "gap_store_cleartext_refused", detail: `gap store at ${ep}: no credential was sent (${withheld}), and the holder answered HTTP ${r.status}. Use https or a private address.` } } as ResolverResult;
+    }
     return { shape: String(j.shape ?? "structuredError"), body: j.body ?? { detail: `gap store at ${ep} answered HTTP ${r.status}` } } as ResolverResult;
   } catch (e) {
     return { shape: "structuredError", body: { resolver: "substrateGap", detail: `gap store at ${ep} unreachable: ${(e as Error).message}` } } as ResolverResult;
@@ -673,7 +690,8 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 // principal_kind "jwt" is never produced today: the write door accepts an ApiKey only.
 //
 // PER NODE. A forwarding node records the call it handled (the original principal); the holder records the
-// forwarded call it handled (the forwarding node's key). The read shape is held with the store: on a forwarding
+// forwarded call it handled: the original caller's key when the call came through the forwarder's route
+// (forwardToGapStore, per call), the forwarding node's key for a write the forwarder made itself. The read shape is held with the store: on a forwarding
 // node it is forwarded to the holder, unless the pointer says local:true (this node's own file).
 //
 // A failed append is logged with the gap id and never fails or changes the write. THE APPEND IS SYNCHRONOUS, so

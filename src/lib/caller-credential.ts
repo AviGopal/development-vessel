@@ -60,6 +60,8 @@ export function __resetCredentialCacheForTests(): void {
   validated.clear();
   lastUnreachableLogAt = Number.NEGATIVE_INFINITY;
   lastCleartextLogAt = Number.NEGATIVE_INFINITY;
+  lastCleartextLogAtByLabel.clear();
+  sendVerdicts.clear();
 }
 
 // THE NODE'S OWN KEY (qa R1, availability). A presented key equal to this process's METABOB_API_KEY is
@@ -119,10 +121,14 @@ function isPrivateAddress(raw: string): boolean {
   return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
 }
 let lastCleartextLogAt = Number.NEGATIVE_INFINITY;
-/** null when the key may be sent to `base`; otherwise why not (naming the host only). */
-async function cleartextRefusal(base: string): Promise<string | null> {
+/** null when the key may be sent to `base`; otherwise why not (naming the host only).
+ *  ONE CHECK, TWO DESTINATIONS (2026-10-22). Identity calls use it as it always was (no options). A forwarded gap-store
+ *  call uses it through credentialSendRefusal below, with its own label (the log names the destination) and a bounded
+ *  lookup: a hostname that has not resolved within `lookupTimeoutMs` cannot be shown private, so the key is withheld. */
+async function cleartextRefusal(base: string, opts: { label?: string; lookupTimeoutMs?: number } = {}): Promise<string | null> {
+  const label = opts.label ?? "identity";
   let url: URL;
-  try { url = new URL(base); } catch { return "IDENTITY_VESSEL_URL is not a URL"; }
+  try { url = new URL(base); } catch { return label === "identity" ? "IDENTITY_VESSEL_URL is not a URL" : `the ${label} URL is not a URL`; }
   if (url.protocol === "https:") return null;
   const host = url.hostname.replace(/^\[|\]$/g, "");
   let refusal: string | null = null;
@@ -131,7 +137,11 @@ async function cleartextRefusal(base: string): Promise<string | null> {
   else if (isIP(host)) refusal = isPrivateAddress(host) ? null : "host is a public address over plain http";
   else {
     try {
-      const addrs = (await dns.promises.lookup(host, { all: true })) as Array<{ address: string }>;
+      const lookup = dns.promises.lookup(host, { all: true }) as Promise<Array<{ address: string }>>;
+      const addrs = opts.lookupTimeoutMs === undefined ? await lookup : await Promise.race([
+        lookup,
+        new Promise<never>((_, reject) => { const t = setTimeout(() => reject(Object.assign(new Error("lookup timed out"), { code: "ETIMEOUT" })), opts.lookupTimeoutMs); (t as { unref?: () => void }).unref?.(); }),
+      ]);
       refusal = addrs.length > 0 && addrs.every((a) => isPrivateAddress(a.address)) ? null : "host resolves to a public address over plain http";
     } catch (err) {
       refusal = `host does not resolve (${String((err as { code?: string })?.code ?? "lookup failed")}), so it cannot be shown private`;
@@ -139,11 +149,32 @@ async function cleartextRefusal(base: string): Promise<string | null> {
   }
   if (refusal) {
     const now = Date.now();
-    if (now - lastCleartextLogAt >= CREDENTIAL_VALIDATION_TTL_MS) {
+    if (label !== "identity") {
+      if (now - (lastCleartextLogAtByLabel.get(label) ?? Number.NEGATIVE_INFINITY) >= CREDENTIAL_VALIDATION_TTL_MS) {
+        lastCleartextLogAtByLabel.set(label, now);
+        console.error(`[caller-credential] REFUSED to send a credential in cleartext to the ${label} at ${url.host}: ${refusal}. The call goes without a key, so a write is refused there. Use https or a private address.`);
+      }
+    } else if (now - lastCleartextLogAt >= CREDENTIAL_VALIDATION_TTL_MS) {
       lastCleartextLogAt = now;
       console.error(`[caller-credential] REFUSED to send a credential in cleartext to identity at ${url.host}: ${refusal}. Identity is treated as unreachable; writes from any key other than this node's own are refused (401). Use https or a private address.`);
     }
   }
+  return refusal;
+}
+const lastCleartextLogAtByLabel = new Map<string, number>();
+
+/** THE SAME CHECK FOR ANY OUTBOUND CALL THAT CARRIES A KEY (2026-10-22): null when a key may be sent to `base`,
+ *  otherwise why not. The verdict is kept per URL origin for CREDENTIAL_VALIDATION_TTL_MS, so a call path pays the
+ *  lookup once a minute, not once a call, and a hostname lookup is bounded at CREDENTIAL_SEND_LOOKUP_TIMEOUT_MS. */
+const CREDENTIAL_SEND_LOOKUP_TIMEOUT_MS = 1_000;
+const sendVerdicts = new Map<string, { refusal: string | null; at: number }>();
+export async function credentialSendRefusal(base: string, label: string): Promise<string | null> {
+  let origin = base;
+  try { origin = new URL(base).origin; } catch { /* the check names the bad URL */ }
+  const hit = sendVerdicts.get(`${label} ${origin}`);
+  if (hit && Date.now() - hit.at < CREDENTIAL_VALIDATION_TTL_MS) return hit.refusal;
+  const refusal = await cleartextRefusal(base, { label, lookupTimeoutMs: CREDENTIAL_SEND_LOOKUP_TIMEOUT_MS });
+  sendVerdicts.set(`${label} ${origin}`, { refusal, at: Date.now() });
   return refusal;
 }
 

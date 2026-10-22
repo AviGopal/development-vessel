@@ -45,7 +45,10 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent, resolveSubstrateGapMergeWrite, ROUTE_NAME_FIELD, type GapWriteRoute } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, resolveGapWriteEvent, resolveSubstrateGapMergeWrite, GAP_STORE_HELD_SHAPES, ROUTE_NAME_FIELD, type GapWriteRoute } from "../resolvers/substrate-gap.js";
+import { runWithCallCredential } from "../lib/call-credential.js";
+/** The shapes whose forward to the gap-store holder presents the caller's own credential (substrate-gap.ts forwardToGapStore). */
+const forwardsAsCaller = (type: string): boolean => (GAP_STORE_HELD_SHAPES as readonly string[]).includes(type);
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
 import { operatorDirectGrant, runWithOperatorDirectGrant, isOperatorDirectCredential, OPERATOR_AUTHORIZATION_HEADER, OPERATOR_DIRECT_SCOPE, ADMIN_SCOPE, DIRECTED_GRANT_FIELD, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
@@ -1282,7 +1285,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
     await stampRouteCaller(c, String(resolverName), pointer, writeCred, "resolvers-execute");
     await stripUnauthorizedDirectedClaim(String(resolverName), pointer, { operatorGrant: null, authorization: c.req.header("Authorization") });
     await grantGapWriteDirection(String(resolverName), pointer, c.req.header("Authorization"));
-    const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal });
+    const result = await runWithCallCredential(forwardsAsCaller(String(resolverName)) ? c.req.header("Authorization") : undefined, () => resolveDispatch(pointer as { type: string } & Record<string, unknown>, { signal: c.req.raw.signal }));
     const content = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
     const impulse = {
       id: `dv-resolver-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -1402,7 +1405,9 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   await grantGapWriteDirection(pointerType, pointer, c.req.header("Authorization"));
 
   try {
-    const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType }, { signal: c.req.raw.signal });
+    // PER CALL (lib/call-credential.ts): a held gap-store shape this node forwards to the holder travels with THIS
+    // caller's own credential, so the holder's identity decides about the caller; every other dispatch is unchanged.
+    const dispatchOnce = () => runWithCallCredential(forwardsAsCaller(pointerType) ? c.req.header("Authorization") : undefined, () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType }, { signal: c.req.raw.signal }));
     const result = operatorGrant ? await runWithOperatorDirectGrant(operatorGrant, dispatchOnce) : await dispatchOnce();
     // Wire-level boundary lie fix (V1, 2026-06-06): a resolver that returns
     // shape:"structuredError" is signalling a substantive failure (missing

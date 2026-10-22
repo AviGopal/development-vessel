@@ -5319,32 +5319,6 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
       const diag = lessonDiag(reason);
       lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500), ...(attempt ?? {}) });
 
-      // Record failure for the lessons that led to this 'cls'
-      (async () => {
-        try {
-          const response = await fetch(`${CONCEPT_DB_ENDPOINT}/v2/impulses/resolve`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Api-Key': METABOB_API_KEY },
-            body: JSON.stringify({ type: "conceptSearch", source_type: "compose_lesson", query: cls, limit: 8 }),
-          });
-
-          if (response.ok) {
-            interface ConceptRow { id?: string; }
-            const concepts: ConceptRow[] = await response.json();
-
-            for (const concept of concepts) {
-              if (concept.id) {
-                await fetch(`${CONCEPT_DB_ENDPOINT}/usage/${concept.id}/fail`, {
-                  method: 'POST',
-                  headers: { 'X-Api-Key': METABOB_API_KEY },
-                });
-              }
-            }
-          }
-        } catch (e) {
-          // Swallow errors to avoid failing the compose
-        }
-      })();
       // A lock record (no_effect_vs_parent) is evicted last: it lifts when its region's text changes, not by age,
       // so refusal lessons cannot push the lock they report out of the window.
       // An ACTIVE constraint's latest record is protected the same way (it lifts by a later lift record, not by age);

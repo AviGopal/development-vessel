@@ -16,8 +16,10 @@
 // MUST-FAIL: a prior applied in a FAILED attempt has its failure recorded through concept_usage_record.
 // CONTROL: a prior that was loaded (rendered) but not applied in the same attempt is not credited either way; an id
 //   the plan cites that was never rendered is dropped.
+// MUST-FAIL (any route): a failed compose credits NO loaded-but-unapplied compose lesson, through concept_usage_record
+//   or the retired per-class route (a search for the failure class, then a POST to /usage/<id>/fail for every hit).
 // MUTANTS (seen red): no credit step (the parent tree); every rendered prior credited; the outcome mapping never
-//   yields failure.
+//   yields failure; the per-class loaded-lesson credit restored.
 import { afterAll, describe, expect, it } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
@@ -31,9 +33,11 @@ const TRACE_ID = "exec_fixture_trace";
 const DRAFTING = { id: "concept_fixture_drafting", source_type: "human_input", name: null, content: "Drafting discipline for code edits: every identifier must already exist in the grounding or be introduced by the same plan." };
 const OTHER = { id: "concept_fixture_other", source_type: "vessel_construction_pattern", name: "resolver contract", content: "Vessels expose POST /resolve with an impulse pointer body." };
 const INVENTED = "concept_fixture_never_rendered";
+/** A compose lesson a per-class search would load for the failure class; it is never rendered as a prior. */
+const LOADED_LESSON = "concept_fixture_loaded_lesson";
 
 type Usage = { concept_id: unknown; outcome: unknown; trace_id: unknown };
-type Seen = { usage: Usage[]; usageLookups: number };
+type Seen = { usage: Usage[]; usageLookups: number; lessonCredits: string[] };
 
 function shim(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Record<string, unknown> }> }, appliedIds: string[], seen: Seen) {
   return {
@@ -56,6 +60,10 @@ function shim(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Recor
           return Response.json({ success: true, shape: "conceptUsageRecorded", body: { concept_id: ptr.concept_id, trace_id: ptr.trace_id, outcome: ptr.outcome, usage_record_id: "usage_fixture" } });
         }
         if (url.endsWith("/v2/activities/executions")) return Response.json({ execution_id: TRACE_ID });
+        // The retired per-class route: answered as if it worked, so any credit it would make is seen.
+        if (url.endsWith("/v2/impulses/resolve") && body?.type === "conceptSearch" && body?.source_type === "compose_lesson") return Response.json([{ id: LOADED_LESSON }]);
+        const perClass = /\/usage\/([^/]+)\/fail$/.exec(url);
+        if (perClass) { seen.lessonCredits.push(decodeURIComponent(perClass[1]!)); return Response.json({ ok: true }); }
         if (typeof body?.prompt === "string" && body.prompt.includes("decomposing a feature specification")) {
           const r = await router(input, init);
           const j = (await r.json()) as { content: string };
@@ -64,7 +72,12 @@ function shim(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Recor
         }
         return router(input, init);
       }) as typeof fetch;
-      try { return await fc.resolveFeatureCompose(p); } finally { globalThis.fetch = router as typeof fetch; }
+      try {
+        const out = await fc.resolveFeatureCompose(p);
+        // A fire-and-forget credit started by the compose must still meet this interceptor.
+        await new Promise((r) => setTimeout(r, 250));
+        return out;
+      } finally { globalThis.fetch = router as typeof fetch; }
     },
   };
 }
@@ -74,7 +87,7 @@ let seq = 0;
 const load = async () => await import(`../../src/resolvers/feature-compose.ts?fc-concept-credit=${++seq}`);
 const run = async (fixture: typeof RED, applied: string[]) => {
   H.install();
-  const seen: Seen = { usage: [], usageLookups: 0 };
+  const seen: Seen = { usage: [], usageLookups: 0, lessonCredits: [] };
   let body: Record<string, unknown> = {};
   const rec = await H.run(shim(await load(), applied, seen), fixture, (b) => { body = b; });
   return { rec, seen, body };
@@ -90,6 +103,14 @@ describe("a failed attempt credits its failure to exactly the priors the drafter
     expect((body.concept_credits as Array<{ recorded: boolean }>).map((c) => c.recorded)).toEqual([true]);
     expect(rec.console.some((l) => l.includes(`[fc-concepts] plan applied: [${DRAFTING.id}]; dropped, not shown to it: [${INVENTED}]`))).toBe(true);
     expect(rec.console.some((l) => l.includes(`[fc-concepts] credit concept=${DRAFTING.id} outcome=failure recorded`))).toBe(true);
+  }, 60_000);
+
+  it("MUST-FAIL (any route): a failed compose credits no loaded-but-unapplied compose lesson", async () => {
+    const { rec, seen } = await run(RED, [DRAFTING.id]);
+    expect(rec.verdict).toBe("UNFAVORABLE");
+    expect(seen.lessonCredits).toEqual([]);
+    expect(seen.usage.filter((u) => u.concept_id === LOADED_LESSON)).toEqual([]);
+    expect(seen.usage).toEqual([{ concept_id: DRAFTING.id, outcome: "failure", trace_id: TRACE_ID }]);
   }, 60_000);
 
   it("CONTROL: a prior loaded but not applied is not credited; the applied one alone is", async () => {

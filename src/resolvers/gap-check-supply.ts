@@ -1029,6 +1029,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   const windowMs = posNum(rhythm.body["measure_window_days"], 7) * 86_400_000;
   const bounds: OutcomeBounds = outcomeBoundsOf(rhythm.body);
   const maxOutcomeReads = Math.floor(posNum(rhythm.body["max_outcome_reads"], 50));
+  // THE CANDIDATE ORDER, read from the same shaped record. "eligible_never_attempted_first" ranks a band ahead of the
+  // rest: never attempted, filed by the system itself (substrate_detected) and with an edit site in the clone, so the
+  // system's own writable rows are not starved behind operator retries. Absent, or any other value: today's order.
+  const candidateOrder = rhythm.body["candidate_order"];
+  const eligibleFirst = candidateOrder === "eligible_never_attempted_first";
   const localNode = checkSupplyNode();
 
   const read = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
@@ -1338,9 +1343,16 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const last = Date.parse(String(l.last_dispatch_at ?? ""));
     return n > 0 && n < maxAttempts && (!Number.isFinite(last) || now >= last + backoffMs * 2 ** (n - 1));
   };
+  const neverAttemptedSystemSited = (r: Row): boolean => {
+    const v = checkSupplyVessel(r);
+    return Number(ledgerOf(metaOf(r)).attempts ?? 0) === 0 && r["source"] === "substrate_detected" && Boolean(v && checkSupplySite(r, v));
+  };
+  console.log(`[check-supply] candidate_order=${eligibleFirst ? "eligible_never_attempted_first" : candidateOrder === undefined ? "default" : `default (unrecognised ${JSON.stringify(candidateOrder)})`}`);
   const candidates = open
     .filter((r) => !touched.has(String(r["id"])) && checkSupplyDisposition(r) !== null)
     .sort((a, b) => {
+      // The band first (candidate_order above), then today's order within each band.
+      if (eligibleFirst) { const ba = neverAttemptedSystemSited(a); const bb = neverAttemptedSystemSited(b); if (ba !== bb) return ba ? -1 : 1; }
       const ra = dueRetry(a); const rb = dueRetry(b);
       if (ra !== rb) return ra ? -1 : 1;
       // Priority after attempts: writable (existing edit site in clone) > stated falsifier_spec > oldest first

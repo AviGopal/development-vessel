@@ -94,3 +94,56 @@ describe("the next attempt is told the name a refusal named", () => {
     expect(supply.priorAttemptSentence([{ state: "arm_refused", titles: ["t one"], reason: long }])).toBe(`An earlier attempt wrote "t one", which was not accepted (${"x".repeat(160)}): write a different test that avoids that. `);
   });
 });
+
+// THE CHECK WRITER IS GIVEN EACH EXPORTED FUNCTION'S REAL SIGNATURE (2026-10-22).
+//
+// Told only names and kinds, the writer invented call shapes the module never had: a row object where
+// nonAttemptDelayMs declares four numbers (2182d140), `.shapes` read off inferGoalTargetShapes, declared
+// Promise<string[]> (725638cc). The goal now lists each function as `name: kind (parameters): ReturnType`, read by the
+// same parser over the same clone reader the guards use (check-supply-admission.ts exportSignatures), so an export
+// reached through `export { … }`, a re-export or a default is signed too; and a site that cannot be read is said to be
+// unread instead of the list silently going missing. FIXTURES: the modules the instance checks were written against
+// (check-contract-mismatch/ and check-references-missing-export/), verbatim or as verbatim excerpts.
+const mismatchFixture = (name: string): string => readFileSync(join(import.meta.dir, "..", "fixtures", "check-contract-mismatch", name), "utf8");
+
+describe("the check writer's goal gives each exported function its signature", () => {
+  it("[MUST-FAIL] a function export with parameters and a return type is listed with them (goal-target-inference.ts at 725638cc, nonAttemptDelayMs at 2182d140)", () => {
+    const gti = supply.checkSupplyGoal(GH, "test/checks/x.check.ts", "goal-target inference reads outside-world asks as self-reports", `repos/${GH}/src/goal-target-inference.ts`, reader({ "src/goal-target-inference.ts": mismatchFixture("goal-target-inference.at-725638cc.ts.txt") }));
+    expect(gti).toContain("inferGoalTargetShapes: function (goal: string, knownShapes: string[], opts: InferGoalTargetShapesOpts = {}): Promise<string[]>");
+    expect(gti).toContain("each function with its declared signature");
+    expect(gti).toContain("Call each function with the parameters its signature declares");
+    const gcs = supply.checkSupplyGoal("development-vessel", "test/checks/x.check.ts", "a ruled sequencing condition is not honoured", "repos/development-vessel/src/resolvers/gap-check-supply.ts", reader({ "src/resolvers/gap-check-supply.ts": mismatchFixture("gap-check-supply.at-2182d140.excerpt.ts.txt") }));
+    expect(gcs).toContain("nonAttemptDelayMs: function (baseMs: number, streak: number, maxMs: number, receiverMinMs = 0): number");
+    for (const goal of [gti, gcs]) expect(goal.length).toBeLessThanOrEqual(MAX_GOAL_LEN);
+  });
+
+  it("[MUST-FAIL] an export reached only through an export list, a re-export or a default is listed with its signature", () => {
+    const index = fixture("goal-host-index.at-979b966d.excerpt.ts.txt");
+    expect(index).not.toContain("export async function verifyGoalReached");
+    const goal = supply.checkSupplyGoal(GH, CHECK, "the reach judge lacks the current date", `repos/${GH}/src/index.ts`, reader({ "src/index.ts": index }));
+    expect(goal).toContain("verifyGoalReached: function (goal: string, producedShapes: string[], taskSummary: string, contentDigest?: string");
+    const SITE = {
+      "src/a.ts": `import { inner } from "./c";\nfunction local(n: number): string { return String(n); }\nexport { local as renamed, inner };\nexport { fromB } from "./b";\nexport * from "./d";\nexport default function main(flag: boolean): void {}\n`,
+      "src/b.ts": "export const fromB = (s: string): number => s.length;\n",
+      "src/c.ts": "export function inner(x: { id: string }): Promise<string[]> { return Promise.resolve([x.id]); }\n",
+      "src/d.ts": "export const fromD: (a: number, b: number) => number = (a, b) => a + b;\nexport const data = { k: 1 };\n",
+    };
+    const g = supply.checkSupplyGoal("fixture-vessel", "test/checks/x.check.ts", "x", "repos/fixture-vessel/src/a.ts", reader(SITE));
+    expect(g).toContain("renamed: function (n: number): string");
+    expect(g).toContain("inner: re-export (x: { id: string }): Promise<string[]>");
+    expect(g).toContain("fromB: re-export (s: string): number");
+    expect(g).toContain("fromD: const (a: number, b: number) => number");
+    expect(g).toContain("default: function (flag: boolean): void");
+    expect(g).toContain("data: const,");
+  });
+
+  it("[MUST-FAIL] an edit site that cannot be read is said to be unread, not silently left without a list", () => {
+    const goal = supply.checkSupplyGoal(GH, CHECK, SUMMARY, `repos/${GH}/src/index.ts`, reader({}));
+    expect(goal).toContain("src/index.ts could not be read here, so its exports and their signatures are not listed");
+  });
+
+  it("[CONTROL] a goal for a site with no function export is unchanged: names and kinds, no signature, no call instruction", () => {
+    const goal = supply.checkSupplyGoal("fixture-vessel", "test/checks/x.check.ts", "the widget count is wrong", "repos/fixture-vessel/src/x.ts", reader({ "src/x.ts": "export const widget = 1;\nexport type T = { a: 1 };\nexport interface I { b: string }\n" }));
+    expect(goal).toBe('Write ONE failing test in repos/fixture-vessel/test/checks/x.check.ts that reproduces: the widget count is wrong. Its expect() assertion fails because of the defect, not because the file fails to load: Import the module the defect lives in as a namespace, import * as mod from "../../src/x", and assert on it. src/x.ts exports exactly these 3 names (name: kind): widget: const, T: type, I: interface. The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is refused; reach internal code through an export on the list. No network, no services, no timers. Do not change src/ or any other file.');
+  });
+});

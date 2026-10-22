@@ -80,6 +80,7 @@ import {
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
+import { codeContract } from "./code-introspect.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -360,7 +361,7 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
   const named = anchors.length
     ? `Build it on what the evidence names (${anchorText(anchors)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
     : "";
-  const exportsList = siteRel && reader && /\.(?:[cm]?[jt]sx?)$/.test(siteRel) ? exportListSentence(siteRel, reader, summary) : "";
+  const exportsList = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel) ? (reader ? exportListSentence(siteRel, reader, summary) : unreadSiteSentence(siteRel)) : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
     `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named +
     priorAttemptSentence(prior) +
@@ -375,13 +376,29 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
  * goal's reader reads, the tree vesselTestInventory walks for the decompose prompt) and bounded like that prompt's
  * source list: at most EXPORT_LIST_MAX names, those the gap's own words name first, then source order, the rest
  * counted. The names are clamped by characters too (EXPORT_LIST_MAX_CHARS): dispatch_goal refuses a goal over
- * MAX_GOAL_LEN (8192), and 80 long names alone could pass it. Empty when the module cannot be read or exports nothing.
+ * MAX_GOAL_LEN (8192), and 80 long names alone could pass it. Empty when the module exports nothing.
+ * THE LIST IS THE MODULE'S CONTRACT (code-introspect.ts codeContract, the contract codeIntrospectResult returns with
+ * include_contract, read in-process over this reader): each function is listed with its REAL signature (`name: kind
+ * (parameters): ReturnType`), whatever route exports it (`export { … }`, a re-export, a default), and the `shape`
+ * strings its returns carry where the return walk reads them.
+ * Told only names and kinds, the writer invented call shapes: a row object where four numbers belong, `.shapes` read
+ * off a function returning string[]. Signatures are clamped each (EXPORT_SIGNATURE_MAX) and in all
+ * (EXPORT_SIGNATURES_MAX_CHARS), in the list's order; a name past either bound keeps its kind and loses only its
+ * signature. A site that cannot be read is SAID to be unread (unreadSiteSentence), never silently left without a list.
  */
 export const EXPORT_LIST_MAX = 80;
 export const EXPORT_LIST_MAX_CHARS = 3000;
+export const EXPORT_SIGNATURE_MAX = 200;
+export const EXPORT_SIGNATURES_MAX_CHARS = 2000;
+/** What the goal says when the edit site cannot be read here: no list, said plainly. */
+export function unreadSiteSentence(siteRel: string): string {
+  return `${siteRel} could not be read here, so its exports and their signatures are not listed: open it before writing the test, and call only what it exports, with the parameters each function declares. `;
+}
 export function exportListSentence(siteRel: string, reader: SrcReader, summary: string): string {
-  const ex = moduleExports(siteRel, reader);
-  if (!ex || ex.names.size === 0) return "";
+  const contract = codeContract(siteRel, reader);
+  if ("unavailable" in contract) return contract.unavailable === "not readable" ? unreadSiteSentence(siteRel) : `${siteRel} could not be parsed here (${contract.unavailable}), so its exports and their signatures are not listed: open it before writing the test, and call only what it exports, with the parameters each function declares. `;
+  const ex = { names: new Map(contract.exports.map((e) => [e.name, e.kind])), open: contract.open };
+  if (ex.names.size === 0) return "";
   const words = summary.toLowerCase();
   const ranked = [...ex.names].map(([name, kind], i) => ({ name, kind, i, hit: name.length >= 3 && words.includes(name.toLowerCase()) ? 1 : 0 }))
     .sort((a, b) => b.hit - a.hit || a.i - b.i);
@@ -395,10 +412,24 @@ export function exportListSentence(siteRel: string, reader: SrcReader, summary: 
     chars += len;
   }
   if (shown.length === 0) return "";
+  const entries = new Map(contract.exports.map((e) => [e.name, e]));
+  let sigChars = 0;
+  const signed = new Map<string, string>();
+  for (const x of shown) {
+    const e = entries.get(x.name);
+    if (!e?.signature) continue;
+    const shapes = e.returned?.shapes?.length ? ` returning shape ${e.returned.shapes.map((s) => JSON.stringify(s)).join(" | ")}` : "";
+    const v = `${e.signature}${shapes}`;
+    const t = v.length > EXPORT_SIGNATURE_MAX ? `${v.slice(0, EXPORT_SIGNATURE_MAX - 1)}…` : v;
+    if (sigChars + t.length + 1 > EXPORT_SIGNATURES_MAX_CHARS) continue;
+    signed.set(x.name, t);
+    sigChars += t.length + 1;
+  }
   const more = ex.names.size - shown.length;
-  return `${siteRel} exports ${more > 0 ? `${ex.names.size} names; ${shown.length} of them` : `exactly these ${shown.length} name${shown.length === 1 ? "" : "s"}`}${ex.open ? " (and what it re-exports from a module not readable here)" : ""} (name: kind): ` +
-    `${shown.map((x) => `${x.name}: ${x.kind}`).join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
-    "The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is refused; reach internal code through an export on the list. ";
+  return `${siteRel} exports ${more > 0 ? `${ex.names.size} names; ${shown.length} of them` : `exactly these ${shown.length} name${shown.length === 1 ? "" : "s"}`}${ex.open ? " (and what it re-exports from a module not readable here)" : ""} (name: kind${signed.size ? ", each function with its declared signature" : ""}): ` +
+    `${shown.map((x) => `${x.name}: ${x.kind}${signed.has(x.name) ? ` ${signed.get(x.name)}` : ""}`).join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
+    "The test may reference only exports from this list: a name the module does not export (an internal function, a shape name, a label) is undefined on the import, so a check that reads one is refused; reach internal code through an export on the list. " +
+    (signed.size ? "Call each function with the parameters its signature declares, and assert only on what its declared return type can hold (a property of an object, never of an array or a string). " : "");
 }
 
 /**

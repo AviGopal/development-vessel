@@ -515,6 +515,116 @@ export function moduleExports(siteRel: string, reader: SrcReader, seen: Set<stri
 }
 
 /**
+ * THE SIGNATURE OF EACH FUNCTION A MODULE EXPORTS, read with the same parser and over the same reader as moduleExports:
+ * its parameters (name, declared type text, optional, default text) and declared return type, as declared (whitespace
+ * collapsed), for a function declaration (its first declaration, so an overload's public form), a const bound to an
+ * arrow or function expression, and a const declared with a function type. It follows every route moduleExports does:
+ * `export { a, b as c }` (the local declaration, or the import it re-exports), `export { x } from`, `export * from`
+ * (never its default) and `export default` (a function, or a local name). `module` / `local` say where the declaration
+ * is (so returnedContract can be read there). A name whose declaration is not a function, or cannot be read, has no
+ * entry. Keyed by the EXPORTED name.
+ */
+export type ExportParameter = { name: string; type: string | null; optional: boolean; default: string | null };
+export type ExportSignature = { parameters: ExportParameter[]; returns: string | null; text: string; module: string; local: string };
+export function exportSignatures(siteRel: string, reader: SrcReader, seen: Set<string> = new Set()): Map<string, ExportSignature> {
+  const out = new Map<string, ExportSignature>();
+  const ts = loadTs();
+  const source = reader.read(siteRel);
+  if (!ts || source === null || seen.has(siteRel)) return out;
+  seen.add(siteRel);
+  const sf = ts.createSourceFile(siteRel, source, ts.ScriptTarget.Latest, true, /\.tsx$/.test(siteRel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const flat = (t: string): string => t.replace(/\s+/g, " ").trim();
+  const sig = (fn: TS.SignatureDeclarationBase, local: string): ExportSignature => {
+    const parameters = fn.parameters.map((p) => ({ name: flat(p.name.getText(sf)), type: p.type ? flat(p.type.getText(sf)) : null, optional: !!p.questionToken || !!p.initializer || !!p.dotDotDotToken, default: p.initializer ? flat(p.initializer.getText(sf)) : null }));
+    const returns = fn.type ? flat(fn.type.getText(sf)) : null;
+    const text = flat(`(${fn.parameters.map((p) => p.getText(sf)).join(", ")})${ts.isFunctionTypeNode(fn) ? ` => ${returns ?? "unknown"}` : returns ? `: ${returns}` : ""}`);
+    return { parameters, returns, text, module: siteRel, local };
+  };
+  const local = new Map<string, ExportSignature>();
+  const imported = new Map<string, { spec: string; name: string }>();
+  for (const s of sf.statements) {
+    if (ts.isFunctionDeclaration(s) && s.name && !local.has(s.name.text)) local.set(s.name.text, sig(s, s.name.text));
+    if (ts.isVariableStatement(s)) {
+      for (const d of s.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name)) continue;
+        const init = d.initializer;
+        // A declared function type is the contract; an untyped arrow assigned to it says less.
+        if (d.type && ts.isFunctionTypeNode(d.type)) local.set(d.name.text, sig(d.type, d.name.text));
+        else if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) local.set(d.name.text, sig(init, d.name.text));
+      }
+    }
+    if (ts.isImportDeclaration(s) && ts.isStringLiteral(s.moduleSpecifier) && s.importClause?.namedBindings && ts.isNamedImports(s.importClause.namedBindings)) {
+      for (const el of s.importClause.namedBindings.elements) imported.set(el.name.text, { spec: s.moduleSpecifier.text, name: (el.propertyName ?? el.name).text });
+    }
+  }
+  const from = (spec: string): Map<string, ExportSignature> => {
+    const target = spec.startsWith(".") ? resolveModule(siteRel, spec, reader) : null;
+    return target ? exportSignatures(target.rel, reader, new Set(seen)) : new Map();
+  };
+  const ofLocal = (name: string): ExportSignature | undefined => {
+    if (local.has(name)) return local.get(name);
+    const im = imported.get(name);
+    return im ? from(im.spec).get(im.name) : undefined;
+  };
+  for (const s of sf.statements) {
+    if (hasExport(ts, s)) {
+      if (ts.isFunctionDeclaration(s)) {
+        const k = hasDefault(ts, s) ? "default" : s.name?.text;
+        if (k && !out.has(k)) out.set(k, s.name ? local.get(s.name.text)! : sig(s, "default"));
+      } else if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && local.has(d.name.text)) out.set(d.name.text, local.get(d.name.text)!);
+      continue;
+    }
+    if (ts.isExportAssignment(s)) {
+      const e = s.expression;
+      const v = ts.isIdentifier(e) ? ofLocal(e.text) : ts.isArrowFunction(e) || ts.isFunctionExpression(e) ? sig(e, "default") : undefined;
+      if (v) out.set("default", v);
+      continue;
+    }
+    if (!ts.isExportDeclaration(s)) continue;
+    const spec = s.moduleSpecifier && ts.isStringLiteral(s.moduleSpecifier) ? s.moduleSpecifier.text : null;
+    if (s.exportClause && ts.isNamedExports(s.exportClause)) {
+      const sub = spec ? from(spec) : null;
+      for (const el of s.exportClause.elements) {
+        const v = sub ? sub.get(moduleName(el.propertyName ?? el.name)) : ofLocal(moduleName(el.propertyName ?? el.name));
+        if (v) out.set(moduleName(el.name), v);
+      }
+    } else if (!s.exportClause && spec) {
+      for (const [n, v] of from(spec)) if (n !== "default" && !out.has(n)) out.set(n, v);
+    }
+  }
+  return out;
+}
+
+/**
+ * WHAT A MODULE'S EXPORTS ARE, AS A CONTRACT (codeIntrospectResult's opt-in `contract`, code-introspect.ts): one entry
+ * per export (moduleExports' names and kinds, in their order), each function with its parameters and declared return
+ * type (exportSignatures) and, where the return walk can read the function's returns, what they are (returnedContract:
+ * the value kinds, and the `shape` strings and `body` keys of returned object literals; null = open). `open` is
+ * moduleExports' (a list that may be incomplete); null when the module cannot be read or parsed.
+ */
+export type ExportContractEntry = { name: string; kind: string; parameters?: ExportParameter[]; returns?: string | null; signature?: string; returned?: { kinds: string[] | null; shapes: string[] | null; body_keys: string[] | null } };
+export function exportContract(siteRel: string, reader: SrcReader): { exports: ExportContractEntry[]; open: string | null } | null {
+  const ex = moduleExports(siteRel, reader);
+  const ts = loadTs();
+  if (!ex || !ts) return null;
+  const sigs = exportSignatures(siteRel, reader);
+  const parsed = new Map<string, TS.SourceFile | null>();
+  const sfOf = (rel: string): TS.SourceFile | null => {
+    if (!parsed.has(rel)) { const src = reader.read(rel); parsed.set(rel, src === null ? null : ts.createSourceFile(rel, src, ts.ScriptTarget.Latest, true, /\.tsx$/.test(rel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS)); }
+    return parsed.get(rel)!;
+  };
+  const list = (s: Set<string> | null): string[] | null => (s ? [...s] : null);
+  const exports = [...ex.names].map(([name, kind]): ExportContractEntry => {
+    const s = sigs.get(name);
+    if (!s) return { name, kind };
+    const msf = sfOf(s.module);
+    const rc = msf ? returnedContract(ts, msf, s.local) : null;
+    return { name, kind, parameters: s.parameters, returns: s.returns, signature: s.text, ...(rc ? { returned: { kinds: list(rc.kinds), shapes: list(rc.shapes), body_keys: list(rc.bodyKeys) } } : {}) };
+  });
+  return { exports, open: ex.open };
+}
+
+/**
  * THE NAMES A CHECK READS OFF EACH MODULE IT IMPORTS (relative specifiers only), statically: `import { a, b as c }`
  * (a, b; type-only specifiers are erased and skipped), a default import ("default"), and every member read off a
  * namespace binding, `import * as ns` or `const ns = await import("…")` (also through `.catch(…)` / `.finally(…)` on the

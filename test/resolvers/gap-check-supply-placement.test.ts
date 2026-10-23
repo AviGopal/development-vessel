@@ -19,6 +19,11 @@
 //   [MUST-FAIL] the producer side: a placement query is answered with the node's own capacity per class, its scope's
 //               exclusions and its row visibility; the plain composeOwnership read is unchanged.
 //   [MUST-FAIL] a placed dispatch nobody here can read settles by the dispatch timeout, not the foreign bound.
+// SEVERAL OWNERS (REALIGNMENT §4, law 11; user ruling "(B) Several owners, lease-serialized"): a vessel may be composed
+// by more than one node, and the gap-store holder's landing lease serialises their landings (gap-landing-lease.test.ts).
+//   [MUST-FAIL] this node does not compose the vessel, though a local slot is free: the goal goes to an owner with a
+//               free slot (the owner with none is passed over), never to this node's own compose, which would refuse it.
+//   [CONTROL]   this node does not compose the vessel and no peer can take it: sent locally, as today.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -460,6 +465,45 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
       expect(other?.["gap_row_visible"]).toBe(false);
     } finally {
       slots.__setComposeCapacityReaderForTests(async () => ({ max_concurrent: 2, reserved_for_armed: 0 }));
+    }
+  });
+
+  it("[MUST-FAIL] this node does not compose the vessel, a local slot free: an owner with a free slot takes it", async () => {
+    const id = T("gcs-nonowner");
+    await seed(id, "non-owner node");
+    // This node owns another vessel only (a clone with .git), so the owned set is non-empty and lacks VESSEL.
+    const other = join(CLONES, "some-other-vessel", ".git");
+    mkdirSync(other, { recursive: true });
+    try {
+      // node-c has room for every goal this tick sends (rows earlier cases left undispatched are placed too)
+      peers = [peerAt("node-b", { free: 0 }), peerAt("node-c", { free: 4 })];
+      await tick(Date.now());
+      expect(localGoalsFor(id).length).toBe(0);
+      expect(peerGoalsFor(id).length).toBe(1);
+      expect(peerGoalsFor(id)[0]!.node).toBe("node-c");
+      const l = ledgerOf(await storeRow(id));
+      expect(l["dispatch_node"]).toBe("node-c");
+      expect(l["placed_by"]).toBe(LOCAL);
+      expect(String(l["placement"])).toContain(`does not compose ${VESSEL}`);
+    } finally {
+      rmSync(join(CLONES, "some-other-vessel"), { recursive: true, force: true });
+    }
+  });
+
+  it("[CONTROL] this node does not compose the vessel and no peer can take it: sent locally, as today", async () => {
+    const id = T("gcs-nonowner-alone");
+    await seed(id, "non-owner node, no able peer");
+    mkdirSync(join(CLONES, "some-other-vessel", ".git"), { recursive: true });
+    try {
+      peers = [peerAt("node-b", { free: 0 })];
+      await tick(Date.now());
+      expect(peerGoalsFor(id).length).toBe(0);
+      expect(localGoalsFor(id).length).toBe(1);
+      const l = ledgerOf(await storeRow(id));
+      expect(l["dispatch_node"]).toBe(LOCAL);
+      expect(l["placed_by"]).toBeUndefined();
+    } finally {
+      rmSync(join(CLONES, "some-other-vessel"), { recursive: true, force: true });
     }
   });
 

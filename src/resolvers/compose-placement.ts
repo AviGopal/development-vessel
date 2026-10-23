@@ -19,10 +19,15 @@
  * All reads. The plain {type:"composeOwnership"} read is answered exactly as before.
  *
  * THE RULE (placeCompose): a free local slot of the class, or a local capacity that cannot be observed, keeps the
- * dispatch local (today's behaviour). With none free, every discovered composeOwnership producer other than this
- * node's own is asked; a candidate owns the target vessel, sees the row, excludes no target, and has a free slot of
- * the class. The candidate with the most free slots takes it; none means today's local send, whose BUSY is the same
- * non-attempt as before. A peer that does not answer, or answers malformed, is no candidate (logged where it failed).
+ * dispatch local (today's behaviour), when this node composes the vessel. SEVERAL OWNERS (REALIGNMENT §4, law 11; user
+ * ruling "(B) Several owners, lease-serialized"): any node whose composeOwnership lists the vessel may take its goal,
+ * and the gap-store holder's landing lease (substrate-gap.ts LANDING LEASE) serialises their landings. So a node that
+ * does not compose the vessel (gap-policy ownedVessels: non-empty and without it) keeps nothing local on a free slot:
+ * its own compose would refuse the vessel. With none free, or not an owner, every discovered composeOwnership producer
+ * other than this node's own is asked; a candidate owns the target vessel, sees the row, excludes no target, and has a
+ * free slot of the class. The candidate with the most free slots takes it; none means today's local send, whose BUSY
+ * is the same non-attempt as before. A peer that does not answer, or answers malformed, is no candidate (logged where it
+ * failed).
  * The capacity read is not a reservation: the peer's own admission (eligibility, the supply ledger, scope, the landing
  * lease, the O_EXCL slot claim) still decides, and its refusal comes back as the same classified outcome.
  *
@@ -40,7 +45,7 @@
 import { lookupShape, describeLookup } from "../config.js";
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity } from "../compose-slots.js";
-import { autonomyScope, autonomyScopeExcludes } from "../judge/gap-policy.js";
+import { autonomyScope, autonomyScopeExcludes, ownedVessels } from "../judge/gap-policy.js";
 import type { DispatchGoalPointer } from "./dispatch-goal.js";
 import type { ResolverResult } from "./types.js";
 
@@ -120,10 +125,12 @@ export function placementRefusal(body: Row, q: { vessel: string; armed: boolean 
  */
 export async function placeCompose(q: { gap_id: string; vessel: string; targets: string[]; armed: boolean }, localNode: string, placed: Map<string, number> = new Map()): Promise<ComposePlacement> {
   const cls = q.armed ? "armed" : "unarmed";
+  const owned = ownedVessels();
+  const notOwner = owned.size > 0 && !owned.has(q.vessel);
   const local = await peekComposeCapacity({ directed: false, armed: q.armed });
-  if (local === null) return { where: "local", why: "local compose capacity unobservable (fail open: dispatched here)" };
-  if (local.free > 0) return { where: "local", why: `a local ${cls} slot is free (${local.free} of ${local.cap})` };
-  const busy = `no free local ${cls} slot (${local.live} in flight, cap ${local.cap})`;
+  if (!notOwner && local === null) return { where: "local", why: "local compose capacity unobservable (fail open: dispatched here)" };
+  if (!notOwner && local!.free > 0) return { where: "local", why: `a local ${cls} slot is free (${local!.free} of ${local!.cap})` };
+  const busy = notOwner ? `this node does not compose ${q.vessel}` : `no free local ${cls} slot (${local!.live} in flight, cap ${local!.cap})`;
   const look = await lookupShape("composeOwnership");
   if (!look.ok) {
     console.warn(`[compose-placement] ${q.gap_id}: ${busy}; peers unreadable (${describeLookup(look)}): dispatched here`);

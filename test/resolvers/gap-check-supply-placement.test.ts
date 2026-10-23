@@ -24,6 +24,9 @@
 //   [MUST-FAIL] this node does not compose the vessel, though a local slot is free: the goal goes to an owner with a
 //               free slot (the owner with none is passed over), never to this node's own compose, which would refuse it.
 //   [CONTROL]   this node does not compose the vessel and no peer can take it: sent locally, as today.
+//   [MUST-FAIL] a placed goal's outcome is read back through the peer that took it and settles as read, not as lost.
+//   [CONTROL]   a peer that answers no dispatch (an older composeOwnership) leaves the placed goal waiting, as today.
+//   [MUST-FAIL] the producer side answers a dispatch read from its own goal-host record.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -65,7 +68,7 @@ const VESSEL = "local-tools-vessel";
 const LOCAL = supply.checkSupplyNode();
 
 /** A peer compose producer as discovery lists it and as it answers a placement query. */
-type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500"; origin?: string };
+type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500"; origin?: string; readsNoDispatch?: boolean };
 // Peers on THIS host (the node key goes to no other: self-auth.ts crossNodeKeyHeaders): loopback, one port per name.
 const peerPorts = new Map<string, number>();
 const loopbackUrl = (name: string): string => {
@@ -81,6 +84,8 @@ let warned: string[] = [];
 let goals: Array<{ goal: string; variables?: Record<string, unknown> }> = [];
 let peers: Peer[] = [];
 let peerReads: Array<{ node: string; pointer: Row; auth: string | null }> = [];
+/** Dispatch reads (a placed goal's outcome read back), kept apart from the placement queries above. */
+let peerDispatchReads: Array<{ node: string; pointer: Row; auth: string | null }> = [];
 let peerGoals: Array<{ node: string; goal: string; variables?: Record<string, unknown>; auth: string | null }> = [];
 let executions: Record<string, { status: string; reached: boolean | null; outcome?: Record<string, unknown> }> = {};
 let rhythms: Row[] = [];
@@ -112,10 +117,13 @@ beforeAll(() => {
       if (peer.fail === "http500") return new Response("internal error", { status: 500 });
       const ptr = (body?.impulse?.pointer ?? {}) as Row;
       if (ptr["type"] === "composeOwnership") {
-        peerReads.push({ node: peer.node, pointer: ptr, auth });
+        (typeof ptr["dispatch_id"] === "string" ? peerDispatchReads : peerReads).push({ node: peer.node, pointer: ptr, auth });
         return Response.json({ success: true, shape: "composeOwnership", body: { node: peer.node, owned_repos: peer.owns,
           placement: { armed: ptr["armed"] === true, capacity: peer.free === null ? null : { free: peer.free, live: peer.free > 0 ? 0 : 1, cap: 1 }, scope_readable: true,
-            scope_excludes: peer.excludes.map((t) => ({ target: t, entry: t })), gap_row_visible: peer.visible } } });
+            scope_excludes: peer.excludes.map((t) => ({ target: t, entry: t })), gap_row_visible: peer.visible,
+            // A dispatch read (a placed goal's outcome, read back by the node that placed it) is answered from the
+            // peer's own goal-host record; an older peer (readsNoDispatch) answers the placement without it.
+            ...(typeof ptr["dispatch_id"] === "string" && !peer.readsNoDispatch ? { dispatch: executions[ptr["dispatch_id"] as string] ? { http: 200, ...executions[ptr["dispatch_id"] as string] } : { http: 404 } } : {}) } } });
       }
       if (ptr["type"] === "dispatch_goal") {
         peerGoals.push({ node: peer.node, goal: String(ptr["goal"] ?? ""), variables: ptr["variables"] as Record<string, unknown> | undefined, auth });
@@ -175,7 +183,7 @@ afterAll(async () => {
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
 beforeEach(() => {
-  goals = []; peers = []; peerReads = []; peerGoals = []; executions = {}; warned = []; poolExcluded = []; rhythms = [dueRhythm()];
+  goals = []; peers = []; peerReads = []; peerDispatchReads = []; peerGoals = []; executions = {}; warned = []; poolExcluded = []; rhythms = [dueRhythm()];
   setLocalBusy(false);
   execGuard = installCutoverExecGuard();
   g2fPolicy.__resetPolicyReadsForTests();
@@ -505,6 +513,61 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     } finally {
       rmSync(join(CLONES, "some-other-vessel"), { recursive: true, force: true });
     }
+  });
+
+  /** A row whose goal THIS node placed on `peer` an hour ago (the ledger the placed send writes). */
+  async function seedPlaced(id: string, peer: Peer, dispatchId: string): Promise<void> {
+    const summary = `placed outcome fixture ${RUN}: local-tools-vessel src/widget.ts \`widget\` returns the wrong value`;
+    const check_supply = { state: "goal_dispatched", attempts: 1, last_dispatch_at: new Date(Date.now() - 3_600_000).toISOString(), test_file: "test/checks/placed.check.ts", vessel: VESSEL,
+      dispatch_id: dispatchId, dispatch_node: peer.node, dispatch_host: `${peer.url}/v2/impulses/resolve`, placed_by: LOCAL, placement: "fixture" };
+    const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: { check_supply } } } as never);
+    if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
+    await sg.__settleBirthEvaluationsForTests();
+  }
+
+  it("[MUST-FAIL] a placed goal's outcome is read back through the peer that took it, and settles as read", async () => {
+    rhythms = [{ ...dueRhythm(), body: { ...(dueRhythm()["body"] as Row), backoff_hours: 500 } }]; // the settled state is read, no same-tick retry
+    const id = T("gcs-placed-read");
+    const peer = peerAt("node-b");
+    peers = [peer];
+    await seedPlaced(id, peer, `p-read-${RUN}`);
+    executions[`p-read-${RUN}`] = { status: "failed", reached: false };
+    await tick(Date.now());
+    const ask = peerDispatchReads.find((r) => r.pointer["dispatch_id"] === `p-read-${RUN}`);
+    expect(ask?.node).toBe("node-b");
+    expect(ask?.auth).toBe(`ApiKey ${NODE_KEY}`);
+    const l = ledgerOf(await storeRow(id));
+    expect(l["state"]).toBe("dispatch_failed");
+    expect((l["outcome"] as Row)["status"]).toBe("failed");
+    expect((l["outcome"] as Row)["lost_why"]).toBeUndefined();
+  });
+
+  it("[CONTROL] a peer that answers no dispatch (an older composeOwnership) leaves the placed goal waiting, as today", async () => {
+    rhythms = [{ ...dueRhythm(), body: { ...(dueRhythm()["body"] as Row), backoff_hours: 500 } }];
+    const id = T("gcs-placed-old");
+    const peer = peerAt("node-b", { readsNoDispatch: true });
+    peers = [peer];
+    await seedPlaced(id, peer, `p-old-${RUN}`);
+    executions[`p-old-${RUN}`] = { status: "failed", reached: false };
+    const b = await tick(Date.now());
+    expect(ledgerOf(await storeRow(id))["state"]).toBe("goal_dispatched");
+    expect(((b["outcomes"] as Row)["waiting"] as Row[]).some((w) => w["id"] === id && w["why"] === "owning_node_never_settled")).toBe(true);
+  });
+
+  it("[MUST-FAIL] the producer side answers a dispatch read from its own goal-host record", async () => {
+    const id = T("gcs-dispatch-answer");
+    await seed(id, "producer side dispatch read");
+    executions[`d-answer-${RUN}`] = { status: "completed", reached: true };
+    const { resolveDispatch } = await import(`../../src/routes/impulses.js?${"gcs-placement"}`);
+    const ask = async (extra: Row) => ((await resolveDispatch({ type: "composeOwnership", ...extra } as never)).body ?? {}) as Row;
+    const read = (await ask({ gap_id: id, dispatch_id: `d-answer-${RUN}` }))["placement"] as Row | undefined;
+    expect((read?.["dispatch"] as Row | undefined)?.["http"]).toBe(200);
+    expect((read?.["dispatch"] as Row | undefined)?.["status"]).toBe("completed");
+    expect((read?.["dispatch"] as Row | undefined)?.["reached"]).toBe(true);
+    const missing = (await ask({ gap_id: id, dispatch_id: `d-none-${RUN}` }))["placement"] as Row | undefined;
+    expect((missing?.["dispatch"] as Row | undefined)?.["http"]).toBe(404);
+    // a placement query without a dispatch id carries no dispatch read
+    expect(((await ask({ gap_id: id, targets: [] }))["placement"] as Row | undefined)?.["dispatch"]).toBeUndefined();
   });
 
   it("[MUST-FAIL] a placed dispatch nobody here reads settles by the dispatch timeout, not the foreign bound", () => {

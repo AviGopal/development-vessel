@@ -49,7 +49,9 @@
  * PLACEMENT (compose-placement.ts, law 11): with no free local compose slot of the supply's class, the goal goes through
  * the development-vessel of a peer that composes the vessel, sees the row, admits the targets and has a free slot, so
  * the compose runs where capacity is while the store holder stays authoritative for the row. Its ledger names that
- * peer as dispatch_node (placed_by this node); unread here, it settles by arming or, unsettled, by dispatch_timeout_hours.
+ * peer as dispatch_node (placed_by this node). Its outcome is read back through that peer (its dispatch_host answers a
+ * composeOwnership read naming the dispatch from its own goal-host) and settles as read; a peer that answers no dispatch
+ * leaves it unread, settled by arming or, unsettled, by dispatch_timeout_hours.
  *
  * CADENCE IS A RHYTHM (law 5). The family's timeShapedRhythm impulse is read at use time: no rhythm means no
  * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no DISPATCH (the
@@ -86,7 +88,7 @@ import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmB
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { coverageKnobs, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
-import { dispatchGoalOnPeer, placeCompose } from "./compose-placement.js";
+import { dispatchGoalOnPeer, placeCompose, readPlacedDispatch } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
@@ -694,9 +696,11 @@ export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, now
     age > bound ? { kind: "lost", why, reason: `${why}: ${detail}; unsettled ${hours(age)} (bound ${hours(bound)})` } : { kind: "wait", why, detail };
   if (!nonEmpty(ledger.dispatch_id)) return lostOr("no_dispatch_id", "the dispatch recorded no id, so its outcome cannot be read");
   const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
-  // A goal this node PLACED on a peer is read by nobody here; its compose (ceiling 15 min) is long over by the
-  // dispatch timeout, so it settles by that shaped bound, not by the foreign one meant for another sender's dispatch.
-  if (owner !== null && owner !== localNode) return ledger.placed_by === localNode
+  // A goal this node PLACED on a peer is read through that peer (probe given): it falls through to the reading below.
+  // Unread (probe null), its compose (ceiling 15 min) is long over by the dispatch timeout, so it settles by that
+  // shaped bound, not by the foreign one meant for another sender's dispatch.
+  const placedRead = owner !== null && owner !== localNode && ledger.placed_by === localNode && probe !== null;
+  if (owner !== null && owner !== localNode && !placedRead) return ledger.placed_by === localNode
     ? lostOr("owning_node_never_settled", `placed on ${owner} by this node; only ${owner}'s goal-host can read the outcome`, bounds.timeout_ms)
     : lostOr("owning_node_never_settled", `dispatched by ${owner}; only its goal-host can read the outcome`, bounds.foreign_stale_ms);
   const where = owner === null ? `this node's goal-host (the dispatching node was not recorded)` : `${owner}'s goal-host`;
@@ -1232,9 +1236,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (ledger.state !== "goal_dispatched") continue;
     const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
     const mine = owner === null || owner === localNode;
-    if (mine && nonEmpty(ledger.dispatch_id) && outcomeReads >= maxOutcomeReads) continue;
+    // A goal this node placed on a peer is read through that peer (compose-placement readPlacedDispatch).
+    const placedHere = !mine && ledger.placed_by === localNode && nonEmpty(ledger.dispatch_host);
+    if ((mine || placedHere) && nonEmpty(ledger.dispatch_id) && outcomeReads >= maxOutcomeReads) continue;
     let probe: DispatchProbe | null = null;
     if (mine && nonEmpty(ledger.dispatch_id)) { outcomeReads += 1; probe = await probeDispatch(String(ledger.dispatch_id)); }
+    else if (placedHere && nonEmpty(ledger.dispatch_id)) { outcomeReads += 1; probe = await readPlacedDispatch(String(ledger.dispatch_host), { gap_id: id, dispatch_id: String(ledger.dispatch_id) }); }
     const v = dispatchVerdict(ledger, probe, now, bounds, localNode);
     if (v.kind === "running") { outcomes.running += 1; continue; }
     if (v.kind === "awaiting_titles") { outcomes.awaiting_titles += 1; continue; }

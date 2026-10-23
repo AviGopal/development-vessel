@@ -16,6 +16,9 @@
  *                   compose floor would);
  *   gap_row_visible whether its gap store read sees the row open (a node on another store would refuse the supply's
  *                   ledger check: ledger_mismatch).
+ *   dispatch        (only when the pointer names a dispatch_id) its own goal-host's record of that dispatch, read as
+ *                   gap-check-supply's probeDispatch reads it: how the node that PLACED a goal here reads its outcome
+ *                   back (only this node's goal-host holds it).
  * All reads. The plain {type:"composeOwnership"} read is answered exactly as before.
  *
  * THE RULE (placeCompose): a free local slot of the class, or a local capacity that cannot be observed, keeps the
@@ -47,6 +50,7 @@ import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity } from "../compose-slots.js";
 import { autonomyScope, autonomyScopeExcludes, ownedVessels } from "../judge/gap-policy.js";
 import type { DispatchGoalPointer } from "./dispatch-goal.js";
+import type { DispatchProbe } from "./gap-check-supply.js";
 import type { ResolverResult } from "./types.js";
 
 type Row = Record<string, unknown>;
@@ -67,6 +71,8 @@ export interface ComposePlacementAnswer {
   scope_readable: boolean;
   scope_excludes: Array<{ target: string; entry: string }>;
   gap_row_visible: boolean | null;
+  /** This node's goal-host record of the pointer's dispatch_id (present only when the pointer names one). */
+  dispatch?: DispatchProbe;
 }
 
 /** THE PRODUCER'S SIDE of a placement query (composeOwnership with gap_id or targets), or null for a plain read. */
@@ -74,7 +80,8 @@ export async function composePlacementAnswer(pointer: Row): Promise<ComposePlace
   const rawTargets = pointer["targets"];
   const targets = Array.isArray(rawTargets) ? rawTargets.filter((t): t is string => typeof t === "string" && t.trim().length > 0) : null;
   const gapId = typeof pointer["gap_id"] === "string" && pointer["gap_id"].length > 0 ? pointer["gap_id"] : null;
-  if (!targets && !gapId) return null;
+  const dispatchId = typeof pointer["dispatch_id"] === "string" && pointer["dispatch_id"].length > 0 ? pointer["dispatch_id"] : null;
+  if (!targets && !gapId && !dispatchId) return null;
   const armed = pointer["armed"] === true;
   const capacity = await peekComposeCapacity({ directed: false, armed });
   const scope = await autonomyScope();
@@ -91,7 +98,9 @@ export async function composePlacementAnswer(pointer: Row): Promise<ComposePlace
       visible = null;
     }
   }
-  return { armed, capacity: capacity ? { free: capacity.free, live: capacity.live, cap: capacity.cap } : null, scope_readable: scope.readable, scope_excludes: scopeExcludes, gap_row_visible: visible };
+  // gap-check-supply imports this module, so its probe is imported at call time.
+  const dispatch = dispatchId ? await (await import("./gap-check-supply.js")).probeDispatch(dispatchId) : null;
+  return { armed, capacity: capacity ? { free: capacity.free, live: capacity.live, cap: capacity.cap } : null, scope_readable: scope.readable, scope_excludes: scopeExcludes, gap_row_visible: visible, ...(dispatch ? { dispatch } : {}) };
 }
 
 export type ComposePlacement =
@@ -173,6 +182,33 @@ export async function placeCompose(q: { gap_id: string; vessel: string; targets:
   if (!best) return { where: "local", why: `${busy}; no peer can take it${refused.length ? ` (${refused.slice(0, 3).join("; ")})` : asks.length ? "" : " (no peer composer discovered)"}` };
   placed.set(best.node, (placed.get(best.node) ?? 0) + 1);
   return { where: "peer", ...best, why: `${busy}; ${best.node} has ${best.free} free ${cls} slot(s)` };
+}
+
+/**
+ * A PLACED goal's outcome, read back through the peer's development-vessel that took it (`via`, the ledger's
+ * dispatch_host): a composeOwnership read naming the dispatch, which the peer answers from its own goal-host. Null when
+ * it cannot be read here (off this host, unreachable, malformed, or an older peer whose answer carries no dispatch),
+ * so the caller keeps today's unread path. Never throws.
+ */
+export async function readPlacedDispatch(via: string, q: { gap_id: string; dispatch_id: string }): Promise<DispatchProbe | null> {
+  const auth = await crossNodeKeyHeaders(via);
+  if (!auth) return null;
+  try {
+    const r = await fetch(via, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      body: JSON.stringify({ impulse: { pointer: { type: "composeOwnership", gap_id: q.gap_id, dispatch_id: q.dispatch_id } } }),
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = (await r.json()) as { shape?: unknown; body?: { placement?: { dispatch?: unknown } } };
+    const d = j.shape === "composeOwnership" ? (j.body?.placement?.dispatch as Row | undefined) : undefined;
+    if (!d || typeof d !== "object" || (typeof d["http"] !== "number" && d["http"] !== "unreachable")) return null;
+    return d as unknown as DispatchProbe;
+  } catch (err) {
+    console.warn(`[compose-placement] ${q.gap_id}: placed dispatch ${q.dispatch_id} unread through ${via} (${String((err as Error)?.message ?? err).slice(0, 160)})`);
+    return null;
+  }
 }
 
 /** Send a dispatch_goal through a peer's development-vessel (its goal-host then composes on that peer). Never throws. */

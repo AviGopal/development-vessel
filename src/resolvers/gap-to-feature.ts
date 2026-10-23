@@ -701,10 +701,12 @@ export async function decomposeGap(
   let site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
   // NO EDIT SITE, NO INVENTORY: the prompt said "EDIT SITE (none)" with no excerpt and no test files yet required
   // each step to change one existing file, and the arming refused every step for naming none. Localize the parent
-  // from its own evidence (as the check supply does, without the LLM) and draft against that file; when nothing
-  // localises to a readable file in the clone, refuse before the LLM, as the scan's supply precondition does.
+  // from its own evidence and draft against that file; when nothing localises to a readable file in the clone, refuse
+  // before the decomposer, as the scan's supply precondition does. The localiser runs WITH its LLM rank: without it, a
+  // parent whose evidence matched comparable files was declined as needs_information although the rank (which runs
+  // only when the cheap metadata and grep paths cannot choose, and writes nothing) could have sited it.
   if (!site) {
-    const loc = await localizeGap(parent, { useLlm: false });
+    const loc = await localizeGap(parent, { useLlm: true });
     if (!loc || !existsSync(join(vesselsCloneRoot(), loc.file.replace(/^repos\//, "")))) return { written: [], reason: "needs_information: no readable edit site (no edit_site and nothing localises)" };
     site = loc.file;
   }

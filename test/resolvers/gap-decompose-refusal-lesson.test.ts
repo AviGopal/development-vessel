@@ -7,7 +7,8 @@
 //
 // Harness: as gap-falsify-v2-decompose.test.ts (the real decomposeGap, arming, judge and in-process store; the LLM and
 // shape descriptions injected; globalThis.fetch standing in for discovery and the vessel's own resolve). The second
-// call is handed the parent row as the store holds it after the first, as the real callers read it.
+// call is handed the parent row as the store holds it after the first, as the real callers read it. A second block
+// pins that a parent the cheap localiser cannot site is tried with the LLM localiser before needs_information.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -141,5 +142,76 @@ describe("a decomposition refusal is the next call's lesson", () => {
     await __settleBirthEvaluationsForTests();
     expect(w.written).toEqual([`${String(ok.id)}-step-1`]);
     expect(lessonsOf(await row(String(ok.id)))).toEqual([]);
+  });
+});
+
+// THE LLM LOCALISER IS TRIED BEFORE needs_information. With no edit site, decomposeGap localised the parent only with
+// localizeGap(useLlm:false) and declined as needs_information whenever the cheap localiser could not choose among
+// comparable files; localizeGap's LLM rank (the escalation feature-compose already uses) was never tried there. The
+// rank call is stubbed deterministically: it answers the index of beta.ts in the candidate list it is shown.
+const TWIN = "fixture-twin";
+const TWIN_SRC = (n: string) => `export function validateFrame(f: number): boolean {\n  return f > 0;\n}\nexport function countRejected(fs: number[]): number { return fs.filter((f) => !validateFrame(f)).length; } // ${n}\n`;
+const twinGap = async (suffix: string, meta: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  const id = `gd-rl-${suffix}-${RUN}`;
+  const gap = { id, category: "systematic_failure", source: "substrate_detected", status: "open", detected_at: new Date().toISOString(), summary: "The frame check `validateFrame` accepts a zero frame, so `countRejected` undercounts", classification_metadata: meta };
+  await resolveSubstrateGapWrite({ type: "substrateGap_write", gap } as never, { vocabulary: null } as never);
+  return gap;
+};
+const rankPrompts: string[] = [];
+function installRank(): void {
+  const inner = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "llm_completion") return Response.json({ content: { vessels: [{ endpoint: "http://llm.test", resolve_endpoint: "/resolve" }] } });
+    if (url === "http://llm.test/resolve" && body?.type === "llm_completion") {
+      const prompt = String(body.prompt ?? "");
+      rankPrompts.push(prompt);
+      const idx = /\[(\d+)\] repos\/fixture-twin\/src\/beta\.ts/.exec(prompt)?.[1] ?? "-1";
+      return Response.json({ content: idx });
+    }
+    return inner(input as never, init);
+  }) as unknown as typeof fetch;
+}
+const literalStep = { steps: [{ edit_site: `repos/${TWIN}/src/beta.ts`, change: "validateFrame must reject a zero frame and countRejected must call it", falsifier: { expected_literal: "rejectZeroFrame", reader: "countRejected" } }] };
+
+describe("decomposeGap escalates to the LLM localiser before declining as needs_information", () => {
+  beforeAll(() => {
+    for (const base of [CLONES, RUNTIME]) {
+      mkdirSync(join(base, TWIN, "src"), { recursive: true });
+      writeFileSync(join(base, TWIN, "src", "alpha.ts"), TWIN_SRC("alpha"));
+      writeFileSync(join(base, TWIN, "src", "beta.ts"), TWIN_SRC("beta"));
+    }
+    installRank();
+  });
+
+  it("MUST-FAIL the ESCALATED call (the one the LLM localiser runs on) yields >= 1 child for a parent the cheap localiser cannot site", async () => {
+    rankPrompts.length = 0;
+    const parent = await twinGap("twin", { vessel: TWIN });
+    const prompts: string[] = [];
+    const d = await decomposeGap(parent, { deps: deps(prompts, literalStep) });
+    await __settleBirthEvaluationsForTests();
+    expect(rankPrompts.length).toBe(1);
+    expect(d.reason).not.toContain("needs_information");
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain(`EDIT SITE repos/${TWIN}/src/beta.ts (excerpt):`);
+    expect(d.written.length).toBeGreaterThanOrEqual(1);
+    expect(d.written).toEqual([`${String(parent.id)}-step-1`]);
+  });
+
+  it("CONTROL a parent the cheap localiser sites is not ranked by the LLM; one that localises to nothing is still refused before the decomposer", async () => {
+    rankPrompts.length = 0;
+    const sited = await twinGap("sited", { vessel: VESSEL });
+    const prompts: string[] = [];
+    await decomposeGap(sited, { deps: deps(prompts, literalStep) });
+    expect(rankPrompts.length).toBe(0);
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain(`EDIT SITE repos/${VESSEL}/src/widget.ts (excerpt):`);
+    const none = await twinGap("none", {});
+    const p2: string[] = [];
+    const d = await decomposeGap({ ...none, summary: "something somewhere is a little off and nobody knows where" }, { deps: deps(p2) });
+    expect(p2.length).toBe(0);
+    expect(d.written).toEqual([]);
+    expect(d.reason).toBe("needs_information: no readable edit site (no edit_site and nothing localises)");
   });
 });

@@ -540,7 +540,14 @@ describe("system-authored gap checks: (e) graded by the tick's report, not the e
     rhythmWrites = [];
     const idle = await tick({ now_ms: t + 60_000 }); // everything is inside its backoff
     expect((idle["dispatched"] as unknown[]).length).toBe(0);
-    expect(rhythmWrites.length).toBe(0);
+    // AMENDED to the ruled contract (user ruling "Amend only that case to the ruled contract"): an idle due pass writes
+    // no SETTLEMENT (no credit or debit leg, no staleness accrued); it MAY write its pacing claim (gap-check-supply.ts
+    // RAN_PACING, a compare-and-set on the row it read: staleness 0, alpha and beta as read).
+    for (const w of rhythmWrites) {
+      const b = w["body"] as Row;
+      expect({ alpha: b["alpha"], beta: b["beta"], staleness: b["staleness"], cas: typeof w["if_updated_at"] === "string" }).toEqual({ alpha: 3, beta: 1, staleness: 0, cas: true });
+    }
+    expect(rhythmWrites.filter((w) => typeof w["if_updated_at"] !== "string").length).toBe(0);
   });
 });
 

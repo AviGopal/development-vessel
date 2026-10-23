@@ -155,6 +155,25 @@ export function hasLiveOwnArm(g: unknown): boolean {
   return Number.isFinite(armedAt) && armedAt >= narrowedAt;
 }
 
+/**
+ * WHAT THE PERSISTENT-COMPOSE-FAILURE CLOSE MUST NOT CLOSE (REALIGNMENT §2.2; law 7). Saturated failure_lessons say
+ * the lane failed often, not that nothing is in flight: a row with a landed fix awaiting measurement
+ * (pending_outcome_verification, or the pending_verification disposition), a live landing lease (a compose or cutover
+ * holding it now), or a live own armed check (hasLiveOwnArm: its check measures it every tick) is decided by that
+ * measurement, and closing it "persistent_compose_failure" throws away the one verdict that would be honest (research
+ * known-wrong KW13, the W5 class). Returns the reason the row is held, or null when the close may proceed.
+ */
+export function persistentCloseHold(g: unknown, nowMs: number = Date.now()): string | null {
+  const meta = ((g as { classification_metadata?: Record<string, unknown> } | null)?.classification_metadata) ?? {};
+  const pending = meta.pending_outcome_verification;
+  if (typeof pending === "string" && pending.trim().length >= 7) return `pending landing ${pending.trim().slice(0, 12)}`;
+  if (meta.disposition === "pending_verification") return "disposition pending_verification";
+  const lease = meta.landing_lease as { holder?: unknown; until?: unknown } | null | undefined;
+  if (lease && typeof lease === "object" && typeof lease.holder === "string" && Date.parse(String(lease.until ?? "")) > nowMs) return `landing lease held by ${lease.holder}`;
+  if (hasLiveOwnArm(g)) return "live armed check";
+  return null;
+}
+
 const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 /** Gap categories considered low-value for auto-close purposes */
@@ -722,7 +741,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     const excludedIds = new Set([...lowValueClosed, ...expired, ...closed]);
     const persistentCandidates = remainingOpen.filter((g) => {
       const lessons = ((g as any).classification_metadata?.failure_lessons ?? []) as unknown[];
-      return Array.isArray(lessons) && lessons.length >= 8 && !excludedIds.has(g.id!);
+      return Array.isArray(lessons) && lessons.length >= 8 && !excludedIds.has(g.id!) && persistentCloseHold(g) === null;
     });
     for (const g of persistentCandidates.slice(0, maxClose)) {
       const failureCount = ((g as any).classification_metadata?.failure_lessons ?? []).length;

@@ -25,6 +25,22 @@ import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
+/** The exit-reach contract as violations (empty = holds): no gap-to-feature exit body carries a reached verdict derived
+ *  from the compose's exit, both exits call composeExitReach, and composeExitReach posts nothing for an ok compose and
+ *  keeps the observe passthrough. */
+function exitReachViolations(g2f: string, lc: string): string[] {
+  const v: string[] = [];
+  if (/reached:\s*cb\["ok"\]\s*===\s*true/.test(g2f) || /reached:\s*true/.test(g2f.replace(/\/\/.*$/gm, ""))) v.push("an exit body carries reached:true");
+  if ((g2f.match(/void composeExitReach\(cb\);/g) ?? []).length !== 2) v.push("both compose exits must call composeExitReach");
+  const fn = lc.slice(lc.indexOf("export async function composeExitReach("));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  if (!/if \(cb\["ok"\] === true\) \{[\s\S]*?return \{ posted: false, awaiting_landing_verdict: true \};/.test(body)) v.push("an ok compose must post no reach (awaiting_landing_verdict)");
+  if (!body.includes("reached: false") || /reached: true/.test(body)) v.push("composeExitReach may post only reached:false");
+  if (!body.includes('cb["observe"] === true ? { learning_mode: "observe" as const } : {}')) v.push("observe passthrough missing");
+  return v;
+}
+const LC = readFileSync(join(import.meta.dir, "../../src/judge/learning-credit.ts"), "utf8");
+
 const ROOT = join(tmpdir(), `compose-observe-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
 await isolateRuntimeRoot("compose-observe", { who: "compose-observe.test.ts" });
@@ -199,7 +215,18 @@ describe("an observe compose never lands", () => {
     expect(FC_SRC).toContain('...(composeObserveActive() ? { learning_mode: "observe" } : { reached: verdict === "FAVORABLE" && landedVessels.length > 0 }), landed_vessels:');
     expect(FC_SRC).not.toContain("          reached: verdict === \"FAVORABLE\" && landedVessels.length > 0, landed_vessels:");
     const G2F = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8");
-    for (const id of ["reachId", "reachId2"]) expect(G2F).toContain(`body: JSON.stringify({ execution_id: ${id}, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }),`);
+    // AMENDED (qa ruling 2026-10-23, row a-landed-self-edit-is-credited-on-exit-…): both gap-to-feature compose exits go
+    // through composeExitReach, which posts NO reach for an ok compose (awaiting_landing_verdict: the landing verdict grades
+    // it) and passes an observe compose's learning_mode through on the reached:false it does post.
+    expect(exitReachViolations(G2F, LC)).toEqual([]);
+  });
+  it("[MUTANT] the exit-reach contract reddens on an exit body that carries reached:true, or an ok compose that posts", () => {
+    const G2F = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8");
+    const mutG2F = G2F.replace("void composeExitReach(cb);", 'void fetch(u, { body: JSON.stringify({ execution_id: reachId, reached: cb["ok"] === true }) });');
+    expect(exitReachViolations(mutG2F, LC).length).toBeGreaterThan(0);
+    const mutLC = LC.replace("return { posted: false, awaiting_landing_verdict: true };", "await postReach({ execution_id: id, reached: true }, \"exit\"); return { posted: true, awaiting_landing_verdict: false };");
+    expect(mutLC).not.toBe(LC);
+    expect(exitReachViolations(G2F, mutLC).length).toBeGreaterThan(0);
   });
   it("[CONTROL] a learn compose's traces carry no observe field", async () => {
     await co.runComposeObserve({ learning_mode: "learn" }, async () => { expect(co.observeTraceFields()).toEqual({}); });

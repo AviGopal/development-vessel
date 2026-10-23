@@ -34,6 +34,7 @@ import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, editSiteIsOwnCheck, isNonAttemptComposeResult, ownCheckUnarmMeta } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
 import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
+import { composeExitReach } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
@@ -1861,20 +1862,10 @@ async function routeCapabilityGapToNewResolver(
   });
   await recordLineageSpend(String(gap.id ?? ""), compose.body, pointer.dry_run ?? false);
   const cb = (compose.body ?? {}) as Record<string, unknown>;
-  try {
-    const reachId = typeof cb["execution_id"] === "string" ? (cb["execution_id"] as string) : "";
-    if (reachId.length > 0) {
-      const reachEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
-      const reachKey = process.env["METABOB_API_KEY"] ?? "";
-      void fetch(`${reachEndpoint}/v2/activities/execution-traces/reach`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(reachKey ? { Authorization: `ApiKey ${reachKey}` } : {}) },
-        // An observe compose's verdict (its report says observe:true) is recorded, never graded (activity-api /reach).
-        body: JSON.stringify({ execution_id: reachId, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }),
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => { /* grading must never affect the compose result */ });
-    }
-  } catch { /* verdict delivery is best effort */ }
+  // A COMPOSE'S EXIT IS NOT ITS GRADE (REALIGNMENT §2.2, wiring V1): an ok compose awaits its landing verdict (the
+  // pending-land sweep grades it, src/judge/gap-landing-verdict.ts gradeLandingExecution); only a compose that did not
+  // come back ok is graded now, reached:false (composeExitReach). An observe compose's verdict is recorded, never graded.
+  void composeExitReach(cb);
 
   if (pointer.dry_run) {
     return { shape: "gapToFeatureReport", body: {
@@ -2960,19 +2951,8 @@ const familySample: string[] = await (async () => {
   await recordLineageSpend(String(gap.id ?? ""), compose.body, pointer.dry_run ?? false);
 
   const cb = compose.body as Record<string, unknown>;
-  try {
-    const reachId2 = typeof cb["execution_id"] === "string" ? (cb["execution_id"] as string) : "";
-    if (reachId2.length > 0) {
-      const reachEndpoint2 = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
-      const reachKey2 = process.env["METABOB_API_KEY"] ?? "";
-      void fetch(`${reachEndpoint2}/v2/activities/execution-traces/reach`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(reachKey2 ? { Authorization: `ApiKey ${reachKey2}` } : {}) },
-        body: JSON.stringify({ execution_id: reachId2, reached: cb["ok"] === true, ...(cb["observe"] === true ? { learning_mode: "observe" } : {}) }), // OBSERVE: as above
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => { /* grading must never affect the compose result */ });
-    }
-  } catch { /* verdict delivery is best effort */ }
+  // A COMPOSE'S EXIT IS NOT ITS GRADE: as above (composeExitReach).
+  void composeExitReach(cb);
 
   // CLOSE-ON-LAND: only when the fix GENUINELY landed on origin/dev (FAVORABLE +
   // a real "pushed" cutover, never dry_run / staged-only / soft-refuse). A

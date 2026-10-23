@@ -257,3 +257,50 @@ export async function resolveGapLearningCreditWrite(pointer: Record<string, unkn
   if (typeof c.created_at !== "string" || !Number.isFinite(Date.parse(c.created_at))) return { shape: "gapLearningCreditResult", body: { status: "refused", reason: "created_at required" } };
   return { shape: "gapLearningCreditResult", body: await applyCreditAtHolder(c) };
 }
+
+// ── THE ONE REACH POST (REALIGNMENT §2.2 and §7 step 5; research wiring V1 + V2) ───────────────────────────────────────
+/**
+ * Every development-vessel grade of an execution goes through here: POST activity-api /v2/activities/execution-traces/reach
+ * with {execution_id, reached, completion_shapes?, learning_mode?}. A RECORDER like the rest of this module: the caller
+ * decided the verdict (a landing verdict, a compose that did not come back ok); this only delivers it. Never throws: a
+ * missed grade leaves the execution ungraded, which moves nothing. `updated: 0` (an id the trace store holds no row for,
+ * e.g. a gap-lane landing composed under this vessel's own execution id) is a normal answer, reported and not retried.
+ */
+export type ReachVerdict = { execution_id: string; reached: boolean; completion_shapes?: string[]; learning_mode?: "observe" };
+export async function postReach(v: ReachVerdict, why: string): Promise<{ sent: boolean; status: number | null; updated: number | null }> {
+  if (!v.execution_id) return { sent: false, status: null, updated: null };
+  const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+  const key = process.env["METABOB_API_KEY"] ?? "";
+  try {
+    const res = await fetch(`${ep}/v2/activities/execution-traces/reach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
+      body: JSON.stringify({ execution_id: v.execution_id, reached: v.reached, ...(v.completion_shapes ? { completion_shapes: v.completion_shapes } : {}), ...(v.learning_mode ? { learning_mode: v.learning_mode } : {}) }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const j = (await res.json().catch(() => null)) as { updated?: unknown } | null;
+    const updated = typeof j?.updated === "number" ? j.updated : null;
+    console.log(`[reach-post] execution=${v.execution_id} reached=${v.reached} status=${res.status} updated=${updated ?? "?"} (${why})`);
+    return { sent: true, status: res.status, updated };
+  } catch (err) {
+    console.warn(`[reach-post] execution=${v.execution_id} reached=${v.reached} NOT delivered (${why}): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+    return { sent: false, status: null, updated: null };
+  }
+}
+
+/**
+ * A COMPOSE'S EXIT IS NOT ITS GRADE. An ok compose is AWAITING ITS LANDING VERDICT: nothing is posted (activity-api's
+ * /reach takes only a boolean, so "ungraded" is the absence of a post: the trace stays ungraded and the one later /reach,
+ * the landing verdict's, grades it), and the line says so. A compose that did not come back ok is graded reached:false, as
+ * before. An observe compose's verdict is recorded, never graded (learning_mode passes through).
+ */
+export async function composeExitReach(cb: Record<string, unknown>): Promise<{ posted: boolean; awaiting_landing_verdict: boolean }> {
+  const id = typeof cb["execution_id"] === "string" ? (cb["execution_id"] as string) : "";
+  if (!id) return { posted: false, awaiting_landing_verdict: false };
+  if (cb["ok"] === true) {
+    console.log(`[reach-post] execution=${id} awaiting_landing_verdict: an ok compose is graded by its landing verdict, not its exit (no reach posted)`);
+    return { posted: false, awaiting_landing_verdict: true };
+  }
+  const r = await postReach({ execution_id: id, reached: false, ...(cb["observe"] === true ? { learning_mode: "observe" as const } : {}) }, "compose did not come back ok");
+  return { posted: r.sent, awaiting_landing_verdict: false };
+}

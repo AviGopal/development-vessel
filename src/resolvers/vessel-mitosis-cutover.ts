@@ -809,6 +809,26 @@ const EMIT_TIMEOUT_MS = 1500;
  * never affect a completed landing. Awaiting only bounds the return by the 5s timeout already
  * declared on the request.
  */
+/**
+ * The landing trace's execution id, on the landing's own gap row (landing_trace {execution_id, sha, at}), so the landing
+ * verdict can grade it. Only a pushed landing of a stored, open row, and only the first trace per sha. Never throws.
+ */
+export async function recordLandingTrace(gapId: string, sha: string, executionId: string, pushStatus: string): Promise<boolean> {
+  try {
+    if (!gapId || gapId === "unknown-gap" || pushStatus !== "pushed" || !/^[0-9a-f]{7,40}$/i.test(sha) || !executionId) return false;
+    const r = (await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 })) as { body?: { gaps?: Array<Record<string, unknown>> } } | null;
+    const row = (r?.body?.gaps ?? []).find((g) => String(g["id"]) === gapId);
+    if (!row || String(row["status"] ?? "") === "closed") return false;
+    const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+    if ((meta["landing_trace"] as { sha?: unknown } | undefined)?.sha === sha) return false;
+    await ownCheckDeps.writeGap({ type: "substrateGap_write", gap: { ...row, classification_metadata: { ...meta, landing_trace: { execution_id: executionId, sha, at: new Date().toISOString() } } } });
+    return true;
+  } catch (err) {
+    console.warn(`[mitosis-cutover] landing trace not recorded on gap ${gapId} (non-fatal): ${(err as Error)?.message ?? String(err)}`);
+    return false;
+  }
+}
+
 async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: string): Promise<void> {
   try {
     const ep = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
@@ -843,36 +863,19 @@ async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: stri
       }),
       signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
     })
-      // GRADE THE TRACE, OR THE RIBOSOME WILL NOT READ IT.
-      //
-      // Emitting the execution is only half the loop. The ribosome subscribes to
-      // execution_completed, then RE-READS the trace looking for a `reached:*` tag, and
-      // extracts only on `reached && allSucceeded`. Measured 2026-08-29 on this very
-      // emission:
-      //   reach re-read exec_1788014880529… verdict=ungraded (no-tags) attempts=5
-      //     — extraction SKIPPED (not honestly reached)
-      // Five re-reads with backoff, then a correct refusal: an ungraded execution is not
-      // evidence of anything, and the ribosome is right not to mint a template from it.
-      //
-      // ExecutionRecordSchema has no `tags` field, so the verdict cannot ride along with the
-      // POST. It goes to the dedicated grader, POST /v2/activities/execution-traces/reach
-      // with { execution_id, reached, completion_shapes } — the same endpoint goal-host uses.
-      //
-      // reached:true is HONEST here and only here. This helper runs after the commit exists
-      // and the push has been attempted; the change is in the tree. A compose that merely
-      // reached FAVORABLE has not landed and must stay ungraded — grading it true would
-      // feed the ribosome exactly the hollow executions law 4 warns about.
+      // NO GRADE ON PUSH STATUS (REALIGNMENT §2.2 and §7 step 5; research wiring V1 + V2). This POSTed /reach
+      // reached:(push_status === "pushed") for the emitted trace, so every push read as a reach before anything measured
+      // whether the change did what its gap asked: a push is provenance, not a verdict. The trace now stays ungraded
+      // and its execution id is recorded on the landing's gap row (landing_trace); the LANDING verdict grades it once
+      // (src/judge/gap-landing-verdict.ts gradeLandingExecution): reached:true with completion_shapes ["cutoverApplied"]
+      // on a verified close, reached:false when the landing is falsified or reverted. The ribosome extracts from it only
+      // when that grade is read (law 4: templates from verified successes only).
       .then(async (res) => {
         if (!res || !res.ok) return;
         const j = await res.json().catch(() => null) as { execution_id?: string } | null;
         const execId = j?.execution_id;
         if (!execId) return;
-        await fetch(`${ep}/v2/activities/execution-traces/reach`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
-          body: JSON.stringify({ execution_id: execId, reached: String(appliedBody["push_status"] ?? "") === "pushed", completion_shapes: ["cutoverApplied"] }),
-          signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
-        }).catch(() => { /* ungraded is the safe failure — the ribosome simply skips it */ });
+        await recordLandingTrace(gapId, String(appliedBody["new_git_sha"] ?? ""), execId, String(appliedBody["push_status"] ?? ""));
       })
       .catch(() => { /* trace store unreachable — the landing already happened */ });
   } catch { /* emission must never affect a completed landing */ }

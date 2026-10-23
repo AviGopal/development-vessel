@@ -1837,7 +1837,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -1883,6 +1883,13 @@ for (const g of gaps) { try { await recordOperatorRegression(g); } catch { /* be
 // BIRTH RE-EVALUATION (qa R1): unknown, or pending past the hour, re-taken BIRTH_REEVAL_PER_TICK per tick,
 // oldest first, on the same birth chain and judge as a write's (substrate-gap reevaluateBirthVerdicts).
 try { tally.birth_retaken = (await reevaluateBirthVerdicts(gaps)).length; } catch (err) { console.warn(`[gap-sweep] birth re-evaluation skipped: ${String(err).slice(0, 200)}`); }
+
+// LANDED BUT NOT CLOSED (proposeLandedCloses): an open row whose edit_site a commit moved since detection gets its check
+// re-run on the clone HEAD; a pass proposes the close (never makes it). Before the pending slice, which it never feeds.
+try {
+  const lc = await proposeLandedCloses(gaps, { ask: deps.ask });
+  tally.landed_close_proposed = lc.proposed.length; tally.landed_close_still_red = lc.still_red.length; tally.landed_close_prose_only = lc.prose_only;
+} catch (err) { console.warn(`[gap-sweep] landed-close proposals skipped: ${String(err).slice(0, 200)}`); }
 
 // Then process existing pending verifications as before
 const candidates = pendingSweepCandidates(gaps);
@@ -2312,6 +2319,102 @@ function fixingCommitSinceBirth(gap: Record<string, unknown>, meta: Record<strin
     return { sha: sha || instrumentSha, head, held: { stage, instrument_commit: instrumentSha, files } };
   }
   return sha ? { sha, head } : null;
+}
+
+// ── LANDED BUT NOT CLOSED (law 7 durability; REALIGNMENT §2.1 / §2.2) ─────────────────────────────────────────────────
+// A fix that lands outside the lane (an operator commit, a later landing that happened to satisfy an older row) leaves
+// its row open with no path to close: the landing-time close and markTerminalRefusal's fixed_elsewhere act only on a
+// row the lane composes, and the pending sweep only on a row a landing stamped. Measured 2026-10-23: route-edit-e72f5032
+// (its ask landed in dd0478b3) and the seven check-supply cluster rows fixed by operator commits that day, all open with
+// no verification record. USER RULING 2026-10-23T22:27:58Z (via qa): "With the landed-open detector (Recommended)".
+// So each sweep (sweepIfCloneHeadsMoved runs it when a clone HEAD moves, i.e. when a commit lands) takes the OPEN rows
+// that carry a re-runnable check (their test_suite evidence_resolve, else a bare test_file), finds the newest commit
+// touching the row's edit_site since its detection (fixingCommitSinceBirth, the fixed_elsewhere reader), and re-runs the
+// check once on the clone HEAD. A pass PROPOSES the close: landed_close_proposal on the row, with the commit and the
+// run, plus a question on the human panel. It NEVER closes and never stamps pending_outcome_verification (that would
+// hand the row to the closer above): the lifecycle or a ruling decides. A check that still fails records the commit it
+// was judged against (landed_close_check), so the same commit is not re-run every tick; the row stays open as it was.
+// A row whose must-fail is prose only has nothing to re-run: counted, never written.
+export const LANDED_CLOSE_DETECTOR = "gap-sweep:landed_close_proposal";
+/** Check runs per sweep (each is one test_suite run in a detached worktree): a tuning row, recorded default 5. */
+export const LANDED_CLOSE_PROPOSE_LIMIT_ROW = "gap_sweep.landed_close_propose_limit";
+const LANDED_CLOSE_PROPOSE_LIMIT_DEFAULT = 5;
+
+/** The row's re-runnable check: its test_suite evidence_resolve, else a bare classification_metadata.test_file as a
+ *  test_suite of the edit_site's vessel (only_tests when the row names them, else the whole file). null otherwise: a
+ *  non-test_suite evidence_resolve is the registered verifiers' and the pending sweep's, not re-run here. */
+export function landedCloseCheckOf(meta: Record<string, unknown>): Record<string, unknown> | null {
+  const er = meta.evidence_resolve as { shape?: unknown; input?: { test_file?: unknown } } | null | undefined;
+  if (er && typeof er === "object") {
+    return er.shape === "test_suite" && typeof er.input?.test_file === "string" && er.input.test_file.trim() ? (er as Record<string, unknown>) : null;
+  }
+  const tf = typeof meta.test_file === "string" ? meta.test_file.trim().replace(/^\/+/, "") : "";
+  const vessel = /^repos\/([A-Za-z0-9_.-]+)\//.exec(String(meta.edit_site ?? ""))?.[1] ?? "";
+  if (!tf || !vessel || vessel.includes("..")) return null;
+  const testFile = tf.startsWith(`repos/${vessel}/`) ? tf.slice(`repos/${vessel}/`.length) : tf;
+  const only = Array.isArray(meta.only_tests) ? (meta.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0) : [];
+  return { shape: "test_suite", input: { vessel: `repos/${vessel}`, test_file: testFile, ...(only.length > 0 ? { only_tests: only } : {}) } };
+}
+
+/** Which rows the detector takes: an open, unheld row with an edit_site, not awaiting a landing's verification and not
+ *  in check repair, carrying a re-runnable check ("check") or only a prose must_fail ("prose_only"); null otherwise. */
+export function landedCloseCandidate(g: Record<string, unknown>): "check" | "prose_only" | null {
+  if (String(g.status ?? "") !== "open") return null;
+  const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+  if (m.operator_hold === true || m.own_check_broken) return null;
+  if (typeof m.pending_outcome_verification === "string" && m.pending_outcome_verification.length >= 7) return null;
+  if (!gapEditSite(g, m)) return null;
+  if (landedCloseCheckOf(m)) return "check";
+  return typeof m.must_fail === "string" && m.must_fail.trim() ? "prose_only" : null;
+}
+
+export async function proposeLandedCloses(
+  gaps: Record<string, unknown>[],
+  deps: { ask: Ask; runAt?: PinnedCheckDeps["runAt"]; limit?: number },
+): Promise<{ proposed: string[]; still_red: string[]; prose_only: number; runs: number }> {
+  const out = { proposed: [] as string[], still_red: [] as string[], prose_only: 0, runs: 0 };
+  const runAt = deps.runAt ?? (pinnedCheckDeps ?? defaultPinnedCheckDeps).runAt;
+  // Read only when a check is about to run: a sweep with no candidate makes no extra call.
+  let limit: number | null = deps.limit ?? null;
+  for (const g of gaps) {
+    const kind = landedCloseCandidate(g);
+    if (kind === "prose_only") { out.prose_only += 1; continue; }
+    if (kind !== "check") continue;
+    const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+    const check = landedCloseCheckOf(meta)!;
+    // The range starts at the row's detection (created_at when the row carries no detected_at).
+    const judgedMeta: Record<string, unknown> = { ...meta, evidence_resolve: check };
+    const judged: Record<string, unknown> = { ...g, detected_at: g.detected_at ?? g.created_at, classification_metadata: judgedMeta };
+    const found = fixingCommitSinceBirth(judged, judgedMeta);
+    // No commit since detection, or one that touched only the check's own instrument: the edit_site has not moved.
+    if (!found || found.held?.stage === "own_green_instrument_only_commit") continue;
+    const prior = meta.landed_close_check as { fixing_sha?: unknown } | undefined;
+    if (prior && prior.fixing_sha === found.sha) continue;
+    if (limit === null) limit = (await readTuningNumber(LANDED_CLOSE_PROPOSE_LIMIT_ROW)) ?? LANDED_CLOSE_PROPOSE_LIMIT_DEFAULT;
+    if (out.runs >= limit) break;
+    out.runs += 1;
+    let verdict: GapCheckVerdict;
+    try { verdict = await runAt(judged, found.head); } catch { verdict = "unknown"; }
+    // Unjudged: nothing is written, so the next sweep tries this commit again.
+    if (verdict !== "present" && verdict !== "absent") continue;
+    const gapId = String(g.id ?? "");
+    const fresh = await readGapFresh(gapId);
+    if (!fresh || String(fresh.status ?? "") !== "open") continue;
+    const fm = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+    const input = (check.input ?? {}) as Record<string, unknown>;
+    const run = { fixing_sha: found.sha, head: found.head, verdict, at: new Date().toISOString(), check: { vessel: input.vessel ?? null, test_file: input.test_file ?? null, only_tests: input.only_tests ?? null } };
+    const proposal = verdict === "absent"
+      ? { landed_close_proposal: { ...run, detector: LANDED_CLOSE_DETECTOR, instrument_touched: found.held ? { stage: found.held.stage, commit: found.held.instrument_commit, files: found.held.files.slice(0, 10) } : null, decides: "the lifecycle or a ruling; this detector never closes" } }
+      : {};
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "open", classification_metadata: { ...fm, landed_close_check: run, ...proposal } } } as never);
+    if (w?.shape === "structuredError" || (w?.body as { action?: unknown } | undefined)?.action === "skipped") continue;
+    if (verdict === "present") { out.still_red.push(gapId); continue; }
+    out.proposed.push(gapId);
+    console.log(`[gap-sweep] gap ${gapId}: landed but not closed — its check passes at ${found.head.slice(0, 12)} after ${found.sha.slice(0, 12)} touched its edit_site; close PROPOSED, not closed`);
+    void deps.ask({ type: "uiQuestion_write", id: "landed-close-proposal-" + gapId, title: "A landed fix makes an open gap's check pass — close it?", body: "Gap " + gapId + " (" + String(g.category ?? "") + ") is open, but commit " + found.sha.slice(0, 12) + " touched its edit site after it was detected, and its own check (" + String(input.test_file ?? "") + ") now passes at " + found.head.slice(0, 12) + "." + (found.held ? " That commit range also touched the check itself (" + found.held.stage + "), so the pass is not independent of the fix." : "") + " The sweep proposes the close and does not make it. Please rule: close it as satisfied by that landing, or say what is still missing. Summary: " + String(g.summary ?? "").slice(0, 300), kind: "gap_landed_close_proposal", importance: "medium" } as never)
+      .catch((e: unknown) => console.warn(`[gap-sweep] landed-close question for ${gapId} THREW: ${String(e).slice(0, 200)} — no human was asked`));
+  }
+  return out;
 }
 
 /** Exported for tests. A green-on-parent refusal with a commit that fixed the check's subject since the gap's

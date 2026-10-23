@@ -127,6 +127,10 @@ type Ledger = {
   /** Set when THIS node placed the goal on a peer with a free compose slot (compose-placement.ts): the sender, and why. */
   placed_by?: string;
   placement?: string;
+  /** The node whose tick wrote the arm (its bootstrap identity), and, for a check handed to the gap-store holder for its
+   *  birth verdict, the node that handed it off: stamped by the hand-off write, carried to the arm. */
+  armed_by_node?: string;
+  handed_off_from?: string;
   /** The outcome read back for the last dispatch (status, reached, why it was lost, where and when it was read). */
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
@@ -1195,7 +1199,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
         notArmed.push({ id, reason: "birth_verdict_at_holder: the check was handed to the gap-store holder, which measures it" });
         if (pointer.dry_run) continue;
         const holdable = !nonEmpty(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION;
-        const w = await writeMeta(row, { evidence_resolve, edit_site: editSite, predicate_source: CHECK_SUPPLY_SOURCE, ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}) });
+        const w = await writeMeta(row, { evidence_resolve, edit_site: editSite, predicate_source: CHECK_SUPPLY_SOURCE, ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), check_supply: { ...ledger, handed_off_from: localNode } });
         if (w.shape === "structuredError") console.warn(`[gap-check-supply] ${id}: hand-off to the gap-store holder refused: ${JSON.stringify(w.body).slice(0, 200)}`);
         else console.log(`[gap-check-supply] ${id}: check ${JSON.stringify(titles)} handed to the gap-store holder for its birth verdict; held until it reads present`);
         continue;
@@ -1255,12 +1259,20 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       continue;
     }
     if (pointer.dry_run) { armed.push(id); continue; }
+    // WHO ARMED IT, AND THROUGH WHICH HAND-OFF. The arm names the node whose tick wrote it; a check the holder measured
+    // for a node that handed it off (its stamp's key is this check's) also names that node, from the hand-off write.
+    // Without both, an arm on a forwarding node read the same as the holder's own, and could not be attributed.
+    const { handed_off_from: handOffNode, ...armLedger } = ledger;
+    const viaHandOff = meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
+    // A hand-off with no node recorded (written before the stamp) is this node's only when it forwards its store.
+    const handOff = !viaHandOff ? null : nonEmpty(handOffNode) ? String(handOffNode) : gapStoreIsLocal() ? null : localNode;
+    const attribution = { armed_by_node: localNode, ...(handOff ? { handed_off_from: handOff } : {}) };
     const w = await writeMeta(row, {
       evidence_resolve,
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
+      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

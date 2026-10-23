@@ -203,12 +203,10 @@ export function checkSupplyDisposition(row: Row): typeof CHECK_SUPPLY_DISPOSITIO
   // Skip re-commit children: these summarize a discarded draft's failure, not a HEAD defect.
   // feature_compose files these with summary 'compose for gap X repeated already-recorded failure class <cls>: ...'
   // and classification_metadata { re_commit:true, source_gap_id, root_gap_id, failure_class, edit_site } (feature-compose.ts:5340-5358).
-  // Fallback: if metadata is absent, use id prefix 'recommit-'.
-  {
-    const id = String(row["id"] ?? "");
-    const isRecommit = id.startsWith("recommit-") || (meta["re_commit"] === true && nonEmpty(meta["failure_class"]));
-    if (isRecommit) return null;
-  }
+  // BY THE MARKER ONLY, never by the id: an id is a name, and a real defect gap may start with the word (the open
+  // recommit-children-are-never-retired-when-their-parent-is-fixed is ABOUT re-commits). The id-prefix fallback
+  // skipped every such row forever, unsupplied.
+  if (meta["re_commit"] === true && nonEmpty(meta["failure_class"])) return null;
   if (nonEmpty(meta["expected_literal"]) || nonEmpty(meta["hardcoded_url"])) return null;
   if (String(meta["falsifier_unresolvable_reason"] ?? "").startsWith(DETECTOR_ROW_UNARMABLE_REASON)) return null;
   const cat = String(row["category"] ?? "");

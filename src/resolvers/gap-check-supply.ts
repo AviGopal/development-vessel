@@ -57,7 +57,8 @@
  * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no DISPATCH (the
  * bookkeeping, ARM, OUTCOME, the own-check un-arm and the hold release, runs on every pass, at most once per shaped
  * bookkeeping_min_interval_s when undue), and the per-tick bound, backoff and attempt cap come from the same impulse's
- * body. The rhythm conductor fires the family through FAMILY_RESOLVERS and leaves it PENDING, and on its other passes
+ * body. DEMAND makes it due: an undue pass that finds a sendable row and fewer than max_per_tick of this node's goals in
+ * flight writes the staleness at which that formula reads due, so the next conductor pass fires it. The rhythm conductor fires the family through FAMILY_RESOLVERS and leaves it PENDING, and on its other passes
  * asks for the bookkeeping alone through FAMILY_BOOKKEEPING (bookkeeping_only); this resolver settles its family from
  * its REPORT when it completes (checkSupplySettlementLeg), whichever entry ran it, so no exit is ever credited as success.
  *
@@ -1251,6 +1252,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
 
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
   let outcomeReads = 0;
+  // THIS NODE'S GOALS STILL IN FLIGHT after the read-back (the DEMAND gate below): sent or placed by this node, with a
+  // dispatch id, not yet settled. A record with no dispatch id is not counted: no send of it was ever confirmed, and it
+  // waits out dispatch_stale_hours, so counted it would hold the gate shut for a day on a goal that may not exist.
+  let inFlightMine = 0;
   for (const row of open) {
     const id = String(row["id"]);
     if (touched.has(id)) continue;
@@ -1261,14 +1266,16 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const mine = owner === null || owner === localNode;
     // A goal this node placed on a peer is read through that peer (compose-placement readPlacedDispatch).
     const placedHere = !mine && ledger.placed_by === localNode && nonEmpty(ledger.dispatch_host);
-    if ((mine || placedHere) && nonEmpty(ledger.dispatch_id) && outcomeReads >= maxOutcomeReads) continue;
+    if ((mine || placedHere) && nonEmpty(ledger.dispatch_id) && outcomeReads >= maxOutcomeReads) { inFlightMine += 1; continue; }
     let probe: DispatchProbe | null = null;
     if (mine && nonEmpty(ledger.dispatch_id)) { outcomeReads += 1; probe = await probeDispatch(String(ledger.dispatch_id)); }
     else if (placedHere && nonEmpty(ledger.dispatch_id)) { outcomeReads += 1; probe = await readPlacedDispatch(String(ledger.dispatch_host), { gap_id: id, dispatch_id: String(ledger.dispatch_id) }); }
     const v = dispatchVerdict(ledger, probe, now, bounds, localNode);
-    if (v.kind === "running") { outcomes.running += 1; continue; }
-    if (v.kind === "awaiting_titles") { outcomes.awaiting_titles += 1; continue; }
+    const ownSent = (mine || placedHere) && nonEmpty(ledger.dispatch_id);
+    if (v.kind === "running") { outcomes.running += 1; if (ownSent) inFlightMine += 1; continue; }
+    if (v.kind === "awaiting_titles") { outcomes.awaiting_titles += 1; if (ownSent) inFlightMine += 1; continue; }
     if (v.kind === "wait") {
+      if (ownSent) inFlightMine += 1;
       outcomes.waiting.push({ id, why: v.why, detail: v.detail });
       console.warn(`[gap-check-supply] outcome unread for ${id}: ${v.why}: ${v.detail}`);
       continue;
@@ -1345,7 +1352,37 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // by settled_attempts) are written as today's beta leg, which persists the accrued staleness, so the family's due
     // clock moves only by the debit itself; an arm earns no credit here (credit and staleness are answered by a fire).
     const leg = refused > 0 ? "beta" : null;
-    if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys());
+    // DEMAND MAKES THE FAMILY DUE (law 5: the rhythm paces the passes; one goal in flight is the throttle). Staleness is
+    // the demand a fire has not answered, yet it accrued only by age, so after an arm reset it a family whose posterior
+    // sank under debits came due 18 to 50 hours later while hundreds of rows waited and nothing of its own was in flight.
+    // So an undue pass that finds a row the dispatch step could send now and fewer than max_per_tick of this node's goals
+    // in flight writes the staleness at which the ONE formula (rhythmDueScore, unchanged) reads due: the conductor's next
+    // pass fires the family as it fires any due family, and that fire claims its slot and dispatches as before. The bound
+    // is the conductor's own threshold (1) or the body's due_threshold, whichever is higher, so both read it due.
+    const sendable = (r: Row): boolean => {
+      const id = String(r["id"]);
+      if (touched.has(id) || checkSupplyDisposition(r) === null || checkSupplyArm(id, controlFraction) === "control") return false;
+      const l = ledgerOf(metaOf(r));
+      if (["armed", "exhausted", "goal_dispatched", "no_anchor", "scope_excluded"].includes(String(l.state ?? ""))) return false;
+      const n = Number(l.attempts ?? 0);
+      if (n >= maxAttempts) return false;
+      if (l.state === "non_attempt" || l.state === "send_refused") { const nb = Date.parse(String(l.not_before ?? "")); if (Number.isFinite(nb) && now < nb) return false; }
+      else { const last = Date.parse(String(l.last_dispatch_at ?? "")); if (n > 0 && Number.isFinite(last) && now < last + backoffMs * 2 ** (n - 1)) return false; }
+      return checkSupplyVessel(r) !== null;
+    };
+    const ready = inFlightMine < perTick ? open.filter(sendable).length : 0;
+    let markedDue: number | null = null;
+    if (ready > 0) {
+      // Scored on the body as this pass stores it: a debit written beside the mark lowers the credit the formula reads.
+      const stored = leg ? { ...rhythm.body, ...rhythmSettlementOverlay(leg, due.alpha, due.beta, 1) } : rhythm.body;
+      const unit = rhythmDueScore({ ...stored, staleness: 1 }, nowIso, now).due_score;
+      if (unit > 0) markedDue = Math.max(due.staleness, Math.max(threshold, 1) / unit);
+    }
+    if (!pointer.dry_run) {
+      if (leg) await settleFamily(rhythm, leg, markedDue !== null ? { ...due, staleness: markedDue } : due, undefined, settledKeys());
+      else if (markedDue !== null && !(await writeFamilyRhythm(rhythm, { staleness: markedDue }, "gap-check-supply-tick", rhythm.updated_at))) markedDue = null;
+    }
+    if (markedDue !== null) console.log(`[check-supply] demand: ready=${ready} in_flight=${inFlightMine} max_per_tick=${perTick}: rhythm marked due (staleness ${markedDue.toFixed(4)}) node=${localNode}`);
     bookkeepingLine("undue");
     return {
       shape: "gapCheckSupplyReport",
@@ -1353,6 +1390,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
         ...notDue,
         dispatch: "undue",
         settlement: leg ?? "none",
+        demand: { ready, in_flight: inFlightMine, max_per_tick: perTick, marked_due: markedDue !== null },
         armed,
         not_armed: notArmed,
         refused,

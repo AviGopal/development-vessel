@@ -1837,7 +1837,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -2066,6 +2066,18 @@ const pending = candidates.unheld
         tally.unknown += 1;
         console.log(`[gap-sweep] gap ${gidSweep} reads absent but is NOT closed: predicate_suspect (${suspectSweep}; no grounded re-run for landed ${sha.slice(0, 12)})`);
         continue;
+      }
+      // ORPHANED SIBLING CHECKS (orphanSiblingChecks): a measured green on an armed SUBSET of a check-first file closes
+      // only when every other red check in that file is armed by another open row. An orphan (or a whole-file run that
+      // could not be read) refuses this pass; the row stays open and pending, the orphans named on it.
+      if (verdict === "absent") {
+        const orphan = await orphanSiblingChecks(g, gaps, sha);
+        if (!orphan.measured || orphan.orphans.length > 0) {
+          tally.orphan_siblings += 1;
+          console.log(`[gap-sweep] gap ${gidSweep} reads absent but landed ${sha.slice(0, 12)} is NOT closed: ${orphan.measured ? `its armed file has red checks no other open row arms: ${orphan.orphans.slice(0, 3).join(" | ")}` : "the armed file's whole run could not be read, so orphaned sibling checks cannot be ruled out"}`);
+          await recordOrphanSiblingRefusal(g, sha, orphan);
+          continue;
+        }
       }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;
@@ -2434,6 +2446,83 @@ export async function proposeLandedCloses(
       .catch((e: unknown) => console.warn(`[gap-sweep] landed-close question for ${gapId} THREW: ${String(e).slice(0, 200)} — no human was asked`));
   }
   return out;
+}
+
+// ── ORPHANED SIBLING CHECKS (REALIGNMENT §2.2; law 7 durability) ─────────────────────────────────────────────────────
+// A narrowed row arms ONE check of a check-first test file (only_tests names a subset) and its recommits inherit the
+// subset verbatim (inheritableParentCheck), so a landing can turn the armed check green while the file's other checks,
+// for the same edit site, stay red. Measured 2026-10-23: activity-api 3997ea6 added an exported constant nothing reads.
+// The armed check (the constant's contents) passed, the wiring, builtin-claims and composite-terminal checks of
+// src/routes/deliverable-shapes-resolver-claim.test.ts stayed red (4 pass / 3 fail), and the row read verified. The
+// root that armed the full set and the hand-narrowed c1 child were both closed, so nobody owned the red checks.
+// THE RULE (qa design, ORPHAN-based, at verification): a row may close verified only if every RED check in its armed
+// test file is armed by some OTHER OPEN row. A red sibling no open row arms is an orphan: the close is refused, the
+// row stays open and pending, and the orphans are named on it. Siblings red because other open rows own them (a
+// legitimate decomposition) do not block. A row whose check names no subset runs the whole file and has no sibling.
+// The file is run once more at the landed sha, through the one judge (evaluateGapCheck) without the name filter; a
+// run that cannot be read refuses this pass (fail closed), and the next sweep retries.
+export type OrphanSiblingDeps = {
+  /** The armed file's failing test names at `ref` (no name filter), or null when the run could not be read. */
+  failingAt: (gap: Record<string, unknown>, check: { vessel: string; test_file: string }, ref: string) => Promise<string[] | null>;
+};
+const defaultOrphanSiblingDeps: OrphanSiblingDeps = {
+  failingAt: async (gap, check, ref) => {
+    const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const er = (meta.evidence_resolve ?? {}) as Record<string, unknown>;
+    const { hardcoded_url: _u, expected_literal: _l, ...rest } = meta;
+    let report: Record<string, unknown> | null = null;
+    // Only the file: no only_tests (every case runs) and no zero_field (the verdict is ignored; the report is read).
+    const wholeFile = { shape: "test_suite", input: { ...((er.input ?? {}) as Record<string, unknown>), vessel: check.vessel, test_file: check.test_file, only_tests: undefined, base_ref: ref } };
+    try {
+      await evaluateGapCheck({ ...gap, classification_metadata: { ...rest, evidence_resolve: wholeFile } }, { onReport: (r) => { report = r; } });
+    } catch { return null; }
+    const r = report as Record<string, unknown> | null;
+    if (!r || r["ran"] !== true) return null;
+    if (Array.isArray(r["failingTests"])) return (r["failingTests"] as unknown[]).map(String);
+    // A report that names no failing test is readable only when it also counts none failing.
+    return typeof r["fail"] === "number" && r["fail"] > 0 ? null : [];
+  },
+};
+
+/** The row's armed subset: vessel (bare), test_file and only_tests of a test_suite check, or null. */
+function armedSubsetOf(meta: Record<string, unknown>): { vessel: string; test_file: string; only_tests: string[] } | null {
+  const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown; only_tests?: unknown } } | null | undefined;
+  if (!er || er.shape !== "test_suite" || typeof er.input?.test_file !== "string") return null;
+  const test_file = er.input.test_file.replace(/^\/+/, "").replace(/^repos\/[^/]+\//, "");
+  const vessel = typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+  const only_tests = Array.isArray(er.input.only_tests) ? er.input.only_tests.filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  return test_file ? { vessel, test_file, only_tests } : null;
+}
+
+/** Exported for tests. The red checks of `gap`'s armed file, at `sha`, that no OTHER OPEN row in `openGaps` arms. */
+export async function orphanSiblingChecks(gap: Record<string, unknown>, openGaps: Record<string, unknown>[], sha: string, deps: OrphanSiblingDeps = defaultOrphanSiblingDeps): Promise<{ orphans: string[]; measured: boolean; red: string[] }> {
+  const own = armedSubsetOf((gap.classification_metadata ?? {}) as Record<string, unknown>);
+  if (!own || own.only_tests.length === 0) return { orphans: [], measured: true, red: [] };
+  let failing: string[] | null = null;
+  try { failing = await deps.failingAt(gap, { vessel: `repos/${own.vessel}`, test_file: own.test_file }, sha); } catch { failing = null; }
+  if (failing === null) return { orphans: [], measured: false, red: [] };
+  // A name is armed by a row when that row's only_tests names a part of it (test_suite's own match), or the row arms
+  // the whole file.
+  const armedBy = (name: string, row: Record<string, unknown>): boolean => {
+    const s = armedSubsetOf((row.classification_metadata ?? {}) as Record<string, unknown>);
+    if (!s || s.test_file !== own.test_file || (s.vessel && own.vessel && s.vessel !== own.vessel)) return false;
+    return s.only_tests.length === 0 || s.only_tests.some((t) => name.includes(t));
+  };
+  const others = openGaps.filter((r) => String(r.id ?? "") !== String(gap.id ?? "") && String(r.status ?? "open") === "open");
+  const red = failing.filter((n) => !own.only_tests.some((t) => n.includes(t)));
+  return { orphans: red.filter((n) => !others.some((r) => armedBy(n, r))), measured: true, red };
+}
+
+/** The refusal, named on the row (it stays open and pending). Written only when it changed: the sweep re-reads it every
+ *  pass, and an unchanged refusal is not a new fact. */
+async function recordOrphanSiblingRefusal(g: Record<string, unknown>, sha: string, o: { orphans: string[]; red: string[]; measured: boolean }): Promise<void> {
+  const fresh = await readGapFresh(String(g.id ?? ""));
+  if (!fresh || String(fresh.status ?? "") !== "open") return;
+  const fm = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+  const prior = fm.orphan_sibling_refusal as { sha?: unknown; orphans?: unknown } | undefined;
+  const orphans = o.orphans.slice(0, 10);
+  if (prior && prior.sha === sha && (prior as { measured?: unknown }).measured === o.measured && JSON.stringify(prior.orphans) === JSON.stringify(orphans)) return;
+  await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "open", classification_metadata: { ...fm, orphan_sibling_refusal: { sha, measured: o.measured, ...(o.measured ? {} : { reason: "the armed file's whole run could not be read" }), orphans, red: o.red.slice(0, 10), at: new Date().toISOString(), rule: "every red check in the armed file must be armed by another open row" } } } } as never);
 }
 
 /** Exported for tests. A green-on-parent refusal with a commit that fixed the check's subject since the gap's

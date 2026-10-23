@@ -39,6 +39,7 @@
  * rather than throwing — never worse than today's escalate/stop.
  */
 
+import { createHash } from "node:crypto";
 import { resolveLlmCompletionDispatch } from "./llm-completion-dispatch.js";
 import { resolveActivityCreateVariant } from "./activity-create-variant.js";
 import { DISCOVERY_ENDPOINT, METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
@@ -556,6 +557,37 @@ export function composedTemplateInputs(tasks: ReadonlyArray<{ input_shapes?: str
   return [...new Set(tasks.flatMap((t) => t.input_shapes ?? []))].filter((s) => !produced.has(s));
 }
 
+/**
+ * A COMPOSED CAPABILITY IS NAMED BY WHAT IT DOES, NOT BY HOW ITS FIRST GOAL WAS WORDED (law 3: a wrong mint is
+ * negative value). The id was the goal's first 40 characters, so a goal opening with a generic preamble ("could you
+ * please close the substrate gap ...", "investigate and decompose ...") minted an id - and a name - that every goal of
+ * that class shares, and one template then shadowed and contaminated the measurement of all of them. The id is now
+ * keyed on the capability's contract, as bridgeTemplateId (author-producer.ts) keys a bridge: its external input
+ * shapes (sorted), its output shapes (sorted) and its ordered resolver chain, hashed. The same contract is the same
+ * template (re-authoring upserts it, the reuse the old deterministic slug was for); a different contract is a
+ * different id whatever the goal's opening words. The readable part names the output shape only when that shape is a
+ * real one: the goal-slug deliverable fallback (deliverableShape) is goal text, so it reads as "deliverable" and only
+ * the hash carries it. The `composed-cap-` prefix stays, since reach-rate-scan, trace retention and the panels key on it.
+ */
+export function composedCapabilityTemplateId(
+  inputShapes: readonly string[],
+  outputShapes: readonly string[],
+  tasks: ReadonlyArray<{ resolver: string; input_shapes?: string[]; output_shapes?: string[] }>,
+): { id: string; name: string } {
+  const sig = createHash("sha256")
+    .update(JSON.stringify({
+      i: [...new Set(inputShapes)].sort(),
+      o: [...new Set(outputShapes)].sort(),
+      c: tasks.map((t) => [t.resolver, [...(t.input_shapes ?? [])].sort(), [...(t.output_shapes ?? [])].sort()]),
+    }))
+    .digest("hex")
+    .slice(0, 12);
+  const readable = (s: string): string =>
+    s.startsWith("composedDeliverable_") ? "deliverable" : s.replace(/[^a-zA-Z0-9]+/g, "-").replace(/(^-+|-+$)/g, "").toLowerCase().slice(0, 32) || "deliverable";
+  const outPart = [...new Set(outputShapes)].sort().map(readable).join("-").slice(0, 40).replace(/-+$/, "") || "deliverable";
+  return { id: `composed-cap-${outPart}-${sig}`, name: `composed-capability:${outPart}#${sig}` };
+}
+
 export async function resolveAuthorComposedCapability(
   pointer: AuthorComposedCapabilityPointer,
 ): Promise<ResolverResult> {
@@ -647,13 +679,12 @@ export async function resolveAuthorComposedCapability(
   // engine dispatches a task by its `resolver` field — for a data/format resolver
   // shape it routes through discovery to the owning vessel; for llm_completion_dispatch
   // through llm-resolver-vessel). Bindings between tasks use {{impulse:<slot>}}.
-  const slug = goal.replace(/[^a-zA-Z0-9]+/g, "-").replace(/(^-+|-+$)/g, "").toLowerCase().slice(0, 40) || "goal";
+  // Deterministic id (no timestamp) so re-authoring the SAME capability UPSERTs one template rather than spawning
+  // duplicates; keyed on its contract, never on the goal's leading words (composedCapabilityTemplateId).
+  const templateKey = composedCapabilityTemplateId(composedTemplateInputs(plan.tasks), plan.outputShapes, plan.tasks);
   const template = {
-    // Deterministic id (no timestamp) so re-authoring the SAME goal UPSERTs one
-    // template rather than spawning duplicates — matches the ribosome's
-    // learned-<slug> idempotency lesson.
-    id: `composed-cap-${slug}`,
-    name: `composed-capability:${slug}`,
+    id: templateKey.id,
+    name: templateKey.name,
     description:
       `Auto-authored COMPOSED capability for goal: "${goal.slice(0, 160)}". ` +
       `Chains existing resolvers [${plan.tasks.map((t) => t.resolver).join(" → ")}] to produce a deliverable no single resolver produces. ` +

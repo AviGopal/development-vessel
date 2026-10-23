@@ -19,6 +19,7 @@ const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"interve
 
 const IDENTITY = "http://127.0.0.1:59108";
 const KEY_A = "key-a-declined-fixture";
+const KEY_B = "key-b-declined-fixture";
 
 type Posted = { url: string; body: Record<string, any> };
 let posted: Posted[] = [];
@@ -34,6 +35,7 @@ function install(concepts: Array<{ id: string; name?: string }>): void {
     if (url === `${IDENTITY}/v1/auth/resolve`) {
       const key = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer?.apiKey;
       if (key === KEY_A) return Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", keyId: "ka", scopes: ["read", "write"] } });
+      if (key === KEY_B) return Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", keyId: "kb", scopes: ["read", "write"] } });
       return Response.json({ success: false, error: "invalid" }, { status: 401 });
     }
     if (url.includes("/concepts/search")) return Response.json({ concepts });
@@ -178,5 +180,27 @@ describe("intervention_evaluate: a REFUSE is a declined outcome in the trace sto
     const anonJson = (await anon.json()) as { body: Record<string, unknown> };
     expect(anonJson.body.verdict).toBe("REFUSE");
     expect(declinedPosts()[0]!.body.metadata.intervener_principal).toBe("unidentified");
+  });
+});
+
+describe("interventionRefused_write: a refusal record's principal is server-stamped, never the writer's claim", () => {
+  const write = (key: string, id: string, extra: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "content-type": "application/json", Authorization: `ApiKey ${key}` },
+    body: JSON.stringify({ impulse: { type: "interventionRefused_write", refusal: { id, proposed_change: { source: "operator" }, refusal_basis: "b", substrate_priors_cited: [], strictness: "balanced", ...extra } } }),
+  });
+  const storedById = (id: string) => (JSON.parse(readFileSync(join(tmpRoot, "refusals", "refusals.json"), "utf-8")) as Array<Record<string, unknown>>).find((r) => r["id"] === id);
+
+  it("MUST-FAIL: writer B creating a record that names principal A ends up with principal B", async () => {
+    install([]);
+    expect((await write(KEY_B, "refusal-forged-principal", { principal: "key_id:ka" })).status).toBe(200);
+    expect(storedById("refusal-forged-principal")?.["principal"]).toBe("key_id:kb");
+    expect(storedById("refusal-forged-principal")?.["written_by"]).toBe("key_id:kb");
+  });
+
+  it("CONTROL: a writer naming itself as the principal keeps it", async () => {
+    install([]);
+    expect((await write(KEY_A, "refusal-own-principal", { principal: "key_id:ka" })).status).toBe(200);
+    expect(storedById("refusal-own-principal")?.["principal"]).toBe("key_id:ka");
   });
 });

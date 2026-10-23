@@ -514,6 +514,7 @@ export interface InterventionRefusedWritePointer {
  * overwritten. A write reusing an existing id is refused unless BOTH principals are identifiable and equal:
  * a record with no written_by (the evaluator's own in-process records, and every record written before this)
  * cannot be rewritten through this shape at all. A new id is still created by any authenticated writer.
+ * The record's `principal` (the intervener) is stamped the same way: a caller-supplied principal is overwritten.
  */
 export interface InterventionRefusedWriteContext {
   principal?: string | null;
@@ -548,10 +549,13 @@ export async function resolveInterventionRefusedWrite(
   const principal = typeof ctx.principal === "string" && ctx.principal ? ctx.principal : null;
   const now = new Date().toISOString();
   const incoming = pointer.refusal;
+  // principal is server-stamped like written_by: a caller-supplied one is overwritten, so a writer cannot name
+  // another principal as the intervener of a record it writes.
   const record: RefusalRecord & { written_by: string } = {
     ...incoming,
     refused_at: incoming.refused_at ?? now,
     written_by: principal ?? "unidentified",
+    principal: principal ?? "unidentified",
   };
   const records = await loadRefusals();
   const idx = records.findIndex((r) => r.id === record.id);

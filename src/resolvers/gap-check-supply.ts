@@ -73,7 +73,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { birthTreeMoved, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken, type MintedBirthVerdict } from "./substrate-gap.js";
+import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken, type MintedBirthVerdict } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -966,12 +966,22 @@ function skipReasonKey(reason: string): string {
 
 const posNum = (v: unknown, dflt: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt);
 
-async function writeMeta(row: Row, meta: Row, opts?: Parameters<typeof resolveSubstrateGapWrite>[1]): Promise<ResolverResult> {
+async function writeMeta(row: Row, meta: Row, opts?: Parameters<typeof resolveSubstrateGapWrite>[1], expect?: Ledger): Promise<ResolverResult> {
   return resolveSubstrateGapWrite({
     type: "substrateGap_write",
     gap: { id: row["id"], category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: row["status"] ?? "open", classification_metadata: meta },
+    ...(expect ? { expect_check_supply: expectedLedger(expect) } : {}),
   } as never, opts);
 }
+/**
+ * A LEDGER WRITE EXPECTS THE LEDGER IT REPLACES (substrate-gap.ts expect_check_supply, checked by the store holder
+ * under its lock). Two nodes' supplies dispatched one row: the node whose compose lane was BUSY wrote its intent and
+ * then its non-attempt over the other node's live record, which could then never be settled. So the intent expects
+ * the ledger as this pass read it, every write after the send expects that intent, and the outcome step's writes
+ * expect the dispatch they settle. A refused write wrote nothing: the other node's record stands.
+ */
+const expectedLedger = (l: Ledger) => checkSupplyExpectationOf({ classification_metadata: { check_supply: l } });
+const ledgerMoved = (w: ResolverResult): boolean => w.shape === "structuredError" && ((w.body ?? {}) as Row)["skip_reason"] === "check_supply_precondition_failed";
 
 /**
  * I1, LOCALIZE BEFORE ADMISSION. An armed class2 gap whose ONLY compose skip is no_edit_site needs a site, not a test:
@@ -1299,7 +1309,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const held = nonAttemptLedger(ledger, v.kind, v.reason, d.ms, now, outcome, d.streak);
       outcomes.not_attempts.push({ id, kind: v.kind, reason: v.reason, not_before: String(held.not_before) });
       console.log(`[gap-check-supply] outcome ${held.state} for ${id} (not charged; next not before ${held.not_before}): ${v.reason}`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: held });
+      if (!pointer.dry_run) {
+        const w = await writeMeta(row, { check_supply: held }, undefined, ledger);
+        if (ledgerMoved(w)) console.warn(`[gap-check-supply] ${id}: ${held.state} not written: another writer's record replaced dispatch ${ledger.dispatch_id ?? "none"} first, so it stands`);
+      }
       (meta as Row)["check_supply"] = held;
       continue;
     }
@@ -1314,7 +1327,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     console.log(`[gap-check-supply] outcome ${next.state} for ${id} (dispatch ${did ?? "none"}${again ? ", settled before: not debited again" : ""}): ${v.reason}`);
     if (!pointer.dry_run) {
       try {
-        const w = await writeMeta(row, { check_supply: next });
+        const w = await writeMeta(row, { check_supply: next }, undefined, ledger);
         if (w.shape === "structuredError") console.warn(`[gap-check-supply] settlement write for ${id} (dispatch ${did ?? "none"}) refused, the row stays as read: ${JSON.stringify(w.body).slice(0, 200)}`);
       } catch (err) {
         console.warn(`[gap-check-supply] settlement write for ${id} (dispatch ${did ?? "none"}) lost: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
@@ -1621,7 +1634,14 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: placed ? placed.node : localNode, dispatch_host: placed ? placed.via : GOAL_HOST_ENDPOINT,
       ...(placed ? { placed_by: localNode, placement: placed.why } : {}), reason: "", outcome: {}, history: settledHistory(ledger) };
     const arm = { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "treatment" };
-    const iw = await writeMeta(row, { ...arm, check_supply: intent });
+    const iw = await writeMeta(row, { ...arm, check_supply: intent }, undefined, ledger);
+    if (ledgerMoved(iw)) {
+      // ANOTHER NODE RECORDED ITS OWN DISPATCH ON THIS ROW since this pass read it: nothing was written, nothing is sent.
+      const reason = "not sent: another writer's check-supply record replaced the one this pass read (its dispatch stands)";
+      skipped.push({ id, reason });
+      console.warn(`[gap-check-supply] ${id}: ${reason}`);
+      continue;
+    }
     if (iw.shape === "structuredError") {
       const reason = `not sent: the in-flight record could not be written (${String((iw.body as Row)?.["detail"] ?? (iw.body as Row)?.["failure_mode"] ?? "").slice(0, 120)})`;
       skipped.push({ id, reason });
@@ -1635,7 +1655,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const reread = await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never);
       const stored = ledgerOf(metaOf((((reread.body ?? {}) as { gaps?: Row[] }).gaps ?? [])[0] ?? {}));
       if (stored.state === SEND_PENDING && !nonEmpty(stored.dispatch_id) && stored.last_dispatch_at === nowIso) {
-        const back = await writeMeta(row, { check_supply: ledger });
+        const back = await writeMeta(row, { check_supply: ledger }, undefined, intent);
         console.warn(`[gap-check-supply] ${id}: the unsent in-flight record had landed; ${back.shape === "structuredError" ? "it could not be put back, so the next pass recovers it as unconfirmed" : "put back as read"}`);
       }
       continue;
@@ -1649,14 +1669,15 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (c.kind === "failed") {
         refused += 1;
         skipped.push({ id, reason: `dispatch failed: ${c.reason.slice(0, 120)}` });
-        await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason: `dispatch failed: ${c.reason}`, outcome: { send_failed: true, http: c.http_status }, non_attempt_streak: 0 } });
+        await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason: `dispatch failed: ${c.reason}`, outcome: { send_failed: true, http: c.http_status }, non_attempt_streak: 0 } }, undefined, intent);
       } else {
         const d = delayFor(c.kind, intent, c.retry_after_s);
         const held = nonAttemptLedger(intent, c.kind, `${c.kind === "refused" ? "send refused by the receiver" : "send not taken (non-attempt)"}: ${c.reason}`, d.ms, now, { send_failed: true, http: c.http_status, kind: c.kind }, d.streak);
         outcomes.not_attempts.push({ id, kind: c.kind, reason: String(held.reason), not_before: String(held.not_before) });
         skipped.push({ id, reason: String(held.reason).slice(0, 160) });
         console.warn(`[gap-check-supply] ${id}: ${held.state} (not charged; next not before ${held.not_before}): ${c.reason.slice(0, 160)}`);
-        await writeMeta(row, { ...arm, check_supply: held });
+        const hw = await writeMeta(row, { ...arm, check_supply: held }, undefined, intent);
+        if (ledgerMoved(hw)) console.warn(`[gap-check-supply] ${id}: ${held.state} not written: another writer's record replaced this pass's in-flight record, so it stands`);
       }
       continue;
     }
@@ -1668,14 +1689,15 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const reason = "dispatch failed: send_without_id: the goal-host accepted the goal and answered no dispatch id, so its outcome cannot be read";
       skipped.push({ id, reason });
       console.warn(`[gap-check-supply] ${id}: ${reason}`);
-      await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason, goal, outcome: { send_failed: true, no_dispatch_id: true }, non_attempt_streak: 0 } });
+      await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason, goal, outcome: { send_failed: true, no_dispatch_id: true }, non_attempt_streak: 0 } }, undefined, intent);
       continue;
     }
     dispatched.push({ id, goal, dispatch_id: dispatchId });
     const sent: Ledger = { ...intent, state: "goal_dispatched", dispatch_id: dispatchId, goal };
-    const w = await writeMeta(row, { ...arm, check_supply: sent });
+    const w = await writeMeta(row, { ...arm, check_supply: sent }, undefined, intent);
     // The full record (with the goal text) refused: keep the dispatch id at least, so its outcome stays readable.
-    if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, state: "goal_dispatched", dispatch_id: dispatchId } });
+    if (ledgerMoved(w)) console.warn(`[gap-check-supply] ${id}: dispatch ${dispatchId} not recorded: another writer's record replaced this pass's in-flight record`);
+    else if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, state: "goal_dispatched", dispatch_id: dispatchId } }, undefined, intent);
   }
 
   // A localized gap is work done this tick (I1), graded as a dispatch is.

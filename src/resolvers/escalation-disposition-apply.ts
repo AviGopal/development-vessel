@@ -91,12 +91,38 @@ export function parseDisposition(answer: string): DispositionVerb | null {
   return null;
 }
 
-/** `needs-human-<gapId>` / `reland-needs-human-<gapId>` -> `<gapId>`. */
-export function gapIdFromPanelId(panelId: string): string {
+/**
+ * THE PANELS THIS APPLIER READS, AS ONE TABLE: prefix -> the verbs its answer can carry. Every question the gap judge asks
+ * a human is written under one of these ids (src/judge/gap-landing-verdict.ts); before this only the first two were
+ * recognised, so an answer on pending-verify-<gap> or landed-close-proposal-<gap> was refused as unrecognised_panel_id and
+ * the human verdict was never read (row an-escalation-answer-for-a-pending-verify-panel-is-refused-as-unrecognised-…).
+ *   - "disposition": the four authored verbs (parseDisposition), applied as before;
+ *   - "close_proposal": the landed-open detector's proposal; a "close" answer closes the row landed_verified, linked to
+ *     the question and the commit the proposal named. Any other answer leaves the row as it is.
+ * Longest prefix first, so reland-needs-human- is never read as needs-human-.
+ */
+export type PanelVerbs = "disposition" | "close_proposal";
+export const PANEL_PREFIXES: ReadonlyArray<{ prefix: string; verbs: PanelVerbs }> = [
+  { prefix: "reland-needs-human-", verbs: "disposition" },
+  { prefix: "landed-close-proposal-", verbs: "close_proposal" },
+  { prefix: "pending-verify-", verbs: "disposition" },
+  { prefix: "needs-human-", verbs: "disposition" },
+];
+/** The panel's gap id and verb set, or null for a panel this applier does not read. */
+export function panelOf(panelId: string): { gapId: string; verbs: PanelVerbs } | null {
   const p = String(panelId ?? "");
-  if (p.startsWith("reland-needs-human-")) return p.slice("reland-needs-human-".length);
-  if (p.startsWith("needs-human-")) return p.slice("needs-human-".length);
-  return "";
+  for (const e of PANEL_PREFIXES) if (p.startsWith(e.prefix) && p.length > e.prefix.length) return { gapId: p.slice(e.prefix.length), verbs: e.verbs };
+  return null;
+}
+/** `<prefix><gapId>` -> `<gapId>` for every prefix in PANEL_PREFIXES; "" otherwise. */
+export function gapIdFromPanelId(panelId: string): string {
+  return panelOf(panelId)?.gapId ?? "";
+}
+/** A close-proposal answer that accepts the close: "close" (or "yes"/"approve") and not a negated close. */
+export function parseCloseAnswer(answer: string): boolean {
+  const t = String(answer ?? "").toLowerCase();
+  if (/\b(do\s+not|don'?t|not|never|no)\s+close\b|\bkeep\s+(it\s+)?open\b/.test(t)) return false;
+  return /\bclosed?\b|^\s*(yes|approved?)\b/.test(t);
 }
 
 type FeedbackRecord = { id?: string; pointer?: { panel_id?: string; value?: unknown; kind?: string } };
@@ -125,6 +151,35 @@ async function readAnswersByPanel(): Promise<Map<string, { value: string; record
     }
   } catch { /* fail open -> empty map */ }
   return out;
+}
+
+/**
+ * A "close" answer on landed-close-proposal-<gap>: the human accepts the proposal the landed-open detector wrote (its
+ * landed_close_proposal names the commit and the passing check), so the row closes landed_verified, linked to the
+ * question and the answer record. A row with no proposal on it, a closed row, or any other answer is left as it is.
+ * Idempotent on the answer record id, like every other disposition here.
+ */
+async function applyCloseProposalAnswer(panelId: string, gapId: string, answer: { value: string; recordId: string }, dryRun: boolean): Promise<Record<string, unknown>> {
+  if (!parseCloseAnswer(answer.value)) return { panel_id: panelId, gap_id: gapId, verb: "close", outcome: "not_a_close_answer" };
+  const read = await resolveSubstrateGap({ type: "substrateGap", id: gapId } as never);
+  const gap = (((read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps) ?? []).find((g) => String(g.id) === gapId);
+  if (!gap) return { panel_id: panelId, gap_id: gapId, verb: "close", outcome: "gap_absent" };
+  const meta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>) };
+  if (meta.human_disposition_record_id === answer.recordId) return { panel_id: panelId, gap_id: gapId, verb: "close", outcome: "already_applied" };
+  const proposal = meta.landed_close_proposal as { fixing_sha?: unknown; head?: unknown } | undefined;
+  if (String(gap.status ?? "open") !== "open" || !proposal || typeof proposal.fixing_sha !== "string") return { panel_id: panelId, gap_id: gapId, verb: "close", outcome: "no_open_proposal" };
+  const at = new Date().toISOString();
+  Object.assign(meta, {
+    human_disposition: "close", human_disposition_record_id: answer.recordId, human_disposition_at: at, human_disposition_answer: String(answer.value).slice(0, 2000),
+    closed_reason: "landed_verified", closed_by: "escalation_disposition_apply", closed_at: at, landed_sha: proposal.fixing_sha,
+    close_basis: "human_ruling_on_landed_close_proposal",
+    closed_by_answer: { panel_id: panelId, record_id: answer.recordId, proposal_head: typeof proposal.head === "string" ? proposal.head : null },
+    resolution: `closed by human ruling on ${panelId}: the landed-close proposal (fix ${proposal.fixing_sha.slice(0, 12)}) accepted`,
+  });
+  if (!dryRun) {
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: gapId, category: gap.category, source: gap.source, summary: gap.summary, detected_at: gap.detected_at, classification_metadata: meta, status: "closed" } } as never);
+  }
+  return { panel_id: panelId, gap_id: gapId, verb: "close", outcome: dryRun ? "would_apply" : "applied", status: "closed" };
 }
 
 export async function resolveEscalationDispositionApply(
@@ -169,6 +224,11 @@ export async function resolveEscalationDispositionApply(
     const answer = answers.get(panelId);
     if (!answer) { dispositions.push({ panel_id: panelId, gap_id: gapId, outcome: "answer_text_absent" }); continue; }
 
+    if (panelOf(panelId)?.verbs === "close_proposal") {
+      dispositions.push(await applyCloseProposalAnswer(panelId, gapId, answer, dryRun));
+      if (dispositions[dispositions.length - 1]!.outcome === "applied" || dispositions[dispositions.length - 1]!.outcome === "would_apply") applied += 1;
+      continue;
+    }
     const verb = parseDisposition(answer.value);
     if (!verb) { dispositions.push({ panel_id: panelId, gap_id: gapId, outcome: "unparsed" }); continue; }
 

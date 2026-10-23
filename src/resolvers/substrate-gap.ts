@@ -406,6 +406,16 @@ export const DECISION_LOG_GAP_CATEGORIES = [
   "auto_draft_reused",
 ] as const;
 
+/** The check-supply ledger fields a conditional write expects to find stored (see expect_check_supply). */
+export type CheckSupplyExpectation = { state: string | null; dispatch_id: string | null; last_dispatch_at: string | null };
+/** The stored row's check-supply ledger as an expectation compares it: absent, non-string or empty fields are null. */
+export function checkSupplyExpectationOf(row: Record<string, unknown> | null | undefined): CheckSupplyExpectation {
+  const meta = row?.["classification_metadata"];
+  const l = (meta && typeof meta === "object" ? (meta as Record<string, unknown>)["check_supply"] : null) as Record<string, unknown> | null | undefined;
+  const f = (k: string): string | null => { const v = l && typeof l === "object" ? l[k] : null; return typeof v === "string" && v.length > 0 ? v : null; };
+  return { state: f("state"), dispatch_id: f("dispatch_id"), last_dispatch_at: f("last_dispatch_at") };
+}
+
 export interface SubstrateGapWritePointer {
   type: "substrateGap_write";
   gap: Omit<SubstrateGap, "created_at" | "updated_at"> & {
@@ -416,6 +426,12 @@ export interface SubstrateGapWritePointer {
    *  this value, checked under withGapLock; otherwise a no-op (`skip_reason: status_precondition_failed`).
    *  For read-modify-write callers whose row may be closed between their read and their write. */
   expect_status?: string;
+  /** CONDITIONAL WRITE ON THE CHECK-SUPPLY LEDGER: applied only if the STORED row's classification_metadata.check_supply
+   *  still has this state, dispatch_id and last_dispatch_at (absent or empty compares as null), checked under withGapLock;
+   *  otherwise a no-op (`skip_reason: check_supply_precondition_failed`). For the supply's read-then-write: a node that
+   *  read a row before another node recorded its own dispatch on it must not write over that record. On a node that
+   *  forwards its store the pointer is forwarded as is and the holder checks it inside its own lock. */
+  expect_check_supply?: CheckSupplyExpectation;
   /** ARRAY-MERGE APPEND to classification_metadata.demand_goals, applied under withGapLock against the
    *  STORED array (idempotent on goal_hash+dispatch_id), so two writers attaching goals to one gap at
    *  once keep both. Only `{source:"goal_reach", ...}` entries are accepted (lib/demand-goals.ts).
@@ -2830,6 +2846,27 @@ async function resolveSubstrateGapWriteInner(
             resolver: "substrateGap_write", failure_mode: "no_op",
             id: gap.id, action: "skipped", skip_reason: "status_precondition_failed", expected_status: expectStatus, stored_status: stored,
             detail: `gap ${gap.id}: nothing written — expect_status ${expectStatus} but the stored status is ${stored ?? "absent (no row with this id)"}`,
+          },
+        },
+      };
+    }
+  }
+  // CONDITIONAL WRITE (expect_check_supply), beside expect_status and under the same lock: the stored check-supply
+  // ledger must still be the one the writer read. Two nodes' supplies dispatched one row: the node whose compose lane
+  // was BUSY wrote its intent and then its non-attempt over the record of the node whose compose ran, and that live
+  // dispatch's outcome could no longer be settled into the row.
+  const expectCs = (pointer as { expect_check_supply?: unknown }).expect_check_supply;
+  if (expectCs && typeof expectCs === "object") {
+    const want = checkSupplyExpectationOf({ classification_metadata: { check_supply: expectCs } });
+    const have = checkSupplyExpectationOf(existingIdx >= 0 ? (gaps[existingIdx] as unknown as Record<string, unknown>) : null);
+    if (want.state !== have.state || want.dispatch_id !== have.dispatch_id || want.last_dispatch_at !== have.last_dispatch_at) {
+      return {
+        early: {
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write", failure_mode: "no_op",
+            id: gap.id, action: "skipped", skip_reason: "check_supply_precondition_failed", expected_check_supply: want, stored_check_supply: have,
+            detail: `gap ${gap.id}: nothing written — expect_check_supply ${JSON.stringify(want)} but the stored ledger is ${JSON.stringify(have)}`,
           },
         },
       };

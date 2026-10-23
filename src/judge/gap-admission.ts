@@ -1030,8 +1030,12 @@ export function pickSkipPending(g: Record<string, unknown>, gaps: Record<string,
   const m = (g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {};
   const landedAwaitingVerification = typeof m.pending_outcome_verification === 'string'
     && (m.pending_outcome_verification as string).length >= 7;
-  const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
-    || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
+  // A predicate field counts only when it is a non-empty trimmed string: the store carries "" forward to mean
+  // "cleared" (verify_shape is blanked, not deleted), and an empty or whitespace predicate measures nothing, so a
+  // landed row carrying one was read as measurable and re-picked while its landing was unjudged.
+  const presentPredicate = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
+  const hasMeasurablePredicate = presentPredicate(m.hardcoded_url)
+    || presentPredicate(m.evidence_resolve) || presentPredicate(m.verify_shape) || presentPredicate(m.expected_literal);
   const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;
   if (operatorHold) return true;
   // A falsified landing still in HEAD: another compose would build on the regression. Held until

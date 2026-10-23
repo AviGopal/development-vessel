@@ -6035,6 +6035,59 @@ const readComposeGapRows: GapRowReader = async (id) => {
 };
 
 /**
+ * A ROUTE-EDIT GAP IS A ROW FROM THE MOMENT IT IS ROUTED (REALIGNMENT §2.1 / §2.2; law 7: a landing must be verifiable
+ * against the row it addressed). goal-host's edit-intent route hands this resolver a synthetic gap route-edit-<hash>
+ * that the store never held: the cutover's own check then found "no gap row route-edit-<hash>" and landed it
+ * landed_unverified with nothing to stamp, verify or close (0f64cbbc under route-edit-849a2800, 81c9d93e under
+ * route-edit-faa5a58e; the 2026-10-03 redispatch livelock under route-edit-53199615). A row appeared only if the compose
+ * FAILED (the failure-lesson write), so the successes were exactly the landings nobody could check.
+ * So a LANDING compose of a route-edit id the store answered NO row for persists the row here, after the admission
+ * block and the hydration (an absent id is admitted exactly as before), with the caller's edit_site and identity. The
+ * cutover then reads a row: a check on it is run, and without one the landing is recorded on the row as unverifiable
+ * with the reason (stampPendingLand: landed_unverified_reason, pending_outcome_verification, the needs-human ask), never
+ * silently. A store gap, an unreadable store, a non-landing compose and any other id are untouched. The goal-named
+ * gap ("Close substrate gap <id>:" in the spec) is recorded as addressed_gap_id, a key no reader acts on yet (the
+ * lineage keys source_gap_id / parent_gap_id change prompts and stamping).
+ */
+export async function persistRouteEditGap(
+  pointer: { gap?: { id?: unknown; summary?: unknown; category?: unknown; classification_metadata?: unknown }; land?: unknown; directed?: unknown; authoring_execution_id?: unknown; spec?: unknown },
+  hydrated: { source: "store" | "caller" | "store_unreadable" },
+  write: (row: Record<string, unknown>) => Promise<unknown> = (row) => resolveSubstrateGapWrite({ type: "substrateGap_write", gap: row } as never),
+): Promise<{ persisted: boolean; why: string; row?: Record<string, unknown> }> {
+  const id = typeof pointer.gap?.id === "string" ? pointer.gap.id : "";
+  if (!/^route-edit-[0-9a-f]+$/.test(id)) return { persisted: false, why: "not a synthetic route-edit id" };
+  if (pointer.land !== true) return { persisted: false, why: "not a landing compose" };
+  if (hydrated.source !== "caller") return { persisted: false, why: hydrated.source === "store" ? "the store already holds the row" : "the gap store is unreadable" };
+  const now = new Date().toISOString();
+  const meta = { ...((pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>) };
+  const spec = typeof pointer.spec === "string" ? pointer.spec : "";
+  const addressed = /Close substrate gap ([-\w:.!]+):/.exec(spec)?.[1] ?? null;
+  const summary = typeof pointer.gap?.summary === "string" && pointer.gap.summary.trim() ? pointer.gap.summary : spec.slice(0, 600);
+  const row: Record<string, unknown> = {
+    id,
+    category: typeof pointer.gap?.category === "string" && pointer.gap.category ? pointer.gap.category : "edit_intent_route",
+    source: "substrate_detected",
+    summary: summary || `edit-intent route ${id}`,
+    detected_at: now,
+    status: "open",
+    classification_metadata: {
+      ...meta,
+      route_edit_persisted: {
+        at: now,
+        directed: pointer.directed === true,
+        authoring_execution_id: typeof pointer.authoring_execution_id === "string" ? pointer.authoring_execution_id : null,
+        addressed_gap_id: addressed !== id ? addressed : null,
+      },
+    },
+  };
+  let res: unknown;
+  try { res = await write(row); } catch (err) { return { persisted: false, why: `gap write threw: ${(err as Error).message.slice(0, 200)}` }; }
+  const shape = (res as { shape?: unknown } | null)?.shape;
+  if (shape === "structuredError") return { persisted: false, why: `gap write refused: ${JSON.stringify((res as { body?: unknown }).body ?? null).slice(0, 200)}` };
+  return { persisted: true, why: "route-edit row persisted at route time", row };
+}
+
+/**
  * ENTRY CHECK (2026-10-03). verify_vessels become paths in many shell commands this resolver sends to the
  * shell producer (`rg ... ${v}` unquoted, `cd "<abs>"`, `git -C "<abs>"`): a name is a plain vessel
  * name ([A-Za-z0-9_.-], no '..'), optionally prefixed with repos/, or the compose is refused before any I/O.
@@ -6998,6 +7051,10 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   // so those drafts never saw the gap's lessons, check or line hint. Every read below uses the merged row.
   const composeGap = await hydrateComposeGap(pointer.gap, readComposeGapRows);
   if (pointer.gap) pointer = { ...pointer, gap: { ...pointer.gap, classification_metadata: composeGap.meta, ...(pointer.gap.summary ? {} : composeGap.summary ? { summary: composeGap.summary } : {}) } };
+  // A route-edit id becomes a row now, so its landing is verified against it (persistRouteEditGap).
+  const routeEditRow = await persistRouteEditGap(pointer, composeGap);
+  if (routeEditRow.persisted) console.log(`[feature-compose] route-edit gap ${String(pointer.gap?.id)} persisted at route time (edit_site=${String((pointer.gap?.classification_metadata as { edit_site?: unknown } | undefined)?.edit_site ?? "none")})`);
+  else if (/^route-edit-[0-9a-f]+$/.test(String(pointer.gap?.id ?? "")) && pointer.land === true && composeGap.source !== "store") console.warn(`[feature-compose] route-edit gap ${String(pointer.gap?.id)} NOT persisted: ${routeEditRow.why}; its landing has no row to verify against`);
   const gapMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
   // An explicit "~l.NNN[-MMM]" in the gap's text windows the edit_site file there, ahead of every probe.
   const lineHintRange = explicitLineHint(String(pointer.gap?.summary ?? "")) ?? explicitLineHint(String(pointer.spec ?? ""));

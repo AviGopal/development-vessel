@@ -224,12 +224,27 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     expect([...FC.matchAll(/testWritingDiffOutsideTests\([^\n]*, pointer\.gap\?\.id\)/g)].length).toBe(2);
   });
 
-  test("[MUST-FAIL] compose_mode is READ only by the two R3 gates and the verify's one testWritingMode read (besides the entry delete and the admission write)", () => {
+  // ACCEPTED-FIXTURE AMENDMENT (user ruling 2026-10-23T18:17:11Z, via qa: "Amend only that pin, 5→6, naming the new
+  // site (Recommended)"): ONE more read is admitted, by name: the target-list site, where testWritingWriteScope makes the
+  // gap's check file a test_writing compose's only write target (feature-compose-test-writing-write-scope.test.ts). Every
+  // read must match exactly one named site, so any other new read is red even if the count were to stay put.
+  const WRITE_SCOPE_SITE = 'const testWritingScope = (await import("./check-supply-admission.js")).testWritingWriteScope((pointer as { compose_mode?: unknown }).compose_mode, pointer.gap?.id, gapMeta, composedTargets);\n  const targetFiles = testWritingScope ? testWritingScope.targets : composedTargets;';
+  test("[MUST-FAIL] compose_mode is READ only by the two R3 gates, the verify's one testWritingMode read and the target-list write-scope read (besides the entry delete and the admission write)", () => {
     const sites = [...FC.matchAll(/\.compose_mode\b/g)].map((m) => FC.slice(Math.max(0, m.index! - 80), m.index! + 80));
     expect(sites.filter((s) => s.includes("testWritingDiffOutsideTests(")).length).toBe(2);
     expect(sites.filter((s) => s.includes("const testWritingMode = (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("delete (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE")).length).toBe(1);
-    expect(sites.length).toBe(5);
+    // The named sixth site: the read inside the write-scope call, which is immediately the target list's source.
+    expect(FC.split(WRITE_SCOPE_SITE).length - 1).toBe(1);
+    const scopeAt = FC.indexOf(WRITE_SCOPE_SITE) + WRITE_SCOPE_SITE.indexOf(".compose_mode");
+    const reads = [...FC.matchAll(/\.compose_mode\b/g)].map((m) => m.index!);
+    expect(reads.filter((i) => i === scopeAt).length).toBe(1);
+    const named = (i: number): boolean => {
+      const s = FC.slice(Math.max(0, i - 80), i + 80);
+      return i === scopeAt || ["testWritingDiffOutsideTests(", "const testWritingMode = (pointer", "delete (pointer", "compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE"].some((a) => s.includes(a));
+    };
+    expect(reads.filter((i) => !named(i)).map((i) => FC.slice(Math.max(0, i - 80), i + 80))).toEqual([]);
+    expect(sites.length).toBe(6);
   });
 });

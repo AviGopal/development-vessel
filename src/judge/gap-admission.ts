@@ -1386,6 +1386,18 @@ export async function armDecomposition(
   // the judge just took is handed to the seam in-process so it is not taken twice. OBSERVE: not written.
   if (!opts.observe) try {
     const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
+    // A REFUSAL IS A LESSON: decomposeGap's prompt reads failure_lessons (WHY ATTEMPTS FAILED), not decomposition.reason,
+    // so a refusal recorded only there was invisible to the next call, which proposed the same refused step again. This
+    // call's refusals ride the same write as ONE lesson, appended as attempt-register's writeLesson appends (an identical
+    // one is not appended twice): one per call, so the prompt's last-three window keeps the compose lessons.
+    if (refusals.length > 0) {
+      const lessons = Array.isArray(meta.failure_lessons) ? [...(meta.failure_lessons as Array<Record<string, unknown>>)] : [];
+      const lessonReason = `decomposition refused: ${refusals.join("; ")}`.slice(0, 600);
+      if (!lessons.some((l) => l?.class === "decomposition_refusal" && l?.reason === lessonReason)) {
+        lessons.push({ class: "decomposition_refusal", reason: lessonReason, at: new Date().toISOString() });
+        parentMeta.failure_lessons = lessons;
+      }
+    }
     if (parentCheck) {
       // verify_shape is blanked, not deleted: the store carries an omitted key forward.
       Object.assign(parentMeta, { verify_shape: "", ...parentCheck, predicate_source: "gap_falsify:parent_check", falsified_at: new Date().toISOString() });

@@ -11,6 +11,10 @@
 //   [MUST-FAIL] the two owners race to land one gap through the landing lease: exactly one is granted and lands; the
 //               other is refused held_by the winner while it holds the lease through its landing. (The lease half
 //               held at the parent too; what the parent lacked was the second owner's admission above.)
+//   [MUST-FAIL] placement by FREE SLOTS: two owners, A full and B free -> B (the free-slot reading check-supply placement
+//               uses: each producer's composeOwnership placement.capacity.free). RED at 2fc4f952: the first by vesselId.
+//   [CONTROL]   equal free slots -> deterministic, the first by vesselId; an owner whose slots cannot be read -> the same
+//               first-by-vesselId fallback (the two-claimant case above has no slot data at all).
 //   [CONTROL]   a single owner is unchanged: it is the owner, its acquire is granted, it lands once.
 //   [CONTROL]   no owner is unchanged: null.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -34,7 +38,8 @@ const sg = await import("../../src/resolvers/substrate-gap.js");
 const VESSEL = "local-tools-vessel";
 const GAP = `several-owners-gap-${Math.random().toString(36).slice(2, 8)}`;
 const AT = "2026-10-23T08:00:00Z";
-type Producer = { vesselId: string; url: string; owns: string[] };
+type Producer = { vesselId: string; url: string; owns: string[]; free?: number };
+let ownershipPointers: Array<Record<string, unknown>> = [];
 let producers: Producer[] = [];
 const originalFetch = globalThis.fetch;
 const origWarn = console.warn;
@@ -54,7 +59,12 @@ beforeAll(() => {
       return Response.json({ content: { vessels: producers.map((p) => ({ vesselId: p.vesselId, endpoint: p.url, resolve_endpoint: `${p.url}/v2/impulses/resolve` })) } });
     }
     const p = producers.find((x) => url.startsWith(x.url));
-    if (p && body?.impulse?.pointer?.type === "composeOwnership") return Response.json({ success: true, shape: "composeOwnership", body: { node: p.vesselId, owned_repos: p.owns } });
+    if (p && body?.impulse?.pointer?.type === "composeOwnership") {
+      ownershipPointers.push(body.impulse.pointer);
+      // A producer with slot data answers the placement query as compose-placement's composePlacementAnswer does.
+      const placement = p.free === undefined ? {} : { placement: { armed: false, capacity: { free: p.free, live: p.free > 0 ? 0 : 1, cap: Math.max(1, p.free) }, scope_readable: true, scope_excludes: [], gap_row_visible: null } };
+      return Response.json({ success: true, shape: "composeOwnership", body: { node: p.vesselId, owned_repos: p.owns, ...placement } });
+    }
     return new Response("unexpected", { status: 400 });
   }) as unknown as typeof fetch;
   console.warn = () => {};
@@ -67,7 +77,7 @@ afterAll(() => {
   for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
-beforeEach(() => { producers = []; writeFileSync(storeFile(), JSON.stringify([row])); });
+beforeEach(() => { producers = []; ownershipPointers = []; writeFileSync(storeFile(), JSON.stringify([row])); });
 
 /** One owner's landing attempt, as feature_compose takes it: the gap's lease first; granted, it lands (and holds the
  *  lease through its cutover, which releases it at the outcome); refused, it does not land. */
@@ -107,6 +117,29 @@ describe("several owners of one vessel: admitted, and serialised by the landing 
     // the loser trying again while the winner's landing holds the lease still does not land
     await attemptLanding(winner === "owner-a" ? "owner-b" : "owner-a", landings);
     expect(landings).toEqual([winner]);
+  });
+
+  it("[MUST-FAIL] placement by free slots: owner A full, owner B free -> B", async () => {
+    producers = [
+      { vesselId: "owner-a", url: "http://127.0.0.1:18971", owns: [VESSEL], free: 0 },
+      { vesselId: "owner-b", url: "http://127.0.0.1:18972", owns: [VESSEL], free: 2 },
+    ];
+    expect((await findComposeOwner(VESSEL))?.vesselId).toBe("owner-b");
+    // the read is the placement query (its targets), so each producer answers its own free slots
+    expect(ownershipPointers.every((p) => Array.isArray(p["targets"]))).toBe(true);
+  });
+
+  it("[CONTROL] equal free slots -> the first by vesselId; an owner whose slots cannot be read -> the same fallback", async () => {
+    producers = [
+      { vesselId: "owner-b", url: "http://127.0.0.1:18972", owns: [VESSEL], free: 1 },
+      { vesselId: "owner-a", url: "http://127.0.0.1:18971", owns: [VESSEL], free: 1 },
+    ];
+    expect((await findComposeOwner(VESSEL))?.vesselId).toBe("owner-a");
+    producers = [
+      { vesselId: "owner-b", url: "http://127.0.0.1:18972", owns: [VESSEL], free: 3 },
+      { vesselId: "owner-a", url: "http://127.0.0.1:18971", owns: [VESSEL] },
+    ];
+    expect((await findComposeOwner(VESSEL))?.vesselId).toBe("owner-a");
   });
 
   it("[CONTROL] a single owner is unchanged: it is the owner, its acquire is granted, it lands once", async () => {

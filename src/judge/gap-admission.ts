@@ -827,9 +827,12 @@ export function targetedComposeExclusion(gap: Record<string, unknown>, pointer: 
 
 /** A compose node that owns `vessel`: a feature_compose producer whose composeOwnership lists it. Null when discovery
  *  is unreadable or no producer claims it. SEVERAL OWNERS (REALIGNMENT §4, law 11; user ruling "(B) Several owners,
- *  lease-serialized"): with more than one claimant the first by vesselId is returned (a stable choice, not a race on
- *  which answered first); any owner may compose the gap, and the gap-store holder's per-gap landing lease
- *  (substrate-gap.ts LANDING LEASE) serialises their landings, so two owners never both land one gap. */
+ *  lease-serialized"): with more than one claimant the owner with the most free compose slots is returned, read from
+ *  the same placement answer check-supply placement reads (compose-placement.ts: composeOwnership with targets, each
+ *  producer's own placement.capacity.free); ties, and any claimant whose slots cannot be read, fall back to the first
+ *  by vesselId (a stable choice, not a race on which answered first). Any owner may compose the gap, and the gap-store
+ *  holder's per-gap landing lease (substrate-gap.ts LANDING LEASE) serialises their landings, so two owners never both
+ *  land one gap. */
 export async function findComposeOwner(vessel: string): Promise<{ vesselId: string; url: string } | null> {
   try {
     const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -840,7 +843,7 @@ export async function findComposeOwner(vessel: string): Promise<{ vesselId: stri
     });
     const dj = await dr.json() as { content?: { vessels?: Array<{ vesselId?: string; endpoint?: string; resolve_endpoint?: string; protocol?: string; origin?: string }> } };
     const rows = dj.content?.vessels ?? [];
-    const owners: Array<{ vesselId: string; url: string }> = [];
+    const owners: Array<{ vesselId: string; url: string; free: number | null }> = [];
     await Promise.all(rows.map(async (r) => {
       const ep = String(r.resolve_endpoint ?? "/v2/impulses/resolve");
       const url = ep.startsWith("http") ? ep : `${String(r.endpoint ?? "").replace(/\/+$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
@@ -852,15 +855,20 @@ export async function findComposeOwner(vessel: string): Promise<{ vesselId: stri
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...auth },
-          body: JSON.stringify({ impulse: { pointer: { type: "composeOwnership" } } }),
+          // A placement query (targets: none): the producer answers its own free slots beside owned_repos.
+          body: JSON.stringify({ impulse: { pointer: { type: "composeOwnership", targets: [] } } }),
           signal: AbortSignal.timeout(3_000),
         });
-        const j = await res.json() as { body?: { owned_repos?: unknown } };
+        const j = await res.json() as { body?: { owned_repos?: unknown; placement?: { capacity?: { free?: unknown } | null } } };
         const owned = j.body?.owned_repos;
-        if (Array.isArray(owned) && owned.map(String).includes(vessel)) owners.push({ vesselId: String(r.vesselId ?? url), url });
+        const free = j.body?.placement?.capacity?.free;
+        if (Array.isArray(owned) && owned.map(String).includes(vessel)) owners.push({ vesselId: String(r.vesselId ?? url), url, free: typeof free === "number" && Number.isFinite(free) ? free : null });
       } catch { /* a producer that does not answer claims nothing */ }
     }));
-    return owners.sort((a, b) => a.vesselId.localeCompare(b.vesselId))[0] ?? null;
+    // Several owners: the most free slots when every claimant's slots were read; otherwise the first by vesselId.
+    const bySlots = owners.length > 1 && owners.every((o) => o.free !== null);
+    const pick = owners.sort((a, b) => (bySlots ? b.free! - a.free! : 0) || a.vesselId.localeCompare(b.vesselId))[0];
+    return pick ? { vesselId: pick.vesselId, url: pick.url } : null;
   } catch {
     return null;
   }

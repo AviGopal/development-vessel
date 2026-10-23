@@ -340,7 +340,9 @@ describe("an undue pass does the bookkeeping and dispatches nothing (the live rh
       "[check-supply] bookkeeping: 0 due armed=0 outcomes=0 unarmed=0 released=0 waiting=0 dispatch=undue node=node-a",
       "[check-supply] bookkeeping: 0 due armed=0 outcomes=0 unarmed=0 released=0 waiting=0 dispatch=due node=node-a",
     ]);
-    expect(rhythmWrites.length).toBe(0);
+    // the undue and floored calls write nothing; the due pass writes its claim (RAN_PACING) and nothing else
+    // (gap-check-supply-claim-pacing.test.ts)
+    expect(rhythmWrites.map((w) => (w["body"] as Row)["staleness"])).toEqual([0]);
   });
   it("[MUST-FAIL] an unreadable gap store is not an empty one: the pass logs store_unreadable, never the '0 due' marker, and writes nothing", async () => {
     const now = Date.parse("2030-08-01T00:00:00.000Z");
@@ -373,8 +375,12 @@ describe("a due pass is unchanged", () => {
     expect(ledgerOf(await storeRow(fresh))["state"]).toBe("goal_dispatched");
     expect((body["dispatched"] as Row[]).map((d) => d["id"])).toEqual([fresh]);
     expect(body["settlement"]).toBe("beta");
-    expect(rhythmWrites.length).toBe(1);
+    // the claim before the work (RAN_PACING, gap-check-supply-claim-pacing.test.ts), then the settlement as before
+    expect(rhythmWrites.length).toBe(2);
+    expect((rhythmWrites[0]!["body"] as Row)["staleness"]).toBe(0);
     expect(debits()).toBe(1);
-    expect(Number((rhythms[0]!["body"] as Row)["staleness"])).toBeCloseTo(accrued(now, 40), 9);
+    // the settlement credits on the claimed pacing: the debit is kept, the staleness stays reset (it used to carry
+    // the accrued value, which on a claimed pass would write the family straight back to due)
+    expect(Number((rhythms[0]!["body"] as Row)["staleness"])).toBe(0);
   });
 });

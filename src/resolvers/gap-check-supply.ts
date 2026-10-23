@@ -84,9 +84,9 @@ import {
 import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { codeContract } from "./code-introspect.js";
-import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
+import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
-import { coverageKnobs, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
+import { coverageKnobs, RAN_PACING, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { dispatchGoalOnPeer, placeCompose, readPlacedDispatch } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
@@ -938,6 +938,19 @@ export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row 
   }
 }
 
+/** The short key a skip reason is counted under in the dispatch pass line. */
+function skipReasonKey(reason: string): string {
+  if (reason === NO_ANCHOR_REASON) return "no_anchor";
+  if (reason.startsWith("target ") && reason.includes("excluded by the autonomy scope")) return "scope_excluded";
+  if (reason.startsWith("localized site ")) return "localized_site_excluded";
+  if (reason.startsWith("localization write refused")) return "localization_refused";
+  if (reason.startsWith("not sent:")) return "not_sent";
+  if (reason.startsWith("dispatch failed")) return "dispatch_failed";
+  if (reason.startsWith("send refused") || reason.startsWith("send not taken")) return "non_attempt";
+  const m = /^([a-z_]+)(?::|\b)/.exec(reason);
+  return m ? m[1]! : "other";
+}
+
 const posNum = (v: unknown, dflt: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt);
 
 async function writeMeta(row: Row, meta: Row, opts?: Parameters<typeof resolveSubstrateGapWrite>[1]): Promise<ResolverResult> {
@@ -1008,6 +1021,16 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   const dispatchDue = pointer.bookkeeping_only !== true && due.due_score >= threshold;
   const notDue = { fired: false, reason: "not_due", due_score: due.due_score, due_threshold: threshold };
   if (due.paused_by) return { shape: "gapCheckSupplyReport", body: { ...notDue, paused_by: due.paused_by } };
+  // A DUE PASS CLAIMS ITS SLOT BEFORE THE WORK (the scope-earn-in pattern, RAN_PACING). The family settled only on an
+  // alpha or beta leg, so a due pass that sent, armed and was refused nothing wrote no leg: the family stayed due and
+  // every caller (the conductor's direct fire, the boredom selector's tagged template) re-ran the whole pass, one to two
+  // a minute on one node. The first caller past the due gate resets the pacing (staleness 0, updated_at now) by a
+  // compare-and-set on the row it read, before any gap-store read: the next caller within the cadence reads not_due
+  // (and an undue pass is floored), and a caller that read the same row loses the CAS and returns not_due. Credit is
+  // the settlement written after the work, as before. An undue pass claims nothing: its clock is the debit's alone.
+  if (dispatchDue && !pointer.dry_run && !(await writeFamilyRhythm(rhythm, RAN_PACING, "gap-check-supply-tick", rhythm.updated_at))) {
+    return { shape: "gapCheckSupplyReport", body: { ...notDue, detail: "another tick claimed this due slot (rhythm row moved since it was read)" } };
+  }
   const floorMs = posNum(rhythm.body["bookkeeping_min_interval_s"], 600) * 1000;
   if (!dispatchDue && lastBookkeepingAt !== null && now >= lastBookkeepingAt && now - lastBookkeepingAt < floorMs) {
     return { shape: "gapCheckSupplyReport", body: { ...notDue, bookkeeping: `skipped: the last pass was ${Math.round((now - lastBookkeepingAt) / 1000)} s ago (floor ${floorMs / 1000} s)` } };
@@ -1495,8 +1518,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const anchors = falsifiableAnchors(summary, siteSrc, spec, siteSrc === null ? vesselDeclarations(vessel, reader) : null);
       if (anchors.length === 0) {
         skipped.push({ id, reason: NO_ANCHOR_REASON });
-        console.warn(`[gap-check-supply] ${id}: ${NO_ANCHOR_REASON}; no check goal (falsifier stays unknown)`);
-        if (!pointer.dry_run && !(ledger.state === "no_anchor" && ledger.reason === NO_ANCHOR_REASON)) await writeMeta(row, { check_supply: { ...ledger, state: "no_anchor", reason: NO_ANCHOR_REASON } });
+        // Its own line once, when its ledger first records it; every pass counts it in the dispatch line below.
+        if (!(ledger.state === "no_anchor" && ledger.reason === NO_ANCHOR_REASON)) {
+          console.warn(`[gap-check-supply] ${id}: ${NO_ANCHOR_REASON}; no check goal (falsifier stays unknown)`);
+          if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "no_anchor", reason: NO_ANCHOR_REASON } });
+        }
         continue;
       }
       anchorsOf.set(id, anchors);
@@ -1568,11 +1594,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
 
   // A localized gap is work done this tick (I1), graded as a dispatch is.
   const leg = checkSupplySettlementLeg({ dispatched: dispatched.length + localized.length, armed: armed.length, refused });
-  if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due, undefined, settledKeys());
+  // The credit on the claimed pacing (scope-earn-in's credit leg): alpha or beta, and staleness stays reset. Settled on
+  // the pre-claim staleness, a beta leg would write the family straight back to due.
+  if (leg && !pointer.dry_run) await settleFamily({ ...rhythm, body: { ...rhythm.body, ...RAN_PACING } }, leg, { ...due, staleness: 0 }, undefined, settledKeys());
   bookkeepingLine("due");
 
   const after = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
   const afterRows = ((after.body ?? {}) as { gaps?: Row[] }).gaps ?? [];
+  // ONE COMPACT LINE PER DISPATCH PASS: what it sent and why the rest were not sent, by reason (each row's own reason
+  // stays on its ledger and in the report's skipped list).
+  const skipBy = new Map<string, number>();
+  for (const s of skipped) { const k = skipReasonKey(s.reason); skipBy.set(k, (skipBy.get(k) ?? 0) + 1); }
+  console.log(`[check-supply] dispatch pass: sent=${dispatched.length} localized=${localized.length} exhausted=${exhausted.length} control=${controlMarked.length} skipped=${skipped.length}${skipBy.size ? ` (${[...skipBy].map(([k, n]) => `${k}=${n}`).join(" ")})` : ""} node=${localNode}`);
   const measures = checkSupplyMeasures(afterRows, now - windowMs);
   const arms = { treatment: 0, control: 0 };
   for (const r of afterRows) {

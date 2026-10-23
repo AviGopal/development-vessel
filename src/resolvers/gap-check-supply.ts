@@ -1339,6 +1339,30 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (!pointer.dry_run) await writeMeta(row, ownCheckUnarmMeta(own, nowIso));
   }
 
+  // A NARROWED CHILD CARRYING ITS PARENT'S ARMED LEDGER IS GIVEN ITS OWN. Before the inherit fix (narrowedChildRecord,
+  // NARROWED_INHERIT_NEVER) a child was minted with a copy of the parent's check_supply, so it reads armed with the
+  // parent's armed_at and dispatch id: the dispatch step skips armed rows, and the child, whose falsifier is its own and
+  // unarmed, is never supplied a check and cannot close. A ledger armed BEFORE the child was narrowed is that copy: it
+  // is cleared (the copy kept beside the reason), so the next due pass supplies the child its own check. A child armed
+  // after its narrowing armed itself and is left as it is.
+  const clearedInherited: string[] = [];
+  for (const row of open) {
+    const id = String(row["id"]);
+    const meta = metaOf(row);
+    const ledger = ledgerOf(meta);
+    if (touched.has(id) || ledger.state !== "armed" || !nonEmpty(meta["parent_gap_id"])) continue;
+    const cls = falsifierClassOf(meta);
+    if (cls === "class1" || cls === "class2") continue;
+    const armedAt = Date.parse(String(ledger.armed_at ?? ""));
+    const narrowedAt = Date.parse(String(meta["narrowed_at"] ?? row["created_at"] ?? ""));
+    if (!Number.isFinite(armedAt) || !Number.isFinite(narrowedAt) || armedAt >= narrowedAt) continue;
+    touched.add(id);
+    clearedInherited.push(id);
+    const reason = `inherited_armed_ledger_cleared: armed_at ${String(ledger.armed_at)} precedes this child's narrowing (${new Date(narrowedAt).toISOString()}), so the armed ledger is the parent ${String(meta["parent_gap_id"])}'s copy, not this child's`;
+    console.log(`[check-supply] cleared inherited ledger ${id}: ${reason}`);
+    if (!pointer.dry_run) await writeMeta(row, { check_supply: { reason, cleared_at: nowIso, inherited: { armed_at: ledger.armed_at ?? null, dispatch_id: ledger.dispatch_id ?? null, test_file: ledger.test_file ?? null } } });
+  }
+
   // A row marked needs_localization that something else has since armed: release the hold.
   let released = 0;
   for (const row of open) {
@@ -1408,6 +1432,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
         refused,
         ...(resettled.length ? { resettled } : {}),
         ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
+        ...(clearedInherited.length ? { cleared_inherited: clearedInherited } : {}),
         released,
         outcomes,
         dry_run: pointer.dry_run === true,
@@ -1690,6 +1715,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       control_marked: controlMarked,
       localized,
       ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
+      ...(clearedInherited.length ? { cleared_inherited: clearedInherited } : {}),
       outcomes,
       ...(scopeUnread ? { scope_unread: scopeUnread } : {}),
       arms,

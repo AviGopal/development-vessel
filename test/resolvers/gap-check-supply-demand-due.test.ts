@@ -205,7 +205,8 @@ describe("an undue pass with demand and nothing in flight makes the family due",
     const fresh = T("gcsd-fresh2");
     await seed(fresh, "fresh2", {});
     const first = await tick(now, true);
-    expect(ledgerOf(await storeRow(noid))["state"]).toBe("goal_dispatched"); // waits, inside dispatch_stale_hours
+    // recovered on this pass as the unconfirmed send it is (26ec219f), and in no case counted in flight
+    expect(ledgerOf(await storeRow(noid))["state"]).toBe("non_attempt");
     expect(dueAt(now)).toBeGreaterThanOrEqual(1);
     expect(first["demand"]).toMatchObject({ in_flight: 0, marked_due: true });
     await tick(now + MIN);

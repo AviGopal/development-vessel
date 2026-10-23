@@ -1837,7 +1837,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -1888,7 +1888,7 @@ try { tally.birth_retaken = (await reevaluateBirthVerdicts(gaps)).length; } catc
 // re-run on the clone HEAD; a pass proposes the close (never makes it). Before the pending slice, which it never feeds.
 try {
   const lc = await proposeLandedCloses(gaps, { ask: deps.ask });
-  tally.landed_close_proposed = lc.proposed.length; tally.landed_close_still_red = lc.still_red.length; tally.landed_close_prose_only = lc.prose_only;
+  tally.landed_close_proposed = lc.proposed.length; tally.landed_close_still_red = lc.still_red.length; tally.landed_close_prose_only = lc.prose_only; tally.landed_close_examined = lc.examined;
 } catch (err) { console.warn(`[gap-sweep] landed-close proposals skipped: ${String(err).slice(0, 200)}`); }
 
 // Then process existing pending verifications as before
@@ -2368,11 +2368,22 @@ export function landedCloseCandidate(g: Record<string, unknown>): "check" | "pro
   return typeof m.must_fail === "string" && m.must_fail.trim() ? "prose_only" : null;
 }
 
+/** The newest commit touching the row's edit_site since its detection, on the clone HEAD its check runs in (one git
+ *  spawn), or null: no clone, no detection time, or no such commit. */
+function latestEditSiteCommitSince(g: Record<string, unknown>, meta: Record<string, unknown>): string | null {
+  const repo = birthCheckRepo(meta);
+  const since = typeof g.detected_at === "string" && Number.isFinite(Date.parse(g.detected_at)) ? g.detected_at : "";
+  const vessel = /^repos\/([^/:]+)\//.exec(String(gapEditSite(g, meta) ?? ""))?.[1] ?? "";
+  const site = vessel ? String(gapEditSite(g, meta)).slice(`repos/${vessel}/`.length).replace(/:\d+.*$/, "").trim() : "";
+  if (!repo || !since || !site || !existsSync(join(repo.dir, ".git"))) return null;
+  return sweepGitOut(repo.dir, ["log", "-1", "--format=%H", `--since=${since}`, "HEAD", "--", site]) || null;
+}
+
 export async function proposeLandedCloses(
   gaps: Record<string, unknown>[],
   deps: { ask: Ask; runAt?: PinnedCheckDeps["runAt"]; limit?: number },
-): Promise<{ proposed: string[]; still_red: string[]; prose_only: number; runs: number }> {
-  const out = { proposed: [] as string[], still_red: [] as string[], prose_only: 0, runs: 0 };
+): Promise<{ proposed: string[]; still_red: string[]; prose_only: number; runs: number; examined: number }> {
+  const out = { proposed: [] as string[], still_red: [] as string[], prose_only: 0, runs: 0, examined: 0 };
   const runAt = deps.runAt ?? (pinnedCheckDeps ?? defaultPinnedCheckDeps).runAt;
   // Read only when a check is about to run: a sweep with no candidate makes no extra call.
   let limit: number | null = deps.limit ?? null;
@@ -2385,6 +2396,14 @@ export async function proposeLandedCloses(
     // The range starts at the row's detection (created_at when the row carries no detected_at).
     const judgedMeta: Record<string, unknown> = { ...meta, evidence_resolve: check };
     const judged: Record<string, unknown> = { ...g, detected_at: g.detected_at ?? g.created_at, classification_metadata: judgedMeta };
+    // ONE CHEAP READ FIRST. fixingCommitSinceBirth reads the check's import closure at two refs (a git spawn per
+    // candidate path), and most open rows' edit sites have not moved: one `git log -1 -- <edit_site>` since detection
+    // decides whether the heavy read runs at all, and an edit_site whose newest commit was already judged is skipped.
+    const latest = latestEditSiteCommitSince(judged, judgedMeta);
+    if (!latest) continue;
+    const priorJudged = meta.landed_close_check as { fixing_sha?: unknown; edit_site_sha?: unknown } | undefined;
+    if (priorJudged && (priorJudged.edit_site_sha ?? priorJudged.fixing_sha) === latest) continue;
+    out.examined += 1;
     const found = fixingCommitSinceBirth(judged, judgedMeta);
     // No commit since detection, or one that touched only the check's own instrument: the edit_site has not moved.
     if (!found || found.held?.stage === "own_green_instrument_only_commit") continue;
@@ -2402,7 +2421,7 @@ export async function proposeLandedCloses(
     if (!fresh || String(fresh.status ?? "") !== "open") continue;
     const fm = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
     const input = (check.input ?? {}) as Record<string, unknown>;
-    const run = { fixing_sha: found.sha, head: found.head, verdict, at: new Date().toISOString(), check: { vessel: input.vessel ?? null, test_file: input.test_file ?? null, only_tests: input.only_tests ?? null } };
+    const run = { fixing_sha: found.sha, edit_site_sha: latest, head: found.head, verdict, at: new Date().toISOString(), check: { vessel: input.vessel ?? null, test_file: input.test_file ?? null, only_tests: input.only_tests ?? null } };
     const proposal = verdict === "absent"
       ? { landed_close_proposal: { ...run, detector: LANDED_CLOSE_DETECTOR, instrument_touched: found.held ? { stage: found.held.stage, commit: found.held.instrument_commit, files: found.held.files.slice(0, 10) } : null, decides: "the lifecycle or a ruling; this detector never closes" } }
       : {};

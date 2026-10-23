@@ -159,4 +159,9 @@ describe("pending-land sweep: a landed fix on an open row's edit_site proposes t
     expect({ check: meta("prose").landed_close_check ?? null, untouched: meta("untouched").landed_close_check ?? null }).toEqual({ check: null, untouched: null });
     expect(/"landed_close_prose_only":1/.test(r.first), r.first.slice(-1500)).toBe(true);
   });
+  it("MUST-FAIL (cost): only rows whose edit_site moved take the heavy read, and an already-judged edit_site commit is not read again", () => {
+    const r = runOnce();
+    // fixed, red and bare moved (3); untouched did not. The second sweep finds every moved edit_site already judged.
+    expect({ first: /"landed_close_examined":3[,}]/.test(r.first), second: /"landed_close_examined":0[,}]/.test(r.second) }, r.out.slice(-2000)).toEqual({ first: true, second: true });
+  });
 });

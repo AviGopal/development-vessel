@@ -489,11 +489,15 @@ export async function admitActionableGaps(
       else if (park && park.liftable) {
         drainLifts++;
         const refused = await liftDetectorPark(g, park.because);
-        if (refused) parkNote = `; parked: lift not written (${refused})`;
-        else {
+        if (refused) {
+          parkNote = `; parked: lift not written (${refused})`;
+          console.warn(`[gap-admission] needs_information drain: ${id} not unparked: lift not written (${refused})`);
+        } else {
           meta.disposition = "";
           if (g.classification_metadata === undefined && g.metadata === undefined) g.classification_metadata = meta;
           drained.push(id);
+          // One line per drained row (gap id + reason), beside the pass's counted line below.
+          console.log(`[gap-admission] needs_information drain: unparked ${id} (${park.because})`);
         }
       } else if (park) parkNote = `; parked awaiting ${park.awaits}`;
     }

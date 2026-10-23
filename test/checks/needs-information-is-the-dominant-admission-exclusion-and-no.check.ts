@@ -104,6 +104,38 @@ describe("the needs_information drain", () => {
     expect(after["needs_information_drained"]).toMatchObject({ from: "needs_information", because: "its detector_reading check read present at birth" });
   });
 
+  it("the drain's write changes ONLY disposition and the needs_information_drained record (the stored row diffed before/after), and logs the row by id and reason", async () => {
+    const id = `ni-drain-patch-${RUN}`;
+    await parkedDetectorRow(id);
+    // Fields another writer owns: a lane, dates, an owner, links. The drain must leave every one of them as stored.
+    await write(id, "substrate_detected", {
+      edit_site: SITE, lane: "operator_build", latest_by: "2026-10-30T20:00:00Z", date_status: "APPROVED: fixture ruling",
+      filed_by: "fixture coordinator", owning_vessel: "development-vessel", related: ["some-other-row"], failure_lessons: [{ class: "fixture", reason: "kept", at: "2026-10-01T00:00:00Z" }],
+    });
+    const before = await stored(id);
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); log(...a); };
+    let adm: Awaited<ReturnType<typeof admitActionableGaps>>;
+    try { adm = await admitActionableGaps([JSON.parse(JSON.stringify(before)) as Row]); } finally { console.log = log; }
+    expect(adm.admitted.map((g) => String(g.id))).toEqual([id]);
+    const after = await stored(id);
+    // Row level: nothing but the store's own updated_at (and the metadata, diffed below) may differ.
+    const rowDiff = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => k !== "classification_metadata" && k !== "updated_at" && JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+    expect(rowDiff).toEqual([]);
+    const mb = metaOf(before), ma = metaOf(after);
+    // The write seam re-stamps falsifier_classified_at on EVERY write (substrate-gap.ts FALSIFIER STAMP), whoever the
+    // writer: the store's stamp, as updated_at is, not the drain's patch. It is the one key set aside, by name, and the
+    // classification it stamps must be unchanged.
+    const SEAM_STAMPS = new Set(["falsifier_classified_at"]);
+    expect(ma["falsifier"]).toEqual(mb["falsifier"]);
+    const metaDiff = [...new Set([...Object.keys(mb), ...Object.keys(ma)])].filter((k) => !SEAM_STAMPS.has(k) && JSON.stringify(mb[k]) !== JSON.stringify(ma[k])).sort();
+    expect(metaDiff).toEqual(["disposition", "needs_information_drained"]);
+    expect(ma["disposition"]).toBe("");
+    expect(Object.keys(ma["needs_information_drained"] as Row).sort()).toEqual(["at", "because", "from"]);
+    expect(lines).toContain(`[gap-admission] needs_information drain: unparked ${id} (its detector_reading check read present at birth)`);
+  });
+
   it("MUST-FAIL a parked siteless detector row whose check read present is unparked, so the localizer's tick (check-supply) can take it", async () => {
     const id = `ni-drain-siteless-${RUN}`;
     const before = await parkedDetectorRow(id);

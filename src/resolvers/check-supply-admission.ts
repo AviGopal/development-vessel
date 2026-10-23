@@ -169,6 +169,35 @@ export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[
 }
 
 /**
+ * THE WRITE SCOPE A TEST-WRITING COMPOSE IS PLANNED AGAINST IS THE ONE IT IS JUDGED BY (law 8: the planner is given, at
+ * plan time, the scope testWritingDiffOutsideTests refuses it for leaving). feature_compose's target list
+ * (composeTargetFiles) puts the gap's edit_site first whatever the mode, and that list drives the grounding (target
+ * windows) and the file-scope gate; a test_writing compose planned against it edited the src edit site and was then
+ * refused at test_writing_diff_outside_tests. In test_writing mode the write targets are exactly the gap's check file,
+ * by the same predicate the refusal applies (testWritingPathAllowed); every other incoming target (the edit site, src
+ * paths the spec names) is returned as READ-ONLY context. The check's repo path is the one the target list already
+ * names (the supply's goal names repos/<vessel>/<test_file>), else repos/<v>/<checkSupplyCheckPath(gap id)> with v the
+ * ledger's vessel (check_supply.vessel), else the edit site's. Null outside test_writing mode (targets unchanged).
+ */
+export function testWritingWriteScope(composeMode: unknown, gapId: unknown, gapMeta: Record<string, unknown>, targets: readonly string[]): { targets: string[]; readonly: string[] } | null {
+  if (composeMode !== CHECK_SUPPLY_COMPOSE_MODE) return null;
+  // The path charset composeTargetFiles admits: these paths reach shell commands.
+  const safe = (p: string): boolean => /^repos\/[\w.-]+\/[\w./-]+\.\w+$/.test(p) && !p.split("/").includes("..");
+  let write = targets.find((t) => safe(t) && testWritingPathAllowed(t, gapId)) ?? null;
+  if (!write && typeof gapId === "string" && gapId.length > 0) {
+    const ledger = (gapMeta["check_supply"] && typeof gapMeta["check_supply"] === "object" ? gapMeta["check_supply"] : {}) as { vessel?: unknown };
+    const vesselOf = (p: unknown): string | null => (typeof p === "string" ? /^repos\/([\w.-]+)\//.exec(p.trim())?.[1] ?? null : null);
+    const fromLedger = typeof ledger.vessel === "string" ? ledger.vessel.replace(/^repos\//, "").replace(/\/+$/, "") : "";
+    for (const v of [fromLedger, vesselOf(gapMeta["edit_site"])]) {
+      if (!v || !/^[\w.-]+$/.test(v)) continue;
+      const p = `repos/${v}/${checkSupplyCheckPath(gapId)}`;
+      if (safe(p) && testWritingPathAllowed(p, gapId)) { write = p; break; }
+    }
+  }
+  return { targets: write ? [write] : [], readonly: targets.filter((t) => t !== write) };
+}
+
+/**
  * W2: THE CHECK MUST IMPORT THE GAP'S EDIT SITE (B′). A red that does not load the module the gap names reproduces
  * nothing the lane can fix (expect(1).toBe(2) is red for every gap). The rule, shared by feature_compose's verify and
  * gap-check-supply's arm step so they agree:

@@ -5193,6 +5193,22 @@ export function ownCheckImportsBlock(input: { added: string[]; readonly: Array<{
   }
   return parts.join("\n\n");
 }
+/** The prompt text for a test_writing compose's write scope (check-supply-admission.ts testWritingWriteScope): the one
+ *  file it may write, and each read-only module (the gap's edit site first) in one window, labelled as not writable. */
+export function testWritingScopeBlock(input: { write: string[]; readonly: Array<{ path: string; content: string | null }>; focusHints: string[] }): string {
+  const parts: string[] = [
+    `TEST-WRITING COMPOSE, WRITE SCOPE: this compose writes exactly ONE file, the gap's check: ${input.write.length > 0 ? input.write.join(", ") : "(no check path could be derived)"}. `
+    + "Every op must target that path; an op on any other path (src/, another test, config) refuses the whole plan (stage test_writing_diff_outside_tests). "
+    + "The source file(s) below are the gap's edit site, shown READ-ONLY so the check can import and exercise them: do NOT edit them.",
+  ];
+  for (const r of input.readonly.slice(0, RELOCATION_HINT_MAX_FILES)) {
+    const content = r.content ?? "";
+    const { slice } = focusedSlice(content, PER_FILE_SLICE, input.focusHints);
+    parts.push(`----- ${r.path} (READ-ONLY: the gap's edit site; the check imports it, but this test-writing compose may NOT edit it) -----\n`
+      + (r.content === null ? "(unreadable)" : renderWindowForDrafter(`${slice}${slice.length < content.length ? "\n… (windowed)" : ""}`)));
+  }
+  return parts.join("\n\n");
+}
 /** The compose's target files: edit_site, the relocation hint's files, then repos/ paths the spec names. */
 export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: string): string[] {
   const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
@@ -7038,7 +7054,13 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     .map((h) => h.trim());
   // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.
   // Capped at 4 so a verbose spec can't blow the reserved-window budget.
-  const targetFiles = composeTargetFiles(gapMeta, pointer.spec);
+  const composedTargets = composeTargetFiles(gapMeta, pointer.spec);
+  // A TEST-WRITING COMPOSE IS PLANNED AGAINST THE SCOPE IT IS JUDGED BY (check-supply-admission.ts testWritingWriteScope):
+  // its one write target is the gap's check file; the edit site and other src targets become read-only context, shown
+  // below after the blind-window refusals. Any other compose mode keeps composeTargetFiles' list (edit_site first).
+  const testWritingScope = (await import("./check-supply-admission.js")).testWritingWriteScope((pointer as { compose_mode?: unknown }).compose_mode, pointer.gap?.id, gapMeta, composedTargets);
+  const targetFiles = testWritingScope ? testWritingScope.targets : composedTargets;
+  if (testWritingScope) console.log(`[fc-test-writing-scope] write target(s) [${testWritingScope.targets.join(", ")}]; read-only context [${testWritingScope.readonly.join(", ")}]`);
   // The gap's own check, read before planning (shown to the drafter after the blind-window refusals below).
   const ownCheckCtx = ownCheckGrounding(gapMeta);
   // The modules the check imports become targets (appended, so targetFiles[0] stays the edit_site), unless the
@@ -7537,6 +7559,20 @@ if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — dr
 const composedChange = composeSurgicalAtoms(contractBlock);
 grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
   } catch { /* advisory */ }
+  // THE TEST-WRITING WRITE SCOPE, STATED, AND ITS EDIT SITE READ-ONLY (testWritingWriteScope above). Appended AFTER the
+  // blind-window refusals for the same reason as the own check: a read-only window must never satisfy "the window
+  // mentions the target file". Placed last in the contracts segment, which the drafter split's open module renders
+  // verbatim (facts.contracts), so the statement reaches the drafter on both the open path and the floor. The edit site
+  // the verify judges the check against (check_supply.edit_site, read by judgeTestWritingCheck) is shown first; only src
+  // modules are windowed.
+  if (testWritingScope) {
+    const ledgerSite = (gapMeta.check_supply as { edit_site?: unknown } | undefined)?.edit_site;
+    const siteFirst = typeof ledgerSite === "string" && /^repos\/[\w.-]+\/src\/[\w./-]+\.\w+$/.test(ledgerSite) && !ledgerSite.split("/").includes("..") ? [ledgerSite] : [];
+    const shown = [...new Set([...siteFirst, ...testWritingScope.readonly])].filter((p) => vesselRelativePath(p)?.startsWith("src/"));
+    const block = testWritingScopeBlock({ write: testWritingScope.targets, readonly: shown.map((p) => ({ path: p, content: readOwnCheckModule(p) })), focusHints });
+    grounding += `\n\n${block}`;
+    console.log(`[fc-test-writing-scope] stated the write scope [${testWritingScope.targets.join(", ")}] and showed [${shown.join(", ")}] read-only (${block.length} bytes)`);
+  }
   const groundingExistingAt = grounding.length;
   try {
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);

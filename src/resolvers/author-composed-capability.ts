@@ -588,6 +588,12 @@ export function composedCapabilityTemplateId(
   return { id: `composed-cap-${outPart}-${sig}`, name: `composed-capability:${outPart}#${sig}` };
 }
 
+/** The signature form composedCapabilityTemplateId mints: `composed-cap-<readable output shape>-<12 hex>`. A composed-cap
+ *  id outside it was minted from goal text (the 40-char slug that preceded it), so it can prefix-match a whole goal class. */
+export function isComposedCapabilitySignatureId(id: string): boolean {
+  return /^composed-cap-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$/.test(id) && id.length <= "composed-cap-".length + 40 + 13;
+}
+
 export async function resolveAuthorComposedCapability(
   pointer: AuthorComposedCapabilityPointer,
 ): Promise<ResolverResult> {

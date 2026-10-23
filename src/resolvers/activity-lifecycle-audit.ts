@@ -1,5 +1,6 @@
 import type { ResolverResult } from "./types.js";
 import { selfAuthHeaders, selfAuthTrusted } from "../lib/self-auth.js";
+import { isComposedCapabilitySignatureId } from "./author-composed-capability.js";
 
 /**
  * activity_lifecycle_audit — horizon-detector (activity horizon).
@@ -345,6 +346,17 @@ const sortedDesc = [...withTraces].sort((a, b) => byRank(b, a));
     .sort((a, b) => b.combined_score - a.combined_score)
     .slice(0, hotSetSize);
 
+  // COMPOSED CAPABILITIES STILL NAMED BY GOAL TEXT. author_composed_capability now keys a composed capability's id on its
+  // contract (composedCapabilityTemplateId), but the templates minted before that keep the 40-char goal slug they were
+  // given (composed-cap-investigate-and-decompose, composed-cap-could-you-please-close-the-substrate-gap): one wrong
+  // mint keyed on a goal-class preamble keeps shadowing every goal of that class after the id fix. This walk already
+  // reads the whole catalogue, so it reports every composed-cap template outside the signature form. Report only: it
+  // neither retires nor renames, and writes nothing.
+  const composedCapabilitySlugIds = templates
+    .map(templateIdOf)
+    .filter((id) => id.startsWith("composed-cap-") && !isComposedCapabilitySignatureId(id))
+    .sort();
+
   // Emit findings: one substrateGap per shouldPromoteProposed and one
   // aggregate gap for shouldUnload (so the substrate sees the activity-
   // lifecycle work as a single decision target).
@@ -406,6 +418,8 @@ const sortedDesc = [...withTraces].sort((a, b) => byRank(b, a));
       should_load_hot: shouldLoadHot,
       should_unload: shouldUnload,
       should_promote_proposed: shouldPromoteProposed,
+      composed_capability_slug_ids: composedCapabilitySlugIds,
+      composed_capability_slug_id_count: composedCapabilitySlugIds.length,
       findings,
       dry_run: dryRun,
       completed_at: new Date().toISOString(),

@@ -259,7 +259,33 @@ function readRows(): SelfFactRow[] | null {
   try {
     const j = JSON.parse(raw) as { rows?: unknown };
     if (!Array.isArray(j.rows)) return noteReadError(`rows ${rowsSource}`, "no rows[] array");
-    return (j.rows as SelfFactRow[]).filter((r) => r && typeof r.id === "string" && typeof r.instrument === "string" && Array.isArray(r.profiles));
+    const rows = (j.rows as SelfFactRow[]).filter(
+      (r) => r && typeof r.id === "string" && typeof r.instrument === "string" && Array.isArray(r.profiles),
+    );
+
+    const countsByCause: Record<string, number> = {};
+    for (const row of rows) {
+      const cause = (row as unknown as Record<string, unknown>).cause;
+      if (cause && typeof cause === "string") {
+        countsByCause[cause] = (countsByCause[cause] ?? 0) + 1;
+      }
+    }
+
+    if (Object.keys(countsByCause).length > 0) {
+      const generatedAt = new Date().toISOString();
+      for (const cause of Object.keys(countsByCause)) {
+        rows.push({
+          id: `cause-count:${cause}:${generatedAt}`,
+          instrument: "self-fact-reconcile:cause-count",
+          profiles: ["all"],
+          cause,
+          count: countsByCause[cause]!,
+          edit_site: "",
+          must_fail: "",
+        } as SelfFactRow);
+      }
+    }
+    return rows;
   } catch (err) {
     return noteReadError(`rows ${rowsSource}`, err);
   }

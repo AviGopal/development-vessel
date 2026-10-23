@@ -60,6 +60,7 @@ describe("gap-lifecycle-scan: the persistent-compose-failure close waits for a p
     };
   }
 
+  let lastWrites: Gap[] = [];
   async function persistentClosed(gaps: Gap[]): Promise<string[]> {
     mkdirSync(join(ws, "gaps"), { recursive: true });
     mkdirSync(join(ws, "proposals", ".applied"), { recursive: true });
@@ -82,6 +83,7 @@ describe("gap-lifecycle-scan: the persistent-compose-failure close waits for a p
       falsify: false,
       devVesselImpulsesUrl: DEV,
     } as never);
+    lastWrites = writes;
     return writes
       .filter((w) => w.status === "closed" && w.classification_metadata?.closed_reason === "persistent_compose_failure")
       .map((w) => w.id)
@@ -107,5 +109,11 @@ describe("gap-lifecycle-scan: the persistent-compose-failure close waits for a p
       row("short-pending", { pending_outcome_verification: "" }),
     ]);
     expect(closed).toEqual(["idle", "lapsed-lease", "short-pending", "unarmed"]);
+  });
+  it("MUST-FAIL (fossil): the persistent close sends no detected_at (the seam keeps birth fields; a close-time stamp is dead)", async () => {
+    const closed = await persistentClosed([row("idle", {})]);
+    expect(closed).toEqual(["idle"]);
+    const w = lastWrites.find((x) => x.id === "idle" && x.status === "closed")!;
+    expect("detected_at" in w).toBe(false);
   });
 });

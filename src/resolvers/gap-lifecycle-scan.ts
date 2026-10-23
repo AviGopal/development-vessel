@@ -757,7 +757,8 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
                 source: "substrate_detected",
                 summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? "").slice(0, 160)} — persistent compose failure (${failureCount} failed attempts, failure_lessons saturated). Not patch‑tractable by re‑drafting. Live detectors will re-open if still real.`,
                 status: "closed",
-                detected_at: new Date().toISOString(),
+                // No detected_at: the write seam keeps a row's birth fields, so the close-time stamp this sent was
+                // dead, and read as a detection time it would erase detection-to-close latency (law 7 measure 2).
                 classification_metadata: { closed_reason: "persistent_compose_failure", closed_by: "gap_lifecycle_scan", failure_count_at_close: failureCount },
               } },
             },

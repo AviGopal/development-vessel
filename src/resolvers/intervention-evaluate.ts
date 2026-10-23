@@ -201,6 +201,79 @@ interface RefusalRecord {
   substrate_priors_cited: PriorRef[];
   refused_at: string;
   strictness: InterventionStrictness;
+  /** Who proposed the refused intervention: the route-validated principal (refusalWriterPrincipal), else "unidentified". */
+  principal?: string;
+  /** The decline class, the same as the declined:<class> tag on the trace (refusalDeclineClass). */
+  decline_class?: string;
+  /** The trace store's id for the declined record of this refusal, when the store answered with one. */
+  declined_execution_id?: string;
+}
+
+/**
+ * WHO PROPOSED THE INTERVENTION. intervention_evaluate is a read, so no write gate validates its caller. The HTTP
+ * resolve route asks identity about the presented credential and passes refusalWriterPrincipal's answer here, the
+ * same principal vocabulary a refusal record's written_by uses. Never a pointer field: a caller cannot name someone
+ * else as the intervener. In-process callers pass nothing, and the record says "unidentified".
+ */
+export interface InterventionEvaluateContext {
+  intervener?: string | null;
+}
+
+/**
+ * THE DECLINE CLASS OF A REFUSAL (REALIGNMENT §2.2: an outcome is reached, failed or DECLINED). Each REFUSE branch of
+ * the decision tree has one class, written as the declined:<class> trace tag:
+ *   - an operator editing a substrate-authored file under strict policy would take the lesson from the loop that
+ *     grades the substrate's own work (the lift recursion): would_break_grading_loop;
+ *   - no cited evidence against contradicting substrate priors: contradicts_priors_without_evidence.
+ */
+export type RefusalDeclineClass = "would_break_grading_loop" | "contradicts_priors_without_evidence";
+
+/**
+ * A REFUSAL IS A DECLINED OUTCOME, NOT A LOCAL FILE ROW. Before this, a REFUSE went only to refusals.json, so the
+ * trace store never learned a refusal happened. This writes the declined record through the contract goal-host's
+ * durable walk trace already uses and activity-api already reads: the tag declined:<class> (isReachInapplicable
+ * leaves the record ungraded: a refusal is neither credited nor blamed as a failure) and metadata.decline
+ * {class, reason_text, decliner_id}. The intervener principal and the refusal id ride beside it on metadata, so the
+ * record joins back to interventionRefused. No run carries an intervention today, so the record is standalone.
+ *
+ * The write goes to the configured trace store only (never to the pointer's overridable read URL), with this node's
+ * key. Best-effort: a store that is down or refuses leaves the verdict unchanged, and the id is null.
+ */
+async function emitDeclinedRefusal(rec: { refusal_id: string; decline_class: RefusalDeclineClass; reason_text: string; principal: string; target_path: string; source: ProposedChange["source"] }): Promise<string | null> {
+  const url = `${METABOB_ENDPOINT}/v2/activities/execution-traces`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(url, url) },
+      body: JSON.stringify({
+        execution_id: `declined-${rec.refusal_id}`,
+        template_id: "intervention_evaluate",
+        activity_id: "intervention_evaluate",
+        success: false,
+        duration_ms: 0,
+        cost_usd: 0,
+        tokens: { input: 0, output: 0, cache: 0 },
+        tags: [`declined:${rec.decline_class}`],
+        metadata: {
+          decline: { class: rec.decline_class, reason_text: rec.reason_text.slice(0, 800), decliner_id: "intervention_evaluate" },
+          intervener_principal: rec.principal,
+          refusal_id: rec.refusal_id,
+          target_path: rec.target_path,
+          intervention_source: rec.source,
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      console.warn(`[intervention_evaluate] declined record for ${rec.refusal_id} NOT written: trace store answered HTTP ${res.status}`);
+      return null;
+    }
+    const body = (await res.json().catch(() => null)) as { execution_id?: unknown } | null;
+    return typeof body?.execution_id === "string" && body.execution_id.length > 0 ? body.execution_id : `declined-${rec.refusal_id}`;
+  } catch (err) {
+    console.warn(`[intervention_evaluate] declined record for ${rec.refusal_id} NOT written: ${(err as Error)?.message ?? String(err)}`);
+    return null;
+  }
 }
 
 function refusalsPath(): string {
@@ -227,6 +300,7 @@ async function saveRefusals(records: RefusalRecord[]): Promise<void> {
 
 export async function resolveInterventionEvaluate(
   pointer: InterventionEvaluatePointer,
+  ctx: InterventionEvaluateContext = {},
 ): Promise<ResolverResult> {
   const strictness = pointer.strictness ?? "balanced";
   const conceptDbUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB;
@@ -304,6 +378,7 @@ export async function resolveInterventionEvaluate(
   let verdict: "ACCEPT" | "REFUSE" | "DEFER" = "ACCEPT";
   let reason = "no policy gate triggered; default ACCEPT";
   let refusal_basis: string | undefined;
+  let decline_class: RefusalDeclineClass | undefined;
   let defer_until_condition: string | undefined;
 
   if (priorsUnreachable) {
@@ -314,6 +389,7 @@ export async function resolveInterventionEvaluate(
     verdict = "REFUSE";
     reason = `no cited_evidence and ${contradicting.length} contradicting prior(s) found`;
     refusal_basis = `contradicting priors: ${contradicting.map((p) => p.ref).join(", ")}`;
+    decline_class = "contradicts_priors_without_evidence";
   } else if (
     strictness === "strict" &&
     pc.source === "operator" &&
@@ -324,6 +400,7 @@ export async function resolveInterventionEvaluate(
     refusal_basis =
       `target ${pc.target_path} carries Substrate-Authored-By provenance; ` +
       "substrate-authored content should be modified by substrate (preserves lift recursion)";
+    decline_class = "would_break_grading_loop";
   } else if (cited.length > 0 && concepts.length === 0 && !tracesReachable) {
     verdict = "DEFER";
     reason = "cited evidence present but substrate priors inconclusive";
@@ -337,18 +414,35 @@ export async function resolveInterventionEvaluate(
   }
 
   // Persist refusal record (best-effort) so the substrate can later read its
-  // own refusal history.
+  // own refusal history, and record the refusal as a DECLINED outcome in the
+  // trace store (emitDeclinedRefusal), so the refusal is not invisible there.
+  let refusal_id: string | undefined;
+  let declined_execution_id: string | null = null;
+  const principal = typeof ctx.intervener === "string" && ctx.intervener ? ctx.intervener : "unidentified";
   if (verdict === "REFUSE") {
+    refusal_id = `refusal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const cls: RefusalDeclineClass = decline_class ?? "contradicts_priors_without_evidence";
+    decline_class = cls;
+    declined_execution_id = await emitDeclinedRefusal({
+      refusal_id,
+      decline_class: cls,
+      reason_text: refusal_basis ?? reason,
+      principal,
+      target_path: pc.target_path,
+      source: pc.source,
+    });
     try {
       const records = await loadRefusals();
-      const id = `refusal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       records.push({
-        id,
+        id: refusal_id,
         proposed_change: pc,
         refusal_basis: refusal_basis ?? reason,
         substrate_priors_cited: priorsCited,
         refused_at: evaluated_at,
         strictness,
+        principal,
+        decline_class: cls,
+        ...(declined_execution_id ? { declined_execution_id } : {}),
       });
       await saveRefusals(records);
     } catch {
@@ -368,6 +462,12 @@ export async function resolveInterventionEvaluate(
     traces_reachable: tracesReachable,
   };
   if (refusal_basis) body["refusal_basis"] = refusal_basis;
+  if (refusal_id) {
+    body["refusal_id"] = refusal_id;
+    body["decline_class"] = decline_class;
+    body["intervener_principal"] = principal;
+    body["declined_execution_id"] = declined_execution_id;
+  }
   if (defer_until_condition) body["defer_until_condition"] = defer_until_condition;
 
   return { shape: "interventionEvaluation", body };

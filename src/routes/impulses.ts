@@ -1376,6 +1376,23 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     return c.json({ success: true, shape: result.shape, body: result.body });
   }
 
+  // AN INTERVENTION'S PROPOSER is named on its refusal and on the declined record a REFUSE writes
+  // (intervention-evaluate.ts InterventionEvaluateContext). intervention_evaluate is a read, so the write gate above
+  // asked no one: this asks identity about the presented credential and names it with refusalWriterPrincipal, never
+  // with a pointer field. No credential, or one identity refuses, is null: the evaluation still runs, unidentified.
+  if (pointerType === "intervention_evaluate") {
+    // The same envelope, output check and error mapping as the generic dispatch below; only the context differs.
+    try {
+      const cred = c.req.header("Authorization") ? await identityCredential(c.req.header("Authorization")) : null;
+      const intervener = refusalWriterPrincipal(cred ? { authenticated: cred.authenticated, node_self: isNodeSelfCredential(cred), key_id: cred.keyId } : undefined);
+      const result = await resolveInterventionEvaluate({ ...(pointer as Record<string, unknown>), type: pointerType } as Parameters<typeof resolveInterventionEvaluate>[0], { intervener });
+      void auditDetectorOutputSanity(result).catch(() => {});
+      return c.json({ success: true, shape: result.shape, body: result.body });
+    } catch (err) {
+      return c.json({ success: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  }
+
   // A GAP-STORE MERGE (substrate-gap.ts GAP-STORE MERGE) writes rows past every gate, so its principal is the one this
   // route's write gate validated: node-self, or an admin-scoped key. Never the body's.
   if (pointerType === "substrateGapMerge_write") {

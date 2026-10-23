@@ -9,8 +9,8 @@
 // THE CONTRACT: when the in-flight record is refused (or times out), nothing is sent; if the store holds this pass's
 // intent (it landed), the row's ledger is written back as it was read, and if it does not, nothing is written (the
 // store has no conditional write; a write could only race the late intent). ORDER-SAFE BY THE BACKSTOP: an intent that
-// lands after that check leaves goal_dispatched with no dispatch id, which the bookkeeping settles as dispatch_lost
-// (no_dispatch_id) past dispatch_stale_hours, on an undue pass too; it never stays. CONTROL: an intent write that
+// lands after that check leaves the pre-send record (send_pending, no dispatch id), which the next pass recovers as the
+// unconfirmed send it is (a non-attempt, never dispatch_lost), on an undue pass too; it never stays. CONTROL: an intent write that
 // succeeds sends the goal and records its dispatch id exactly as before.
 //
 // The two nodes are one process: GAP_STORE_ENDPOINT names a holder URL answered by the in-process substrate-gap
@@ -72,7 +72,7 @@ async function asHolder<T>(fn: () => Promise<T>): Promise<T> {
 }
 const isIntent = (p: Row): boolean => {
   const cs = (((p["gap"] ?? {}) as Row)["classification_metadata"] as Row | undefined)?.["check_supply"] as Row | undefined;
-  return p["type"] === "substrateGap_write" && cs?.["state"] === "goal_dispatched" && cs?.["dispatch_id"] === null && cs?.["goal"] === undefined;
+  return p["type"] === "substrateGap_write" && cs?.["state"] === "send_pending" && cs?.["dispatch_id"] === null && cs?.["goal"] === undefined;
 };
 
 beforeAll(() => {
@@ -176,7 +176,7 @@ describe("record before send, on a node that forwards its gap store", () => {
     expect(led).toEqual(prior);
   });
 
-  it("[MUST-FAIL] the LATE order (the intent lands after the check): nothing is put back, and the row the late intent leaves at goal_dispatched with no id is settled dispatch_lost (no_dispatch_id) by an undue bookkeeping pass past the bound", async () => {
+  it("[MUST-FAIL] the LATE order (the intent lands after the check): nothing is put back, and the pre-send record the late intent leaves is recovered as an unconfirmed send (non_attempt), never dispatch_lost, by an undue bookkeeping pass", async () => {
     const now = Date.now() + 4200 * H;
     const id = T("gcs-intent-late");
     await seedAtHolder(id, priorLedger(id, now));
@@ -197,8 +197,8 @@ describe("record before send, on a node that forwards its gap store", () => {
     await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: later } as never);
     await asHolder(() => sg.__settleBirthEvaluationsForTests());
     const led = await holderLedger(id);
-    expect(led["state"]).toBe("dispatch_lost");
-    expect((led["outcome"] as Row)["lost_why"]).toBe("no_dispatch_id");
+    expect(led["state"]).toBe("non_attempt");
+    expect(String(led["reason"])).toStartWith("send_unconfirmed:");
     expect(goals.filter((g) => g.variables?.["gap_id"] === id).length).toBe(0);
   });
 

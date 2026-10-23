@@ -41,11 +41,13 @@
  * titles has its goal's outcome read from THAT node's goal-host (GET /executions/:id, the contract dispatch-goal.ts
  * reads): running waits; terminal and not reached is a FAILED attempt with the reach reason (state dispatch_failed);
  * terminal and reached with no new title after a grace is failed too. An outcome that cannot be read (not found on the
- * host, host unreachable, no dispatch id, a status this code does not know, a dispatch owned by another node that never
+ * host, host unreachable, a status this code does not know, a dispatch owned by another node that never
  * settles) is never read as failed: it waits, loudly, and only past a shaped staleness bound becomes dispatch_lost with
- * WHY it was lost. A settled gap (failed or lost) is retried after its backoff ahead of fresh gaps, and a gap whose
- * goal is in flight is never sent a second one. A gap whose target the live autonomyScope excludes gets no goal and one
- * skip record (state scope_excluded): the lane could never land it. Bounds are read from the family's rhythm body.
+ * WHY it was lost. A record with no dispatch id is never lost: goal_dispatched is written only with the id, and the
+ * record before the send (send_pending) is recovered by its own node as the unconfirmed send it is (a non-attempt).
+ * A settled gap (failed or lost) is retried after its backoff ahead of fresh gaps, and a gap whose goal is in flight
+ * is never sent a second one. A gap whose target the live autonomyScope excludes gets no goal and one skip record
+ * (state scope_excluded): the lane could never land it. Bounds are read from the family's rhythm body.
  * PLACEMENT (compose-placement.ts, law 11): with no free local compose slot of the supply's class, the goal goes through
  * the development-vessel of a peer that composes the vessel, sees the row, admits the targets and has a free slot, so
  * the compose runs where capacity is while the store holder stays authoritative for the row. Its ledger names that
@@ -141,6 +143,8 @@ type Ledger = {
   /** The edit-site mutation gate's reading at arm time (EDIT-SITE MUTATION GATE): mutants run, how many changed the red. */
   mutation_gate?: Row;
 };
+/** The record written BEFORE the send (CHANGE-30 record before send): no dispatch id yet, so never goal_dispatched. */
+export const SEND_PENDING = "send_pending";
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
 const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
@@ -695,8 +699,18 @@ export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, now
   const hours = (ms: number): string => `${Math.round(ms / 3_600_000)} h`;
   const lostOr = (why: LostWhy, detail: string, bound = bounds.stale_ms): DispatchVerdict =>
     age > bound ? { kind: "lost", why, reason: `${why}: ${detail}; unsettled ${hours(age)} (bound ${hours(bound)})` } : { kind: "wait", why, detail };
-  if (!nonEmpty(ledger.dispatch_id)) return lostOr("no_dispatch_id", "the dispatch recorded no id, so its outcome cannot be read");
   const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
+  // A RECORD WITH NO DISPATCH ID IS NEVER SETTLED AS LOST: its outcome is recovered from its own shape, by the node that
+  // wrote it. The writer records goal_dispatched only with the id the goal-host returned (the sent record, or its
+  // id-only fallback); the one record it writes before the send (send_pending; before that, a goal_dispatched with no
+  // id and no goal text) carries neither. So such a record is a send never confirmed: a non-attempt, not charged,
+  // asked again after its shaped wait (a check that lands anyway still arms the row: the ARM step reads non_attempt
+  // rows). One that carries the goal text was sent and the goal-host answered no id: a failed send, said so.
+  if (!nonEmpty(ledger.dispatch_id)) {
+    if (owner !== null && owner !== localNode) return { kind: "wait", why: "owning_node_never_settled", detail: `recorded with no dispatch id by ${owner}; only ${owner} recovers its send` };
+    if (nonEmpty(ledger.goal)) return { kind: "failed", reason: "send_without_id: the goal was sent and the goal-host answered no dispatch id, so its outcome cannot be read" };
+    return { kind: "non_attempt", reason: "send_unconfirmed: the record carries no dispatch id and no goal text, the shape only the pre-send record has, so no send of it was confirmed; not charged" };
+  }
   // A goal this node PLACED on a peer is read through that peer (probe given): it falls through to the reading below.
   // Unread (probe null), its compose (ceiling 15 min) is long over by the dispatch timeout, so it settles by that
   // shaped bound, not by the foreign one meant for another sender's dispatch.
@@ -1101,7 +1115,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
     // A failed or lost goal's test may still land late: its titles arm the gap all the same.
-    if (!(ledger.state === "goal_dispatched" || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
+    if (!(ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
     const path = join(clonesRoot(), ledger.vessel, ledger.test_file);
     if (!existsSync(path)) continue;
     let src = "";
@@ -1261,7 +1275,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (touched.has(id)) continue;
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
-    if (ledger.state !== "goal_dispatched") continue;
+    if (ledger.state !== "goal_dispatched" && ledger.state !== SEND_PENDING) continue;
     const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
     const mine = owner === null || owner === localNode;
     // A goal this node placed on a peer is read through that peer (compose-placement readPlacedDispatch).
@@ -1363,7 +1377,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       const id = String(r["id"]);
       if (touched.has(id) || checkSupplyDisposition(r) === null || checkSupplyArm(id, controlFraction) === "control") return false;
       const l = ledgerOf(metaOf(r));
-      if (["armed", "exhausted", "goal_dispatched", "no_anchor", "scope_excluded"].includes(String(l.state ?? ""))) return false;
+      if (["armed", "exhausted", "goal_dispatched", SEND_PENDING, "no_anchor", "scope_excluded"].includes(String(l.state ?? ""))) return false;
       const n = Number(l.attempts ?? 0);
       if (n >= maxAttempts) return false;
       if (l.state === "non_attempt" || l.state === "send_refused") { const nb = Date.parse(String(l.not_before ?? "")); if (Number.isFinite(nb) && now < nb) return false; }
@@ -1485,7 +1499,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (dispatched.length >= perTick) continue;
     if (ledger.state === "armed" || ledger.state === "exhausted") continue;
     // A goal in flight is settled by the OUTCOME step (read back, or lost past the bound), never by sending another.
-    if (ledger.state === "goal_dispatched") continue;
+    if (ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING) continue;
     const attempts = Number(ledger.attempts ?? 0);
     const last = Date.parse(String(ledger.last_dispatch_at ?? ""));
     if (ledger.state === "non_attempt" || ledger.state === "send_refused") {
@@ -1570,7 +1584,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // RECORD BEFORE SEND (CHANGE-30): the in-flight record is written FIRST, without the goal text, so no send is ever
     // unrecorded. If even that write is refused, nothing is sent: a send this tick cannot record is a send the next
     // tick would repeat (the 455-a-day loop). A crash between this write and the send settles through the existing
-    // no_dispatch_id path (lost past the staleness bound), so the record is safe to leave.
+    // send_pending path (OUTCOME recovers it as a send never confirmed), so the record is safe to leave. The record
+    // before the send is send_pending, never goal_dispatched: goal_dispatched is written only with its dispatch id.
     // PLACEMENT (law 11, compose-placement.ts): with no free local slot of the class this compose is admitted as (a
     // supply compose is never armed: feature_compose's composeArmed), a peer that composes the vessel, sees the row,
     // admits the targets and has a free slot takes it. Decided before the record, so the record names where it went.
@@ -1579,7 +1594,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (placed) console.log(`[gap-check-supply] ${id}: placed on ${placed.node}: ${placed.why}`);
     const { goal: _priorGoal, not_before: _priorNotBefore, placed_by: _priorPlacedBy, placement: _priorPlacement, ...ledgerRest } = ledger;
     void _priorGoal; void _priorNotBefore; void _priorPlacedBy; void _priorPlacement;
-    const intent: Ledger = { ...ledgerRest, state: "goal_dispatched", attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
+    const intent: Ledger = { ...ledgerRest, state: SEND_PENDING, attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
       baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: placed ? placed.node : localNode, dispatch_host: placed ? placed.via : GOAL_HOST_ENDPOINT,
       ...(placed ? { placed_by: localNode, placement: placed.why } : {}), reason: "", outcome: {}, history: settledHistory(ledger) };
     const arm = { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "treatment" };
@@ -1592,13 +1607,13 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       // is this side's timeout, not the holder's refusal: five rows were left at goal_dispatched with no dispatch id
       // and no goal for a send that never happened. Nothing was sent, so if the store now holds THIS pass's in-flight
       // record it is put back as it was read; if it does not, nothing is written (the store has no conditional write,
-      // and a write here could only race a late intent). Either way an intent that lands late cannot stay: OUTCOME
-      // settles a goal_dispatched row with no dispatch id as dispatch_lost (no_dispatch_id) past dispatch_stale_hours.
+      // and a write here could only race a late intent). Either way an intent that lands late cannot stay: the next
+      // pass's OUTCOME recovers a send_pending record as the non-attempt it is (send_unconfirmed), never as lost.
       const reread = await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never);
       const stored = ledgerOf(metaOf((((reread.body ?? {}) as { gaps?: Row[] }).gaps ?? [])[0] ?? {}));
-      if (stored.state === "goal_dispatched" && !nonEmpty(stored.dispatch_id) && stored.last_dispatch_at === nowIso) {
+      if (stored.state === SEND_PENDING && !nonEmpty(stored.dispatch_id) && stored.last_dispatch_at === nowIso) {
         const back = await writeMeta(row, { check_supply: ledger });
-        console.warn(`[gap-check-supply] ${id}: the unsent in-flight record had landed; ${back.shape === "structuredError" ? "it could not be put back, so the no_dispatch_id bound settles it" : "put back as read"}`);
+        console.warn(`[gap-check-supply] ${id}: the unsent in-flight record had landed; ${back.shape === "structuredError" ? "it could not be put back, so the next pass recovers it as unconfirmed" : "put back as read"}`);
       }
       continue;
     }
@@ -1623,11 +1638,21 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       continue;
     }
     const dispatchId = ((r.body ?? {}) as { dispatch_id?: string | null }).dispatch_id ?? null;
+    // A SEND THE GOAL-HOST ANSWERED WITH NO ID IS NEVER RECORDED IN FLIGHT: its outcome could never be read. It is a
+    // failed send, refused and logged with what was sent; goal_dispatched is written only with an id.
+    if (!nonEmpty(dispatchId)) {
+      refused += 1;
+      const reason = "dispatch failed: send_without_id: the goal-host accepted the goal and answered no dispatch id, so its outcome cannot be read";
+      skipped.push({ id, reason });
+      console.warn(`[gap-check-supply] ${id}: ${reason}`);
+      await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason, goal, outcome: { send_failed: true, no_dispatch_id: true }, non_attempt_streak: 0 } });
+      continue;
+    }
     dispatched.push({ id, goal, dispatch_id: dispatchId });
-    const sent: Ledger = { ...intent, dispatch_id: dispatchId, goal };
+    const sent: Ledger = { ...intent, state: "goal_dispatched", dispatch_id: dispatchId, goal };
     const w = await writeMeta(row, { ...arm, check_supply: sent });
     // The full record (with the goal text) refused: keep the dispatch id at least, so its outcome stays readable.
-    if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, dispatch_id: dispatchId } });
+    if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, state: "goal_dispatched", dispatch_id: dispatchId } });
   }
 
   // A localized gap is work done this tick (I1), graded as a dispatch is.

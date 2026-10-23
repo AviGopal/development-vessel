@@ -12,8 +12,8 @@
 // persists the accrued staleness, so the family's due clock moves only by the debit itself. Each pass logs one
 // `[check-supply] bookkeeping: …` line ("0 due" when it found nothing). Per cause, one row each:
 //   - an ordinary pending outcome the goal-host reports failed settles BY VERDICT on the first undue pass;
-//   - a dispatch that recorded no id settles past dispatch_stale_hours as dispatch_lost (lost_why no_dispatch_id),
-//     debited once, and is re-dispatch eligible;
+//   - a dispatch that recorded no id is recovered on the first pass as the unconfirmed send it is (a non-attempt, not
+//     charged), never settled as lost, and is re-dispatch eligible;
 //   - a dispatch another node sent is never probed or written here (inside foreign_stale_hours); the sending node's
 //     own undue pass settles it;
 //   - a class2 row sited at its own check (the live row's stored shape) is un-armed, with no rhythm write at all.
@@ -258,7 +258,7 @@ describe("an undue pass does the bookkeeping and dispatches nothing (the live rh
     expect(debits()).toBe(1);
   });
 
-  it("[MUST-FAIL] NO DISPATCH ID, past dispatch_stale_hours: an undue pass settles it dispatch_lost (no_dispatch_id), debited once; a due pass past the backoff re-sends it", async () => {
+  it("[MUST-FAIL] NO DISPATCH ID, past dispatch_stale_hours: an undue pass recovers it as an unconfirmed send (non_attempt, not charged), never dispatch_lost; a due pass past its wait re-sends it", async () => {
     const now = Date.parse("2030-03-01T00:00:00.000Z");
     rhythms = [liveRhythm(now)];
     const id = T("gcsb-noid");
@@ -267,12 +267,10 @@ describe("an undue pass does the bookkeeping and dispatches nothing (the live rh
     await seed(id, "noid", { check_supply: sent, gap_check_supply_arm: "treatment" });
     const body = await tick(now);
     const led = ledgerOf(await storeRow(id));
-    expect(led["state"]).toBe("dispatch_lost");
-    expect((led["outcome"] as Row)["lost_why"]).toBe("no_dispatch_id");
-    expect(String(led["reason"])).toStartWith("no_dispatch_id:");
+    expect(led["state"]).toBe("non_attempt");
+    expect(String(led["reason"])).toStartWith("send_unconfirmed:");
+    expect(led["attempts"]).toBe(0);
     expect(body["dispatch"]).toBe("undue");
-    expect(debits()).toBe(1);
-    expect(settledKeys()).toEqual([supply.settledAttemptKey(id, sent)]);
     expect(goals.length).toBe(0);
     // re-dispatch eligible: once the family is due and the attempt's backoff (24 h) has passed, it is sent again
     const later = now + 30 * H;
@@ -281,8 +279,8 @@ describe("an undue pass does the bookkeeping and dispatches nothing (the live rh
     expect(goals.filter((g) => g.variables?.["gap_id"] === id).length).toBe(1);
     const again = ledgerOf(await storeRow(id));
     expect(again["state"]).toBe("goal_dispatched");
-    expect(again["attempts"]).toBe(2);
-    expect(((again["history"] ?? []) as Row[]).some((h) => h["state"] === "dispatch_lost")).toBe(true);
+    expect(again["attempts"]).toBe(1);
+    expect(String(again["dispatch_id"])).toStartWith(`d-${RUN}-sent-`);
   });
 
   it("[MUST-FAIL] DISPATCHED BY ANOTHER NODE: this node's undue pass neither probes nor writes it; the sending node's own undue pass settles it by verdict", async () => {

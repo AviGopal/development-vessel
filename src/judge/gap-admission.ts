@@ -825,8 +825,11 @@ export function targetedComposeExclusion(gap: Record<string, unknown>, pointer: 
   return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", verdict: "REFUSED", reason: key, exclusion: exclusion.reason, gap_id: gap.id, non_attempt: true } };
 }
 
-/** The compose node that owns `vessel`: the one feature_compose producer whose composeOwnership
- *  lists it. Null when discovery is unreadable or when zero or several producers claim it. */
+/** A compose node that owns `vessel`: a feature_compose producer whose composeOwnership lists it. Null when discovery
+ *  is unreadable or no producer claims it. SEVERAL OWNERS (REALIGNMENT §4, law 11; user ruling "(B) Several owners,
+ *  lease-serialized"): with more than one claimant the first by vesselId is returned (a stable choice, not a race on
+ *  which answered first); any owner may compose the gap, and the gap-store holder's per-gap landing lease
+ *  (substrate-gap.ts LANDING LEASE) serialises their landings, so two owners never both land one gap. */
 export async function findComposeOwner(vessel: string): Promise<{ vesselId: string; url: string } | null> {
   try {
     const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -857,7 +860,7 @@ export async function findComposeOwner(vessel: string): Promise<{ vesselId: stri
         if (Array.isArray(owned) && owned.map(String).includes(vessel)) owners.push({ vesselId: String(r.vesselId ?? url), url });
       } catch { /* a producer that does not answer claims nothing */ }
     }));
-    return owners.length === 1 ? owners[0]! : null;
+    return owners.sort((a, b) => a.vesselId.localeCompare(b.vesselId))[0] ?? null;
   } catch {
     return null;
   }
@@ -1420,8 +1423,8 @@ export async function armDecomposition(
 }
 
 /** THE DIRECTED OWNER ROUTE, extracted from resolveGapToFeatureOnce: a targeted, not-yet-forwarded gap on a vessel
- *  this node does not own goes to the one node that does. Returns that owner (the residue forwards), or null to
- *  compose here. The log lines are the original's. */
+ *  this node does not own goes to a node that does (findComposeOwner: with several owners, the first by vesselId).
+ *  Returns that owner (the residue forwards), or null to compose here. The log lines are the original's. */
 export async function directedOwnerRoute(gap: Record<string, unknown>, pointer: { gap_id?: string }): Promise<{ vesselId: string; url: string } | null> {
   const forwardedFrom = (pointer as { forwarded_from?: string }).forwarded_from;
   if (pointer.gap_id && !forwardedFrom) {

@@ -2,7 +2,8 @@
 // uncovered #8). A targeted pointer (gap_id) that was not itself forwarded, for a gap whose vessel this node does not
 // own (it owns at least one), asks discovery for the feature_compose producers and each for its composeOwnership.
 // Exactly one claimant gets the pointer forwarded with forwarded_from, and its answer is returned with routed_to.
-// Zero or several claimants mean the gap composes here. An owned vessel, a forwarded pointer, or an empty owned set
+// Zero claimants mean the gap composes here; several (amended to the ruled rule, "(B) Several owners,
+// lease-serialized") are forwarded to the first by vesselId. An owned vessel, a forwarded pointer, or an empty owned set
 // never forwards.
 //
 // Driven through resolveGapToFeature with a stored row and a fixture clone root (owned set = clones with .git);
@@ -119,7 +120,7 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
     expect(writesFor(id)).toEqual([]);
   });
 
-  for (const [tag, owners] of [["no-claimant", 0], ["two-claimants", 2]] as const) {
+  for (const [tag, owners] of [["no-claimant", 0]] as const) {
     it(`[PIN] ${tag}: composes here, with the "no single owner" line`, async () => {
       ownClones(OWNED);
       const id = gapAt(tag, OTHER);
@@ -135,6 +136,23 @@ describe("a directed gap for a vessel another node owns is forwarded to that one
       expect((result.body as Row).verdict).toBe("BUSY");
     });
   }
+
+  // AMENDED (user ruling "Amend the pin to the ruled rule"; ruling "(B) Several owners, lease-serialized"): two claimants
+  // are two owners. The gap goes to one of them, the first by vesselId, and the landing lease serialises their landings.
+  it(`[PIN] two-claimants: forwarded to one owner (the first by vesselId); nothing composed here`, async () => {
+    ownClones(OWNED);
+    const id = gapAt("two-claimants", OTHER);
+    routeProducers([{ vesselId: "b-node", endpoint: "http://127.0.0.1:18964", owns: [OTHER] }, { vesselId: "a-node", endpoint: "http://127.0.0.1:18963", owns: [OTHER] }]);
+    const { result, lines } = await directed(id);
+    expect(lines).toContain(`[gap-to-feature] directed ${id} routed by ownership → a-node (${OTHER} is not owned here)`);
+    expect(lines.some((l) => l.includes("no single owner"))).toBe(false);
+    expect(hitsOf("discovery feature_compose").length).toBe(1);
+    expect(hitsOf("forward a-node").length).toBe(1);
+    expect(hitsOf("forward b-node").length).toBe(0);
+    expect(calls.compose.length).toBe(0);
+    expect((result.body as Row).routed_to).toBe("a-node");
+    expect(writesFor(id)).toEqual([]);
+  });
 
   for (const [tag, setup, extra] of [
     ["owned-target", () => ownClones(OWNED, OTHER), {}],

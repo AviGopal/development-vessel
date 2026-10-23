@@ -1490,8 +1490,14 @@ export function checkArmingProblem(evidenceResolve: unknown): ArmingProblem | nu
 }
 
 
-/** Write a classification onto a row's metadata: the write seam's stamp, and the birth sweep's re-classification. */
-function stampFalsifierClassification(merged: Record<string, unknown>, c: FalsifierClassification): void {
+/** The fields a classification stamps onto a row (beside falsifier_classified_at): the classification as stored. */
+const FALSIFIER_STAMP_FIELDS = ["falsifier", "falsifier_position", "falsifier_mode", "falsifier_unadvertised_shape", "falsifier_unresolvable_reason"] as const;
+
+/** Write a classification onto a row's metadata: the write seam's stamp, and the birth sweep's re-classification.
+ *  `prior` is the stored row's metadata before this write: when the classification it carries is the one stamped now,
+ *  its falsifier_classified_at is kept, so the stamp says when the classification last changed, never when the row was
+ *  last written (every read-modify-write re-classifies). */
+function stampFalsifierClassification(merged: Record<string, unknown>, c: FalsifierClassification, prior?: Record<string, unknown>): void {
   merged["falsifier"] = c.falsifier;
   if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
   else delete merged["falsifier_position"];
@@ -1503,7 +1509,9 @@ function stampFalsifierClassification(merged: Record<string, unknown>, c: Falsif
   // of unresolvable rows could not tell an inert predicate from a mis-addressed read.
   if (c.unresolvable_reason) merged["falsifier_unresolvable_reason"] = c.unresolvable_reason;
   else delete merged["falsifier_unresolvable_reason"];
-  merged["falsifier_classified_at"] = c.classified_at;
+  const priorAt = prior?.["falsifier_classified_at"];
+  const unchanged = typeof priorAt === "string" && priorAt !== "" && FALSIFIER_STAMP_FIELDS.every((k) => JSON.stringify(merged[k]) === JSON.stringify(prior?.[k]));
+  merged["falsifier_classified_at"] = unchanged ? priorAt : c.classified_at;
 }
 
 /**
@@ -2115,7 +2123,7 @@ async function reclassifyByResponseContract(gaps: Array<Record<string, unknown>>
       const c = row ? wanted(row as unknown as Record<string, unknown>) : null; // re-decided on the row as stored now
       if (!row || !c) continue;
       const meta = (row.classification_metadata ?? {}) as Record<string, unknown>;
-      stampFalsifierClassification(meta, c);
+      stampFalsifierClassification(meta, c, { ...meta });
       if (c.falsifier === "class2") {
         meta["predicate_birth_key"] = class2PredicateKey(meta);
         meta["predicate_birth_verdict"] = "unknown";
@@ -3263,7 +3271,7 @@ async function resolveSubstrateGapWriteInner(
     // verdict is a label on the data, not a correction of it; silently mutating a
     // caller's metadata is how the field-name mismatches in this store became
     // invisible in the first place.
-    stampFalsifierClassification(merged, c);
+    stampFalsifierClassification(merged, c, priorMetaForBirth);
     // BIRTH EVALUATION: decided here, run after the save (see applyBirthStamp).
     birthJob = applyBirthStamp(gap.id, String(gap.status ?? "open"), c.falsifier, merged, priorMetaForBirth, opts?.birthVerdict, now, opts?.detectedSha);
     gap.classification_metadata = merged;

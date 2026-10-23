@@ -15,7 +15,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "../resolvers/types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, DETECTOR_ROW_UNARMABLE_REASON, type MintedBirthVerdict } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, DETECTOR_ROW_UNARMABLE_REASON, DETECTOR_READING_FIELD, type MintedBirthVerdict } from "../resolvers/substrate-gap.js";
 import { isDissentChild, dissentChildCheckRefusal } from "../resolvers/feature-compose.js";
 import { testTitleInSource } from "../resolvers/retry-evidence.js";
 import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
@@ -410,6 +410,10 @@ export async function admitActionableGaps(
     return r.clean;
   };
 
+  // The needs_information drain's writes this pass, and the rows it unparked (one counted line below).
+  let drainLifts = 0;
+  const drained: string[] = [];
+
   const MAX_ADMITTED_PER_EDIT_SITE_PER_CYCLE = 2;
   const admittedPerEditSite = new Map<string, number>();
   // vessel -> push_scope_refused reason, or null when the landing gate allows it (this pass only).
@@ -475,9 +479,27 @@ export async function admitActionableGaps(
     // waived the edit-site requirement only: it must still be open, armed and unheld (452 sited, unarmed recommit
     // children were admitted on 2026-10-03 by the old "site OR armed" rule).
     // The predicate and its exemptions live in composeAdmissionExclusion, which the targeted entry calls too.
+    // THE needs_information DRAIN (see detectorParkDrain): a row parked for a fact it now carries is unparked here, in
+    // the pass that sees the fact, so the predicate below judges it as it stands; one still missing it stays parked,
+    // and its exclusion says what it awaits.
+    let parkNote = "";
+    {
+      const park = detectorParkDrain(meta);
+      if (park && park.liftable && drainLifts >= NEEDS_INFORMATION_DRAIN_MAX_PER_PASS) parkNote = "; parked: drain deferred, pass budget spent";
+      else if (park && park.liftable) {
+        drainLifts++;
+        const refused = await liftDetectorPark(g, park.because);
+        if (refused) parkNote = `; parked: lift not written (${refused})`;
+        else {
+          meta.disposition = "";
+          if (g.classification_metadata === undefined && g.metadata === undefined) g.classification_metadata = meta;
+          drained.push(id);
+        }
+      } else if (park) parkNote = `; parked awaiting ${park.awaits}`;
+    }
     {
       const exclusion = composeAdmissionExclusion(g);
-      if (exclusion) { excluded.push({ id, reason: exclusion.reason }); continue; }
+      if (exclusion) { excluded.push({ id, reason: parkNote ? exclusion.reason.replace(/\)$/, `${parkNote})`) : exclusion.reason }); continue; }
     }
     // AUTONOMY SCOPE (contained-self-development 1.2). Admission is the autonomous path, so a gap
     // whose edit site is in the lane core is refused here, before any draft. Directed goals never
@@ -760,6 +782,10 @@ export async function admitActionableGaps(
     for (const g of ungroundable) excluded.push({ id: String(g.id ?? ""), reason: "no_groundable_target" });
   }
 
+  if (drained.length) {
+    const drainedAdmitted = drained.filter((d) => admitted.some((a) => String(a.id ?? "") === d)).length;
+    console.log(`[gap-admission] needs_information drain: ${drained.length} parked row(s) unparked (detector check confirmed), ${drainedAdmitted} admitted this pass: ${drained.slice(0, 5).join(", ")}`);
+  }
   if (excluded.length) {
     const byReason: Record<string, number> = {};
     for (const e of excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
@@ -797,6 +823,58 @@ export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: C
   // One line per refusal, so its effect can be counted after it lands.
   if (skip === "edit_site_is_own_check") console.log(`[check-supply] refused ${id}: ${reason.replace("(", " (")}`);
   return { skip, reason };
+}
+
+/**
+ * THE needs_information DRAIN (gap row needs-information-is-the-dominant-admission-exclusion-and-nothing-drains-it-so-
+ * the-lane-cannot-reduce-what-it-cannot-admit; REALIGNMENT §2.2, law 8). Most needs_information exclusions are
+ * recomputed on every pass from the row as it stands (composeAdmissionExclusion: unarmed, no_edit_site), so a row that
+ * gains its falsifier or its site is admitted on the next pass with nothing to drain; a siteless armed row is sited by
+ * gap-check-supply's own localizer. The one that never drained is a stored LABEL: the write seam parks a new detector
+ * row it arms from its own reading (substrate-gap.ts, evidence_resolve_from detector_reading) disposition
+ * needs_information, "so it is armed later and never admitted on an unconfirmed check". Nothing ever lifted it, and the
+ * label made every other reader skip the row too: admission held it, and gap-check-supply's tick (which would site it)
+ * passes over any parking disposition. So the fact the park waited for arrived (the check's birth verdict) and the row
+ * stayed parked forever.
+ *
+ * A park is drained here only when the row says why it was parked and that the reason is gone:
+ *   - it is the seam's detector-reading park: disposition needs_information with evidence_resolve_from
+ *     detector_reading, and no human or operator mark beside it (operator_hold, operator_routing, an auto-revert
+ *     escalation or hold, a released landing): those are a human's to lift, and are never drained;
+ *   - its check is CONFIRMED: falsifier class2 and a birth verdict of "present" taken on this very check
+ *     (predicate_birth_key equals class2PredicateKey). Pending, unknown, absent, or a verdict on another check leaves
+ *     it parked, and its exclusion names what it awaits.
+ * Lifting writes disposition "" (the store carries an omitted key forward) beside a needs_information_drained record,
+ * through the seam, open rows only. The predicate then judges the row as it stands in the same pass: a sited row is
+ * admitted now; a siteless one is excluded no_edit_site, which is the input gap-check-supply's localizer takes.
+ * Returns null for a row this drain does not own.
+ */
+export const NEEDS_INFORMATION_DRAIN_MAX_PER_PASS = 20;
+export function detectorParkDrain(meta: Record<string, unknown>): { liftable: true; because: string } | { liftable: false; awaits: string } | null {
+  if (meta.disposition !== "needs_information" || meta.evidence_resolve_from !== DETECTOR_READING_FIELD) return null;
+  const marked = (v: unknown): boolean => v !== undefined && v !== null && v !== "" && v !== false;
+  if (meta.operator_hold === true || marked((meta.operator_routing as { files?: unknown } | undefined)?.files) || marked(meta.auto_revert_escalation) || marked(meta.auto_revert_hold) || marked(meta.pending_released)) return null;
+  const rawFalsifier = meta.falsifier as unknown;
+  const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+  if (falsifierClass !== "class2") return { liftable: false, awaits: `a class2 check (falsifier=${falsifierClass || "unset"})` };
+  const verdict = meta.predicate_birth_verdict;
+  if (verdict === undefined || verdict === null || verdict === "") return { liftable: false, awaits: "a confirmed check: no birth verdict" };
+  if (meta.predicate_birth_key !== class2PredicateKey(meta)) return { liftable: false, awaits: "a confirmed check: the birth verdict describes a different check" };
+  if (verdict !== "present") return { liftable: false, awaits: `a confirmed check: birth verdict ${String(verdict)}` };
+  return { liftable: true, because: "its detector_reading check read present at birth" };
+}
+
+/** The drain's one write: lift the detector park on an open row. Null when written; otherwise why not. */
+async function liftDetectorPark(g: Record<string, unknown>, because: string): Promise<string | null> {
+  const drainedMeta = { disposition: "", needs_information_drained: { from: "needs_information", because, at: new Date().toISOString() } };
+  try {
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { id: g.id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: "open", classification_metadata: drainedMeta } } as never);
+    if (w?.shape === "structuredError") return `refused: ${JSON.stringify(w.body).slice(0, 120)}`;
+    if ((w?.body as { action?: unknown } | undefined)?.action === "skipped") return "skipped";
+    return null;
+  } catch (err) {
+    return `threw: ${String((err as Error)?.message ?? err).slice(0, 120)}`;
+  }
 }
 
 // NON_COMPOSE_ROUTE_CATEGORIES lives in gap-eligibility (a leaf module the write seam already reads, so its detector

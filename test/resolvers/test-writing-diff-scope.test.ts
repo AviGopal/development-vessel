@@ -229,9 +229,16 @@ describe("test-writing compose: the diff is confined to the gap's one check file
   // gap's check file a test_writing compose's only write target (feature-compose-test-writing-write-scope.test.ts). Every
   // read must match exactly one named site, so any other new read is red even if the count were to stay put.
   const WRITE_SCOPE_SITE = 'const testWritingScope = (await import("./check-supply-admission.js")).testWritingWriteScope((pointer as { compose_mode?: unknown }).compose_mode, pointer.gap?.id, gapMeta, composedTargets);\n  const targetFiles = testWritingScope ? testWritingScope.targets : composedTargets;';
-  test("[MUST-FAIL] compose_mode is READ only by the two R3 gates, the verify's one testWritingMode read and the target-list write-scope read (besides the entry delete and the admission write)", () => {
+  // ONE MORE NAMED SITE (qa 2026-10-24): operator commit 0d939cd6 (10-23, "judge a test-writing compose by its contract,
+  // not the fix standard") passes the compose's mode to the semantic gate (verifyPatchAddressesGap's testWriting
+  // argument), whose predicate reads it twice off that argument: in test_writing mode, when the written paths are only
+  // the gap's check and judgeTestWritingCheck held (red at the parent), the LLM fix-standard judge is skipped. A
+  // legitimate reader; named here by its exact text, so it is not a widening.
+  const SEMANTIC_GATE_ARG_SITE = "testWriting: {\n          compose_mode: (pointer as { compose_mode?: unknown }).compose_mode,";
+  const SEMANTIC_GATE_PREDICATE = "if (tw.compose_mode === csa.CHECK_SUPPLY_COMPOSE_MODE && j?.ok === true && tw.written_paths.length > 0 && csa.testWritingDiffOutsideTests(tw.compose_mode, [...tw.written_paths], tw.gap_id).length === 0) {";
+  test("[MUST-FAIL] compose_mode is READ only by the two R3 gates, the verify's one testWritingMode read, the target-list write-scope read and the semantic gate's test-writing argument and predicate (besides the entry delete and the admission write)", () => {
     const sites = [...FC.matchAll(/\.compose_mode\b/g)].map((m) => FC.slice(Math.max(0, m.index! - 80), m.index! + 80));
-    expect(sites.filter((s) => s.includes("testWritingDiffOutsideTests(")).length).toBe(2);
+    expect(sites.filter((s) => s.includes("testWritingDiffOutsideTests((pointer")).length).toBe(2);
     expect(sites.filter((s) => s.includes("const testWritingMode = (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("delete (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE")).length).toBe(1);
@@ -240,11 +247,19 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     const scopeAt = FC.indexOf(WRITE_SCOPE_SITE) + WRITE_SCOPE_SITE.indexOf(".compose_mode");
     const reads = [...FC.matchAll(/\.compose_mode\b/g)].map((m) => m.index!);
     expect(reads.filter((i) => i === scopeAt).length).toBe(1);
+    // The semantic gate's sites (0d939cd6): the argument read, once; the predicate's two reads of that argument, once.
+    expect(FC.split(SEMANTIC_GATE_ARG_SITE).length - 1).toBe(1);
+    expect(FC.split(SEMANTIC_GATE_PREDICATE).length - 1).toBe(1);
+    const argAt = FC.indexOf(SEMANTIC_GATE_ARG_SITE) + SEMANTIC_GATE_ARG_SITE.lastIndexOf(".compose_mode");
+    const predAt = FC.indexOf(SEMANTIC_GATE_PREDICATE);
+    const inPredicate = (i: number): boolean => i > predAt && i < predAt + SEMANTIC_GATE_PREDICATE.length;
+    expect(reads.filter((i) => i === argAt).length).toBe(1);
+    expect(reads.filter(inPredicate).length).toBe(2);
     const named = (i: number): boolean => {
       const s = FC.slice(Math.max(0, i - 80), i + 80);
-      return i === scopeAt || ["testWritingDiffOutsideTests(", "const testWritingMode = (pointer", "delete (pointer", "compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE"].some((a) => s.includes(a));
+      return i === scopeAt || i === argAt || inPredicate(i) || ["testWritingDiffOutsideTests((pointer", "const testWritingMode = (pointer", "delete (pointer", "compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE"].some((a) => s.includes(a));
     };
     expect(reads.filter((i) => !named(i)).map((i) => FC.slice(Math.max(0, i - 80), i + 80))).toEqual([]);
-    expect(sites.length).toBe(6);
+    expect(sites.length).toBe(9);
   });
 });

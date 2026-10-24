@@ -2677,21 +2677,26 @@ async function recordOrphanSiblingRefusal(g: Record<string, unknown>, sha: strin
  * the gap's region, so its green after 7e897a99 measured nothing about the fix. A check-supply check on a row with no
  * literal region is judged at arm by the region gate (gap-check-supply.ts regionMutantGate, recorded as
  * check_supply.mutation_gate.region_gate): a close on its green now requires that gate measured and passed. An
- * "unmeasured" reading (no derivable region, or a run that measured nothing) closes on today's rules and says so in
- * the close record. A check armed without the gate, or refused by it, does not close the row. Rows whose check is not
+ * "unmeasured" reading (no derivable region, or a run that measured nothing) FAILS CLOSED (qa 2026-10-24): nothing
+ * showed that check depends on the region, so its green is not a fixed_elsewhere measurement. The row stays open,
+ * staged own_green_region_gate_unmeasured with the reading; its measured close paths (the sweep's landing verdict, a
+ * predicate) are unchanged. A check armed without the gate, or refused by it, does not close the row. Rows whose check is not
  * check supply's, or that carry a literal region (no region gate, by design), close as before. The source label is the
  * check supply's CHECK_SUPPLY_SOURCE, written here as its value: this evaluator file does not import the supply.
  */
-export function regionGateAtClose(meta: Record<string, unknown>): { allow: true; record: string | null } | { allow: false; reason: string } {
+export function regionGateAtClose(meta: Record<string, unknown>): { allow: true; record: string | null } | { allow: false; stage: string; reason: string } {
   if (String(meta.predicate_source ?? "") !== "gap_check_supply") return { allow: true, record: null };
   if (String(meta.region ?? "").trim() !== "") return { allow: true, record: null };
   const cs = (meta.check_supply ?? null) as { mutation_gate?: { region_gate?: Record<string, unknown> } } | null;
   const rg = cs && typeof cs === "object" ? cs.mutation_gate?.region_gate : undefined;
-  if (rg && typeof rg.decided === "string" && rg.decided.startsWith("unmeasured")) return { allow: true, record: rg.decided };
+  if (rg && typeof rg.decided === "string" && rg.decided.startsWith("unmeasured")) {
+    const stage = `own_green_region_gate_unmeasured: ${rg.decided.slice(0, 160)}`;
+    return { allow: false, stage, reason: `${stage}: nothing showed the row's own check depends on the gap's region, so its green on the parent is not a fixed_elsewhere measurement` };
+  }
   if (rg && Number(rg.measured) > 0 && Number(rg.changed) > 0) return { allow: true, record: "passed" };
-  return { allow: false, reason: rg
-    ? "own_green_region_gate_refused: the row's own check was refused by the region gate at arm, so its green does not measure the gap"
-    : "own_green_region_gate_not_run: the row's own check was armed without the region gate, so its green on the parent does not show the gap's region was fixed" };
+  return rg
+    ? { allow: false, stage: "own_green_region_gate_refused", reason: "own_green_region_gate_refused: the row's own check was refused by the region gate at arm, so its green does not measure the gap" }
+    : { allow: false, stage: "own_green_region_gate_not_run", reason: "own_green_region_gate_not_run: the row's own check was armed without the region gate, so its green on the parent does not show the gap's region was fixed" };
 }
 
 /** Exported for tests. A green-on-parent refusal with a commit that fixed the check's subject since the gap's
@@ -2714,8 +2719,8 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     if (staleFix) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${staleFix.reason} (${fix0!.sha.slice(0, 12)} landed ${staleFix.committed_at ?? "unknown"}, re-detected ${staleFix.redetected_at})`);
     const fix1 = staleFix ? null : fix0;
     const region = fix1 ? regionGateAtClose(m0) : null;
-    const regionHeld = region && !region.allow ? region.reason : null;
-    if (regionHeld) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${regionHeld}`);
+    const regionHeld = region && !region.allow ? region : null;
+    if (regionHeld) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${regionHeld.reason}`);
     const fix = regionHeld ? null : fix1;
     const regionRecord = region && region.allow && region.record ? { region_gate: region.record } : {};
     if (fix) {
@@ -2731,7 +2736,7 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     }
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300),
       ...(held ? { stage: held.stage, instrument_commit: held.instrument_commit, instrument_files: held.files.slice(0, 10) } : {}),
-      ...(regionHeld ? { stage: regionHeld.slice(0, regionHeld.indexOf(":")), detail: regionHeld, fixed_by: fix1!.sha } : {}) } } } } as never);
+      ...(regionHeld ? { stage: regionHeld.stage, detail: regionHeld.reason, fixed_by: fix1!.sha } : {}) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
 }
 

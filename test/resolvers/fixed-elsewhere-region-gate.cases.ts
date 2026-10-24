@@ -4,7 +4,7 @@
 // whose red was a request-validation 400 that never depended on the gap's region: armed before the arm step's region
 // gate, its mutation_gate record carries no region_gate. markTerminalRefusal now refuses that close (the row stays
 // open, own_check_green_on_parent naming the stage). A check whose region gate measured and passed closes; an
-// "unmeasured" gate closes on today's rules and the close record says so; a row with a literal region, or whose check
+// "unmeasured" gate fails closed (qa 2026-10-24: open, staged own_green_region_gate_unmeasured); a row with a literal region, or whose check
 // is not check supply's, closes as before. Driven against the real (temp) gap store and a real temp git clone, as
 // terminal-refusal-fixed-elsewhere.cases.ts.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -118,10 +118,13 @@ describe("markTerminalRefusal: a fixed_elsewhere close on a check-supply check n
     expect(m["falsifier_exercise"]).toMatchObject({ verdict: "absent", passed: true, fixed_by: fix, region_gate: "passed" });
   });
 
-  it("[CONTROL] an unmeasured region gate (no derivable region) closes on today's rules; the close record says unmeasured", async () => {
-    const { r } = await fixedElsewhere("unmeasured", armed({ ...CDB_MUTATION_GATE, region_gate: { decided: "unmeasured: no region" } }));
-    expect(r["status"]).toBe("closed");
-    expect((metaOf(r)["falsifier_exercise"] as Row)["region_gate"]).toBe("unmeasured: no region");
+  it("[MUST-FAIL] an unmeasured region gate (no derivable region) FAILS CLOSED: green on parent, not closed fixed_elsewhere", async () => {
+    const { r, fix } = await fixedElsewhere("unmeasured", armed({ ...CDB_MUTATION_GATE, region_gate: { decided: "unmeasured: no region" } }));
+    const m = metaOf(r);
+    expect({ status: r["status"], closed_reason: m["closed_reason"] ?? null }).toEqual({ status: "open", closed_reason: null });
+    const marker = m["own_check_green_on_parent"] as Row;
+    expect(marker["stage"]).toBe("own_green_region_gate_unmeasured: unmeasured: no region");
+    expect(marker["fixed_by"]).toBe(fix);
   });
 
   it("[CONTROL] a literal-region row, or a row whose check is not check supply's, closes as before (no region_gate on the record)", async () => {

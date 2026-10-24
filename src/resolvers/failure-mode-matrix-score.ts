@@ -1,11 +1,11 @@
-import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT, FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readdir, readFile, writeFile, mkdir, symlink, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 export interface FailureModeMatrixScorePointer {
   type: "failure_mode_matrix_score";
-  scenarios_dir: string;      // relative to WORKSPACE_ROOT or absolute
+  scenarios_dir: string;      // absolute, or relative to WORKSPACE_ROOT; default FAILURE_MODE_SCENARIOS_DIR
   label?: string;             // cycle tag, e.g. "cycle-9-auto"
   out_path?: string;          // optional disk write of the report (relative or absolute)
 }
@@ -47,6 +47,16 @@ async function discoverByShapes(
   }
 }
 
+/**
+ * Resolve scenarios_dir: an absolute path as given, a relative one against WORKSPACE_ROOT.
+ * Omitted, or the template placeholder left uninterpolated (literal "{{scenarios_dir}}"), it is the
+ * volume queue FAILURE_MODE_SCENARIOS_DIR the bridge writes, not a path under the super-repo clone.
+ */
+export function resolveScenariosDir(raw: string | undefined): string {
+  if (!raw || raw === "{{scenarios_dir}}") return FAILURE_MODE_SCENARIOS_DIR;
+  return raw.startsWith("/") ? raw : join(WORKSPACE_ROOT, raw);
+}
+
 export async function resolveFailureModeMatrixScore(
   pointer: FailureModeMatrixScorePointer,
 ): Promise<ResolverResult> {
@@ -54,16 +64,7 @@ export async function resolveFailureModeMatrixScore(
   const label = pointer.label ?? `auto-${Date.now()}`;
   const generatedAt = new Date().toISOString();
 
-  // Resolve scenarios_dir (support absolute or relative to WORKSPACE_ROOT).
-  // Default to "validation/failure-modes/scenarios" when omitted or when the
-  // template placeholder was not interpolated (literal "{{scenarios_dir}}").
-  const rawScenariosDir =
-    !pointer.scenarios_dir || pointer.scenarios_dir === "{{scenarios_dir}}"
-      ? "validation/failure-modes/scenarios"
-      : pointer.scenarios_dir;
-  const scenariosDir = rawScenariosDir.startsWith("/")
-    ? rawScenariosDir
-    : join(WORKSPACE_ROOT, rawScenariosDir);
+  const scenariosDir = resolveScenariosDir(pointer.scenarios_dir);
 
   // Read all scenario JSON files
   let files: string[] = [];

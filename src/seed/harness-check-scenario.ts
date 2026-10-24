@@ -1,4 +1,5 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 
 /**
  * harness-check-scenario — scores a single failure-mode scenario against
@@ -28,7 +29,7 @@ export const HARNESS_CHECK_SCENARIO_TEMPLATE: ActivityTemplate = {
   variables: [
     {
       name: "scenario_path",
-      description: "Path to the scenario JSON file (e.g. validation/failure-modes/scenarios/fp-11.json)",
+      description: `Path to the scenario JSON file (e.g. ${FAILURE_MODE_SCENARIOS_DIR}/fp-11.json)`,
     },
     {
       name: "out_path",

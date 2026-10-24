@@ -49,7 +49,11 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("gap_to_scenario_bridge scaffold dispatch", () => {
   it("bridge-run-goal-key the vessel-authoring dispatch to goal-host carries this vessel's ApiKey", async () => {
-    await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" } as never);
+    await resolveGapToScenarioBridge({
+      type: "gap_to_scenario_bridge",
+      scenarios_dir: join(root, "validation", "failure-modes", "scenarios"),
+      vessel_scenarios_dir: join(root, "validation", "failure-modes", "vessel-scenarios"),
+    } as never);
     expect(runGoal.length).toBe(1);
     if (METABOB_API_KEY) expect(runGoal[0]!.authorization).toBe(`ApiKey ${METABOB_API_KEY}`);
     else expect(runGoal[0]!.authorization).toBeNull();

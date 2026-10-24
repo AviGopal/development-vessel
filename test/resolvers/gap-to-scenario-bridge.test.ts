@@ -8,6 +8,8 @@ const testRoot = join(tmpdir(), `dev-vessel-bridge-${Date.now()}`);
 const gapsPath = join(testRoot, "gaps", "gaps.json");
 const scenariosDir = join(testRoot, "validation", "failure-modes", "scenarios");
 const vesselScenariosDir = join(testRoot, "validation", "failure-modes", "vessel-scenarios");
+// The bridge's default dirs are the /workspace volume queues; a test names its own.
+const DIRS = { type: "gap_to_scenario_bridge" as const, scenarios_dir: scenariosDir, vessel_scenarios_dir: vesselScenariosDir };
 
 function seed(gaps: unknown[]): void {
   rmSync(testRoot, { recursive: true, force: true });
@@ -66,7 +68,7 @@ describe("gap_to_scenario_bridge resolver", () => {
         status: "open",
       },
     ]);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const r = await resolveGapToScenarioBridge({ ...DIRS });
     expect(r.shape).toBe("bridgeResult");
     const body = r.body as { scenarios_written: number; scenarios: Array<{ gap_id: string }> };
     expect(body.scenarios_written).toBe(2);
@@ -86,9 +88,9 @@ describe("gap_to_scenario_bridge resolver", () => {
     seed([
       { id: "gap-X", category: "auto", source: "operator_seed", summary: "x", status: "open" },
     ]);
-    const first = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const first = await resolveGapToScenarioBridge({ ...DIRS });
     expect((first.body as { scenarios_written: number }).scenarios_written).toBe(1);
-    const second = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const second = await resolveGapToScenarioBridge({ ...DIRS });
     const body = second.body as { scenarios_written: number; gaps_skipped_existing: number };
     expect(body.scenarios_written).toBe(0);
     expect(body.gaps_skipped_existing).toBe(1);
@@ -104,7 +106,7 @@ describe("gap_to_scenario_bridge resolver", () => {
       // a genuinely DISTINCT class must still be written
       { id: "dispatch-target-drift-1781427111111", category: "architectural_pattern", source: "substrate_detected", summary: "distinct", status: "open" },
     ]);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const r = await resolveGapToScenarioBridge({ ...DIRS });
     const body = r.body as { created: number; skipped_class_duplicate: number };
     expect(body.created).toBe(2); // one catalogue-bloat + one dispatch-target-drift
     expect(body.skipped_class_duplicate).toBe(2); // the two extra bloat dupes
@@ -117,7 +119,7 @@ describe("gap_to_scenario_bridge resolver", () => {
       { id: "closed", category: "x", source: "operator_seed", summary: "y", status: "closed" },
       { id: "bad-source", category: "x", source: "drafter_emitted", summary: "y", status: "open" },
     ]);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const r = await resolveGapToScenarioBridge({ ...DIRS });
     const body = r.body as { scenarios: Array<{ gap_id: string }> };
     expect(body.scenarios.map((s) => s.gap_id)).toEqual(["open-ok"]);
     // CONTROL: no vessel-authoring gap, no dispatch
@@ -133,7 +135,7 @@ describe("gap_to_scenario_bridge resolver", () => {
       status: "open",
     }));
     seed(gaps);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge", limit: 2 });
+    const r = await resolveGapToScenarioBridge({ ...DIRS, limit: 2 });
     expect((r.body as { scenarios_written: number }).scenarios_written).toBe(2);
     expect(readdirSync(scenariosDir).length).toBe(2);
   });
@@ -151,7 +153,7 @@ describe("gap_to_scenario_bridge resolver", () => {
       { id: "tq-4", category: "trace_quality", source: "substrate_detected", summary: "noise 4", status: "open", created_at: "2026-06-01T00:00:03Z" },
       { id: "rd-1", category: "resolver_distribution", source: "substrate_detected", summary: "rd gap", status: "open", created_at: "2026-06-02T00:00:00Z" },
     ]);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge", limit: 3 });
+    const r = await resolveGapToScenarioBridge({ ...DIRS, limit: 3 });
     const body = r.body as {
       scenarios_written: number;
       scenarios: Array<{ gap_id: string }>;
@@ -188,7 +190,7 @@ describe("gap_to_scenario_bridge resolver", () => {
       // a normal recombination gap alongside it
       { id: "drift-1", category: "detector_drift", source: "operator_seed", summary: "drift", status: "open" },
     ]);
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const r = await resolveGapToScenarioBridge({ ...DIRS });
     const body = r.body as {
       created: number;
       scenarios_written: number;
@@ -238,9 +240,9 @@ describe("gap_to_scenario_bridge resolver", () => {
       classification_metadata: { gap_subtype: "vessel_demand", shape: "foo", template_count: 3 },
     };
     seed([gap]);
-    const first = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const first = await resolveGapToScenarioBridge({ ...DIRS });
     expect((first.body as { vessel_authoring_scenarios_written: number }).vessel_authoring_scenarios_written).toBe(1);
-    const second = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const second = await resolveGapToScenarioBridge({ ...DIRS });
     const body = second.body as { vessel_authoring_scenarios_written: number; gaps_skipped_existing: number };
     expect(body.vessel_authoring_scenarios_written).toBe(0);
     expect(body.gaps_skipped_existing).toBe(1);
@@ -251,7 +253,7 @@ describe("gap_to_scenario_bridge resolver", () => {
   it("returns empty result when gaps file is missing", async () => {
     rmSync(testRoot, { recursive: true, force: true });
     process.env["WORKSPACE_ROOT"] = testRoot;
-    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const r = await resolveGapToScenarioBridge({ ...DIRS });
     expect(r.shape).toBe("bridgeResult");
     expect((r.body as { scenarios_written: number }).scenarios_written).toBe(0);
   });

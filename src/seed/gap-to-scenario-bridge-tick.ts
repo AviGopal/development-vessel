@@ -5,7 +5,8 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  *
  * Single-task wrapper around gap_to_scenario_bridge. Reads open substrateGap
  * rows from WORKSPACE_ROOT/gaps/gaps.json and writes corresponding scenario
- * JSON files into WORKSPACE_ROOT/validation/failure-modes/scenarios/ so the
+ * JSON files into the volume queue /workspace/validation/failure-modes/scenarios/
+ * (FAILURE_MODE_SCENARIOS_DIR) so the
  * existing file-polling draft-gap-closing-activity drafter naturally absorbs
  * detector-emitted and operator-seeded gaps.
  *

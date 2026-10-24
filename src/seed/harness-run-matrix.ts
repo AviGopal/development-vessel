@@ -1,4 +1,5 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 
 export const HARNESS_RUN_MATRIX_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:harness-run-matrix",
@@ -17,8 +18,8 @@ export const HARNESS_RUN_MATRIX_TEMPLATE: ActivityTemplate = {
     {
       name: "scenarios_dir",
       description:
-        "Path to directory containing scenario JSON files (relative to WORKSPACE_ROOT or absolute). " +
-        "Default: validation/failure-modes/scenarios",
+        "Path to directory containing scenario JSON files (absolute, or relative to WORKSPACE_ROOT). " +
+        `Default: ${FAILURE_MODE_SCENARIOS_DIR}`,
     },
     {
       name: "label",

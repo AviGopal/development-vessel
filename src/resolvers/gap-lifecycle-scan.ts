@@ -3,7 +3,7 @@ import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
-import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
+import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT, FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 
 // Read at call time, not module load, so tests can override WORKSPACE_ROOT —
 // same accessor shape substrate-gap.ts uses for the store this resolver reads.
@@ -302,10 +302,7 @@ async function dispatchScenario(gap: {
   classification_metadata?: { scenario?: string };
   [key: string]: unknown;
 }): Promise<ReprobeResult> {
-  const scenariosDir = path.resolve(
-    import.meta.dir,
-    "../../validation/failure-modes/scenarios"
-  );
+  const scenariosDir = FAILURE_MODE_SCENARIOS_DIR;
 
   // Resolve scenario name from gap metadata
   const scenarioName: string | undefined =

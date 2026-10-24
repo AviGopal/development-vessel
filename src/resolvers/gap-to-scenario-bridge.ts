@@ -3,7 +3,8 @@
  *
  * Detector-derived substrateGap impulses land in WORKSPACE_ROOT/gaps/gaps.json,
  * but draft-gap-closing-activity reads scenario JSON files from
- * WORKSPACE_ROOT/validation/failure-modes/scenarios/<id>.json. Without a
+ * FAILURE_MODE_SCENARIOS_DIR (/workspace/validation/failure-modes/scenarios/<id>.json, the
+ * volume root, not the super-repo clone at WORKSPACE_ROOT). Without a
  * bridge, the drafter never absorbs operator-seeded or detector-emitted gaps.
  *
  * This resolver scans gaps.json for status=="open" gaps with source in
@@ -20,7 +21,7 @@ if (gap.carry_no_capability_shape) { return; }
  * Companion seed template: gap-to-scenario-bridge-tick (single-task wrapper).
  */
 
-import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
+import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT, FAILURE_MODE_SCENARIOS_DIR, FAILURE_MODE_VESSEL_SCENARIOS_DIR } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, mkdir, access } from "node:fs/promises";
 import { join } from "node:path";
@@ -134,14 +135,22 @@ async function existingClasses(dir: string): Promise<Set<string>> {
   return set;
 }
 
+/** Where the bridge writes: the pointer's dirs, else the volume queues the drafter and scaffolder read. */
+export function bridgeScenarioDirs(
+  pointer: Pick<GapToScenarioBridgePointer, "scenarios_dir" | "vessel_scenarios_dir">,
+): { scenariosDir: string; vesselScenariosDir: string } {
+  return {
+    scenariosDir: pointer.scenarios_dir ?? FAILURE_MODE_SCENARIOS_DIR,
+    vesselScenariosDir: pointer.vessel_scenarios_dir ?? FAILURE_MODE_VESSEL_SCENARIOS_DIR,
+  };
+}
+
 export async function resolveGapToScenarioBridge(
   pointer: GapToScenarioBridgePointer,
 ): Promise<ResolverResult> {
   const root = workspaceRoot();
   const gapsPath = pointer.gaps_path ?? join(root, "gaps", "gaps.json");
-  const scenariosDir = pointer.scenarios_dir ?? join(root, "validation", "failure-modes", "scenarios");
-  const vesselScenariosDir =
-    pointer.vessel_scenarios_dir ?? join(root, "validation", "failure-modes", "vessel-scenarios");
+  const { scenariosDir, vesselScenariosDir } = bridgeScenarioDirs(pointer);
   const limit = Math.min(Math.max(pointer.limit ?? 10, 1), 100);
 
   let gaps: GapRow[] = [];

@@ -98,6 +98,17 @@ export const CONCEPT_DB_ENDPOINT = env("CONCEPT_DB_ENDPOINT", "http://127.0.0.1:
 export const WORKSPACE_ROOT = env("WORKSPACE_ROOT", process.cwd());
 
 /**
+ * The container volume root. Runtime state the substrate rewrites (scenario queues among it) lives
+ * here, not under WORKSPACE_ROOT, which the env file points at the super-repo clone: a file the
+ * substrate rewrites is not a file git should carry.
+ */
+export const VOLUME_ROOT = "/workspace";
+/** The failure-mode scenario queue: the bridge writes it, the drafter, harness and reprobe read it. */
+export const FAILURE_MODE_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-modes/scenarios`;
+/** The vessel-authoring scenario queue (missing_capability gaps). */
+export const FAILURE_MODE_VESSEL_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-modes/vessel-scenarios`;
+
+/**
  * Full configuration block. The `discovery.shapes` array is the single source
  * of truth for the vessel's advertised shape contract — `scripts/check-shape-dispatch.ts`
  * (via `bun run lint`) verifies every entry has a matching `case` in
@@ -564,7 +575,7 @@ export const config = {
       "sourceCodeAnalysis",
       // Gap → drafter input-boundary bridge (Break 1, 2026-06-04).
       // Reads substrateGap rows from WORKSPACE_ROOT/gaps/gaps.json and writes
-      // scenario JSON files into WORKSPACE_ROOT/validation/failure-modes/scenarios/
+      // scenario JSON files into FAILURE_MODE_SCENARIOS_DIR (/workspace/validation/failure-modes/scenarios/)
       // so the file-polling draft-gap-closing-activity absorbs operator-seeded +
       // substrate-detected gaps without changing the drafter's input contract.
       "gap_to_scenario_bridge",

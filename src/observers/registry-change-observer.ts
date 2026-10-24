@@ -1,4 +1,4 @@
-import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT, GOAL_HOST_VESSEL_ENDPOINT, FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 import { resolveDispatch } from "../routes/impulses.js";
 import { join } from "node:path";
 
@@ -16,7 +16,7 @@ export type RunActivityFn = (
   variables?: Record<string, string>,
 ) => Promise<void>;
 
-const DEFAULT_SCENARIOS_DIR = join(WORKSPACE_ROOT, "validation/failure-modes/scenarios");
+export const DEFAULT_SCENARIOS_DIR = FAILURE_MODE_SCENARIOS_DIR;
 
 function todayLabel(): string {
   return new Date().toISOString().split("T")[0] ?? "";

@@ -895,6 +895,12 @@ export interface ReachabilityFact {
   callerCount: number;        // call-sites in the touched vessel's src/, excluding the definition
   isEntrypoint: boolean;      // exported entrypoint / route handler / resolver dispatch case / lifecycle hook
   reachable: boolean;         // callerCount > 0 OR isEntrypoint
+  /**
+   * The top-level symbol enclosing each counted caller line (enclosingTopLevelSymbol), or null when the line sits at
+   * module scope or could not be placed. Optional: absent, the fact is read as before. Present, draftReachability
+   * discounts every caller enclosed by the symbol itself or by another symbol this draft added that is not live.
+   */
+  callerScopes?: Array<string | null>;
 }
 
 export interface SemanticGateVerdict {
@@ -1368,7 +1374,68 @@ export function changesAreTestOnly(diff: string): boolean {
   return paths.every((p) => /\.(test|spec|stories)\.tsx?$|\.(stories|test|spec)\.(js|jsx|ts|tsx)$/.test(p));
 }
 
-export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boolean; reason: string } {
+/**
+ * The top-level declaration whose body holds line `lineNo` (1-based) of `fileText`, or null at module scope.
+ *
+ * The caller line itself may be the declaration (a one-line function). Otherwise walk upward: the first column-0
+ * function/const/let/var/class/interface/enum declaration encloses it. Reaching a column-0 closing brace or any other
+ * column-0 statement first (`app.post(...)`, `registry.set(...)`, `describe(...)`) means the line runs at module scope,
+ * which is null: a real caller. Blank and comment lines are skipped. Unknown is null too, so an unplaceable caller is
+ * counted exactly as it was before.
+ */
+export function enclosingTopLevelSymbol(fileText: string, lineNo: number): string | null {
+  const lines = String(fileText ?? "").split("\n");
+  if (!Number.isInteger(lineNo) || lineNo < 1 || lineNo > lines.length) return null;
+  const declRe = /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|const|let|var|class|interface|enum)\s+([A-Za-z_$][\w$]*)\b/;
+  const own = lines[lineNo - 1]!;
+  const ownDecl = own.match(declRe);
+  if (ownDecl) return ownDecl[1]!;
+  if (/^\S/.test(own)) return null;
+  for (let i = lineNo - 2; i >= 0; i--) {
+    const l = lines[i]!;
+    if (!/^\S/.test(l)) continue;
+    if (/^(?:\/\/|\/\*|\*)/.test(l)) continue;
+    const d = l.match(declRe);
+    return d ? d[1]! : null;
+  }
+  return null;
+}
+
+/**
+ * Reachability of the symbols a draft added, with the draft's own references taken out.
+ *
+ * The callers grep strips definition lines only, so a recursive call inside a function's body counted as its caller,
+ * and a symbol called only by another added symbol nobody calls counted as live. 81c9d93e landed that way: parse /
+ * command / oracle added together, command and oracle called by nothing, parse called only by itself, so the gate saw
+ * one reachable symbol, did not hard-fail, and the LLM judge's addresses:true admitted dead code.
+ *
+ * For each added fact carrying callerScopes: a caller enclosed by the symbol itself, or by another added symbol, is not
+ * a caller unless that symbol is live. Live = at least one caller outside the draft's added symbols, then the fixpoint
+ * through added callers. Every other fact is returned unchanged. Recomputed from callerCount and callerScopes, never
+ * from the incoming `reachable`, so applying it twice gives the same facts.
+ */
+export function draftReachability(facts: ReachabilityFact[]): ReachabilityFact[] {
+  const added = new Set(facts.filter((f) => f.isNewFunction && Array.isArray(f.callerScopes)).map((f) => f.symbol));
+  if (added.size === 0) return facts;
+  const live = new Set<string>();
+  const external = (f: ReachabilityFact): boolean => {
+    const scopes = f.callerScopes ?? [];
+    if (f.callerCount > scopes.length) return true;
+    return scopes.some((s) => s === null || !added.has(s));
+  };
+  for (const f of facts) if (added.has(f.symbol) && external(f)) live.add(f.symbol);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const f of facts) {
+      if (!added.has(f.symbol) || live.has(f.symbol)) continue;
+      if ((f.callerScopes ?? []).some((s) => s !== null && s !== f.symbol && live.has(s))) { live.add(f.symbol); changed = true; }
+    }
+  }
+  return facts.map((f) => (added.has(f.symbol) ? { ...f, reachable: live.has(f.symbol) } : f));
+}
+
+export function reachabilityHardFail(rawFacts: ReachabilityFact[]): { hardFail: boolean; reason: string } {
+  const facts = draftReachability(rawFacts);
   if (facts.length === 0) return { hardFail: false, reason: "no changed symbols extracted from diff (not a hard-fail)" };
   const reachable = facts.filter((f) => f.reachable);
   if (reachable.length === 0 || facts.some((f) => f.isNewFunction && f.callerCount === 0 && !f.isEntrypoint)) {
@@ -1378,9 +1445,11 @@ export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boo
     }
 
     const names = facts.map((f) => f.symbol).join(", ");
+    const selfOnly = facts.filter((f) => f.callerCount > 0).map((f) => f.symbol);
     return {
       hardFail: true,
-      reason: `dead-code-only patch: every changed symbol (${names}) has zero callers and is not an entrypoint — the change cannot execute`,
+      reason: `dead-code-only patch: every changed symbol (${names}) has zero callers and is not an entrypoint — the change cannot execute`
+        + (selfOnly.length > 0 ? `; ${selfOnly.join(", ")} is referenced only from its own body or from another symbol this patch added, and a self-reference is not a caller` : ""),
     };
   }
   return { hardFail: false, reason: `${reachable.length}/${facts.length} changed symbols reachable` };
@@ -10044,12 +10113,29 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Reachability facts: for each changed symbol, grep the touched vessels' src/
       // for call-sites (excluding the definition) + classify as entrypoint.
       const symbols = extractChangedSymbols(diff);
-      const facts: ReachabilityFact[] = [];
+      let facts: ReachabilityFact[] = [];
+      // Each caller line's enclosing top-level symbol (draftReachability): a reference from inside the symbol's own body,
+      // or from another symbol this draft added that nothing calls, is not a caller. A file that cannot be read places
+      // nothing, and an unplaced caller counts as before.
+      const callerFileText = new Map<string, string>();
+      const scopeOfCallerLine = async (line: string): Promise<string | null> => {
+        const m = line.match(/^(.+?):(\d+):/);
+        if (!m) return null;
+        const file = m[1]!;
+        if (!callerFileText.has(file)) {
+          let text = "";
+          try { text = await Bun.file(file).text(); } catch { /* unreadable: the caller stays unplaced */ }
+          callerFileText.set(file, text);
+        }
+        const text = callerFileText.get(file)!;
+        return text ? enclosingTopLevelSymbol(text, Number(m[2])) : null;
+      };
       for (const { symbol, isNewFunction } of symbols) {
         if (grepSymbol(symbol) === null) { console.log("[fc-reachability] a changed symbol that is not a plain identifier was dropped"); continue; }
         let callerCount = 0;
         let isEntrypoint = false;
         let codeHit = "";
+        const callerScopes: Array<string | null> = [];
         for (const v of touched) {
           const vAbs = vesselRoot(v);
           // REFERENCE-sites: any `\bSYMBOL\b` USE across src/, minus the definition
@@ -10067,7 +10153,12 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             cwd: REPO_ROOT,
           });
           const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
-          if (callOut) { callerCount += callOut.split("\n").filter(Boolean).length; codeHit ||= callOut.split("\n").slice(0, 4).join("\n"); }
+          if (callOut) {
+            const callerLines = callOut.split("\n").filter(Boolean);
+            callerCount += callerLines.length;
+            codeHit ||= callOut.split("\n").slice(0, 4).join("\n");
+            for (const l of callerLines) callerScopes.push(await scopeOfCallerLine(l));
+          }
           // Entrypoint: exported, OR a route/dispatch/lifecycle reference to the symbol.
           const entQ = await callTool(toolsEndpoint, "shell", {
             command: reachabilityEntrypointCommand(symbol, vAbs, true)!,
@@ -10075,9 +10166,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           });
           if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
         }
-        facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || (isEntrypoint && !isNewFunction) });
+        facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || (isEntrypoint && !isNewFunction), callerScopes });
         void codeHit;
       }
+      facts = draftReachability(facts);
 
       // SYMBOL-LESS IN-PLACE EDIT (2026-06-28): the patch defined no new top-level
       // symbol (e.g. a dedup guard inserted inside an existing dispatched loop), so

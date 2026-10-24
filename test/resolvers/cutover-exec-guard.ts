@@ -11,13 +11,21 @@
 // installCutoverExecGuard() wraps Bun.spawn, Bun.spawnSync and node:child_process spawn / exec /
 // execFile / fork and their sync forms (through bun's mock.module, under both "child_process" and
 // "node:child_process"). A command whose program, or any command word of a shell string, is one of
-// systemctl, docker, podman or vessel-ctl is BLOCKED (throws EPERM, nothing is executed) AND RECORDED,
+// systemctl, journalctl, docker, podman or vessel-ctl is BLOCKED (throws EPERM, nothing is executed) AND RECORDED,
 // unless the test declared a route for it, in which case the route's fake result is returned and
 // the call is recorded under `hits`. Recording matters: callers swallow spawn errors, so a throw
 // alone would let a test pass on a fail-open path. Every other command passes through unchanged.
 //
 // RESTORE IS NOT AUTOMATIC (same as the fs guard: mock.restore() does not undo mock.module). Call
 // restore() from afterEach and restoreCutoverExecModules() from afterAll.
+//
+// ALWAYS ON UNDER THE TEST RUNNER (2026-10-24). Each node's pull-sync gate runs the whole suite inside the
+// live container at install, so an opt-in guard left every file that did not opt in free to reach the live
+// init system (11 files did, read-only). test/preload.ts (bunfig.toml [test] preload) now installs this
+// guard for EVERY file through installPreloadExecGuard(), before any test file loads. That layer is the
+// BASELINE: a file's own installCutoverExecGuard() stacks on it, and restore() / restoreCutoverExecModules()
+// return to the baseline, never to the unguarded originals. A blocked spawn under the baseline throws and is
+// recorded; the preload's afterEach fails the test that recorded one (takePreloadExecViolations()).
 //
 // Scope, stated honestly: a child process (e.g. `bun --eval …`) is NOT covered; its own Bun.spawn is
 // a fresh, unguarded one. A test that spawns a child which may run a blocked tool must instead pass
@@ -29,7 +37,7 @@ const ORIG_CP: Record<string, any> = { ...realCp };
 const ORIG_SPAWN = Bun.spawn;
 const ORIG_SPAWN_SYNC = Bun.spawnSync;
 
-export const BLOCKED_PROGRAMS = ["systemctl", "docker", "podman", "vessel-ctl"] as const;
+export const BLOCKED_PROGRAMS = ["systemctl", "journalctl", "docker", "podman", "vessel-ctl"] as const;
 const BLOCKED_WORD = new RegExp(`(?:^|[\\s;&|()\`'"/=])(${BLOCKED_PROGRAMS.join("|")})(?=$|[\\s;&|)\`'"])`);
 
 /** The blocked program a command names (argv[0] basename, or a command word in a shell string), or null. */
@@ -55,13 +63,39 @@ const argvText = (cmd: unknown, args?: unknown): string => {
 };
 const stream = (s: string): ReadableStream<Uint8Array> => new Blob([s]).stream();
 
-/** Re-installs the real node:child_process, Bun.spawn and Bun.spawnSync. Idempotent; safe in afterAll. */
+// What restore returns to: the unguarded originals, or the preload's always-on guard once it is installed.
+let BASE_CP: Record<string, any> = ORIG_CP;
+let BASE_SPAWN: unknown = ORIG_SPAWN;
+let BASE_SPAWN_SYNC: unknown = ORIG_SPAWN_SYNC;
+let preloadGuard: ExecGuard | null = null;
+
+/** Re-installs the baseline node:child_process, Bun.spawn and Bun.spawnSync: the preload's guard when it is
+ *  installed, else the real ones. Idempotent; safe in afterAll. */
 export function restoreCutoverExecModules(): void {
-  mock.module("node:child_process", () => ORIG_CP);
-  mock.module("child_process", () => ORIG_CP);
-  (Bun as unknown as { spawn: unknown }).spawn = ORIG_SPAWN;
-  (Bun as unknown as { spawnSync: unknown }).spawnSync = ORIG_SPAWN_SYNC;
+  mock.module("node:child_process", () => BASE_CP);
+  mock.module("child_process", () => BASE_CP);
+  (Bun as unknown as { spawn: unknown }).spawn = BASE_SPAWN;
+  (Bun as unknown as { spawnSync: unknown }).spawnSync = BASE_SPAWN_SYNC;
 }
+
+/** The test preload's always-on layer (test/preload.ts): installs the guard with no routes and makes it the
+ *  baseline every restore returns to. Idempotent. */
+export function installPreloadExecGuard(): ExecGuard {
+  if (preloadGuard) return preloadGuard;
+  preloadGuard = installCutoverExecGuard();
+  BASE_CP = currentCp!;
+  BASE_SPAWN = Bun.spawn;
+  BASE_SPAWN_SYNC = Bun.spawnSync;
+  return preloadGuard;
+}
+/** The preload's guard, or null when this process runs without the preload. */
+export const preloadExecGuard = (): ExecGuard | null => preloadGuard;
+/** The blocked spawns the preload's guard recorded since the last take, cleared. A test that blocks one on
+ *  purpose takes it; the preload's afterEach takes the rest and fails the test that made them. */
+export function takePreloadExecViolations(): string[] {
+  return preloadGuard ? preloadGuard.violations.splice(0) : [];
+}
+let currentCp: Record<string, any> | null = null;
 
 export function installCutoverExecGuard(): ExecGuard {
   const routes: ExecRoute[] = [];
@@ -172,6 +206,7 @@ export function installCutoverExecGuard(): ExecGuard {
     return fakeChild(r);
   };
   CP["default"] = CP;
+  currentCp = CP;
   mock.module("node:child_process", () => CP);
   mock.module("child_process", () => CP);
 

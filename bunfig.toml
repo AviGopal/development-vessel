@@ -1,0 +1,4 @@
+[test]
+# Every file runs under the always-on guards (test/preload.ts): per-run TMPDIR, blocked host-lifecycle spawns,
+# blocked secret reads.
+preload = ["./test/preload.ts"]

@@ -171,10 +171,13 @@ describe("checks that expect an invented literal are refused at arm", () => {
     ];
     for (const [f, site, text] of cases) expect([f, supply.inventedLiteralRefusal(fixture(f), site, text)]).toEqual([f, null]);
   });
-  it("[CONTROL] what carries: a snake_case token or three words; single words and negated expectations are not read", () => {
+  it("[CONTROL] what carries: an identifier-like literal (snake_case or camelCase); prose, single words and negated expectations are not read", () => {
     const check = (lit: string, neg = false) => `import { expect, test } from "bun:test";\nimport * as mod from "../../src/x";\ntest("t", () => { expect(mod.f())${neg ? ".not" : ""}.toBe(${JSON.stringify(lit)}); });\n`;
     expect(supply.inventedLiteralRefusal(check("never_said_here"), "", "")?.reason).toContain("never_said_here");
-    expect(supply.inventedLiteralRefusal(check("three plain words"), "", "")).not.toBeNull();
+    // The phrase arm is dropped (option a): a correct check may expect the fix's NEW prose, which no site holds yet.
+    expect(supply.inventedLiteralRefusal(check("three plain words"), "", "")).toBeNull();
+    expect(supply.inventedLiteralRefusal(check("refused by containment"), "", "the walk reports containment-refused writes")).toBeNull();
+    expect(supply.inventedLiteralRefusal(check("neverSaidHere"), "", "")?.reason).toContain("neverSaidHere");
     expect(supply.inventedLiteralRefusal(check("skipped"), "", "")).toBeNull();
     expect(supply.inventedLiteralRefusal(check("never_said_here", true), "", "")).toBeNull();
     expect(supply.inventedLiteralRefusal(check("said_in_the_site"), "const x = \"said_in_the_site\";", "")).toBeNull();

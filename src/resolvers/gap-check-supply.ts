@@ -1133,8 +1133,10 @@ export function echoSatisfiableRefusal(checkSrc: string): { reason: string } | n
  * a reason no code writes and the gap never names. Its red is the invented value's, and a "fix" that writes that
  * string turns it green. Refused at arm, statically, as CHECK_EXPECTS_INVENTED_LITERAL_STAGE, when an expected string
  * literal of a toBe / toEqual / toMatchObject / toContain / toMatch assertion (in the matcher's argument, or in the
- * initializer of the const it names) carries a snake_case identifier or a phrase of three or more words, and occurs
- * in neither the edit-site source nor the gap's own text (summary, falsifier_spec, must_fail, control). A negated
+ * initializer of the const it names) is identifier-like (the whole literal a snake_case or camelCase name: a reason
+ * code, a field name), and occurs in neither the edit-site source nor the gap's own text (summary, falsifier_spec,
+ * must_fail, control). It is judged after the run, after the contract rule (contractMismatchRefusal) and the cast rule,
+ * so a literal the code's contract cannot return is named by the more specific contract refusal. A negated
  * assertion expects an absence and is not read. KNOWN LIMIT: a check whose expected outcome the gap's fix contradicts
  * (general inverted intent) has no deterministic gate; this catches only the invented-literal form of it.
  */
@@ -1168,7 +1170,10 @@ export function inventedLiteralRefusal(checkSrc: string, siteSrc: string | null,
     ts.forEachChild(n, visit);
   };
   visit(sf);
-  const carries = (l: string): boolean => /[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+/.test(l) || l.trim().split(/\s+/).filter(Boolean).length >= 3;
+  // IDENTIFIER-LIKE ONLY (coordinator default, option a, 2026-10-24): a reason code or field name, snake_case or
+  // camelCase, the whole literal. A prose phrase was read too: it refused a correct check expecting the fix's NEW
+  // message ("refused by containment"), which no site holds yet and the gap words differently.
+  const carries = (l: string): boolean => /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/.test(l) || /^[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*$/.test(l);
   const invented = expected.filter((l) => carries(l) && !siteSrc.includes(l) && !gapText.includes(l));
   if (invented.length === 0) return null;
   const shown = invented.slice(0, 3).map((l) => JSON.stringify(l.slice(0, 100))).join(", ");
@@ -1582,10 +1587,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const region = regionOf(meta);
     const regionSite = region && site.ok ? vesselReader.read(site.edit_site) : null;
     const misses = site.ok && regionSite !== null ? checkMissesRegionRefusal(regionSite, site.edit_site, src, region) : null;
-    // THE CHECK IS NOT ECHO-SATISFIABLE (echoSatisfiableRefusal), NOR DOES IT EXPECT AN INVENTED LITERAL
-    // (inventedLiteralRefusal): static, before anything runs.
+    // THE CHECK IS NOT ECHO-SATISFIABLE (echoSatisfiableRefusal): static, before anything runs. The gap's own text is
+    // kept for the invented-literal rule, judged after the run (gateReason below).
     const gapText = [row["summary"], meta["falsifier_spec"], meta["must_fail"], meta["control"]].filter((x) => typeof x === "string").join("\n");
-    const echo = misses ? null : echoSatisfiableRefusal(src) ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText) : null);
+    const echo = misses ? null : echoSatisfiableRefusal(src);
     if (echo) {
       refused += 1;
       notArmed.push({ id, reason: echo.reason });
@@ -1652,7 +1657,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
     const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
     const classified = verdict === "present" ? armRedReasonRefusal(redReason, titles) : null;
-    const gateReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? null : null;
+    const gateReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText)?.reason : null) ?? null : null;
     // Last, as the costliest: is the red about the edit site at all (EDIT-SITE MUTATION GATE)?
     const mutation = verdict === "present" && !gateReason && site.ok
       ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles, baseline: report, k: coverageKnobs(rhythm.body).k })

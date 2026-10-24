@@ -67,14 +67,14 @@ describe("topology chain dispatch (§4.2)", () => {
     }
   });
 
-  it("fires reachable_unlearned_report probe when unlearned total > 0", async () => {
+  it("runs reachable_unlearned_report once when unlearned total > 0 (the fan-out is the probe)", async () => {
     snapshotOverride = { untraversed_edges: [] };
     unlearnedOverride = { total: 3 };
     unknownOverride = { total: 0 };
     await runTopologyChain();
     const types = dispatchTypes();
-    // Should have reachable_unlearned_report called at least twice (base + probe)
-    expect(types.filter((t) => t === "reachable_unlearned_report").length).toBeGreaterThanOrEqual(2);
+    // Exactly once: the fan-out's report is the probe's output (same input), not re-run.
+    expect(types.filter((t) => t === "reachable_unlearned_report").length).toBe(1);
   });
 
   it("fires learned_topology_snapshot probe when untraversed edges exist", async () => {
@@ -131,7 +131,7 @@ describe("topology chain dispatch (§4.2)", () => {
     unknownOverride = { total: 1 };
     await runTopologyChain();
     const types = dispatchTypes();
-    expect(types.filter((t) => t === "reachable_unlearned_report").length).toBeGreaterThanOrEqual(2);
+    expect(types.filter((t) => t === "reachable_unlearned_report").length).toBe(1);
     expect(types.filter((t) => t === "learned_topology_snapshot").length).toBeGreaterThanOrEqual(2);
     expect(types.filter((t) => t === "unknown_shape_report").length).toBeGreaterThanOrEqual(2);
   });

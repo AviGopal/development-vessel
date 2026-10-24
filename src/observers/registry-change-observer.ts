@@ -77,19 +77,13 @@ export async function runTopologyChain(): Promise<void> {
   ]);
 
   // Conditional probes
-  const unlearnedTotal = (unlearnedBody["total"] as number) ?? 0;
   const unknownTotal = (unknownBody["total"] as number) ?? 0;
   const untraversedEdges = (snapshotBody["untraversed_edges"] as unknown[]) ?? [];
 
   const probes: Promise<void>[] = [];
 
-  if (unlearnedTotal > 0) {
-    probes.push(
-      resolveDispatch({ type: "reachable_unlearned_report" }).catch((e: unknown) =>
-        console.error("[registry-observer] probe-reachable-unlearned failed:", e),
-      ).then(() => {}),
-    );
-  }
+  // No reachable-unlearned re-run: the probe's input is the fan-out's `{ type }` exactly and the report is read-only,
+  // so `unlearnedBody` above IS the probe's output (a non-zero `total` used to run the full catalogue scan twice).
 
   if (untraversedEdges.length > 0) {
     probes.push(
@@ -133,7 +127,8 @@ export async function runTopologyChain(): Promise<void> {
 //
 // Dedupe: per-(parent_execution_id, target_template_id) for 60s to absorb
 // repeat broadcasts (activity-api emits `execution_completed` once but the
-// observer reconnects on socket flap and the events can replay).
+// observer reconnects on socket flap and the events can replay). Before that,
+// the report itself runs at most once per window per probe template.
 
 const DISPATCH_DEDUPE_MS = 60_000;
 const recentDispatches = new Map<string, number>();
@@ -148,6 +143,18 @@ function shouldDispatch(parentExecutionId: string, targetTemplateId: string): bo
     const oldest = [...recentDispatches.entries()].sort((a, b) => a[1] - b[1]);
     for (const [k] of oldest.slice(0, 64)) recentDispatches.delete(k);
   }
+  return true;
+}
+
+// Last report run per probe template id (vessel-qualified, e.g. "development-vessel:probe-reachable-unlearned"), so
+// a burst of probe successes from one vessel runs that probe's report once per DISPATCH_DEDUPE_MS, not once per event.
+const recentProbeReports = new Map<string, number>();
+
+function reportWindowOpen(probeTemplateId: string): boolean {
+  const last = recentProbeReports.get(probeTemplateId);
+  const now = Date.now();
+  if (last !== undefined && now - last < DISPATCH_DEDUPE_MS) return false;
+  recentProbeReports.set(probeTemplateId, now);
   return true;
 }
 
@@ -204,6 +211,7 @@ async function pickTopTemplateForProbe(activityId: string): Promise<string | nul
  */
 export function _resetDispatchDedupe(): void {
   recentDispatches.clear();
+  recentProbeReports.clear();
 }
 
 export async function dispatchRecommendationForProbe(
@@ -214,6 +222,12 @@ export async function dispatchRecommendationForProbe(
   if (!activityId) return { dispatched: false, reason: "no activity_id" };
   if (!looksLikeProbe(activityId)) return { dispatched: false, reason: "not a probe" };
   if (!parentExecutionId) return { dispatched: false, reason: "no parent_execution_id" };
+
+  // Rate check BEFORE the report: the pick re-runs a full report (the reachable-unlearned one pages the whole template
+  // catalogue), so it runs at most once per dedupe window per probe template, across executions and replays alike.
+  if (!reportWindowOpen(activityId)) {
+    return { dispatched: false, reason: "deduped" };
+  }
 
   const rawTargetTemplateId = await pickTopTemplateForProbe(activityId);
   const targetTemplateId = stripRecordIdWrapping(rawTargetTemplateId ?? undefined);

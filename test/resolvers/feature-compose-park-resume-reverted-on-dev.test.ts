@@ -6,8 +6,12 @@
 // The resume now refuses with reason "proposal_reverted_on_dev" when the park's own landing (its Attempt-Id
 // trailer; with no attempt id, its `apply <gap>-compose-report via` subject) is on HEAD and every file it touched
 // reads at HEAD as it did before it.
-// MUST-FAIL: land -> revert -> resume is refused "proposal_reverted_on_dev" and never reaches the cutover.
-// CONTROL: a park whose proposal never landed resumes and lands on the base committed at HEAD.
+// ROOT CAUSE: the resume's freshness test drops a park only when its base has MOVED since parked_at. A revert
+// restores exactly the parked base, so reverting a parked landing is what re-arms its resume.
+// MUST-FAIL: park -> land -> revert restores the base -> resume is refused "proposal_reverted_on_dev" and never
+//            reaches the cutover; and ANY landing (pushed or host_sync_pending) deletes the park.
+// CONTROL: a park whose proposal never landed resumes and lands on the base committed at HEAD; a park whose cutover
+//          did not land is kept.
 //
 // Fixture and seams as feature-compose-park-resume-null-base.test.ts: an isolated runtime root, a recorded
 // cutover, a real bare origin and push clone, and no network.
@@ -28,11 +32,13 @@ const realCutover = await import("../../src/resolvers/vessel-mitosis-cutover.js"
 // `realCutover.resolveVesselMitosisCutover` reads the FAKE too, and restoring with it restores the mock.
 const REAL_CUTOVER = { ...realCutover };
 let cutoverCalls: Array<Record<string, unknown>> = [];
+const PUSHED = { applied: true, push_status: "pushed", new_git_sha: "f".repeat(40) };
+let nextCutoverBody: Record<string, unknown> = PUSHED;
 mock.module("../../src/resolvers/vessel-mitosis-cutover.js", () => ({
   ...realCutover,
   resolveVesselMitosisCutover: async (p: Record<string, unknown>) => {
     cutoverCalls.push(p);
-    return { shape: "cutoverApplied", body: { applied: true, push_status: "pushed", new_git_sha: "f".repeat(40) } };
+    return { shape: "cutoverApplied", body: nextCutoverBody };
   },
 }));
 const fc = await import("../../src/resolvers/feature-compose.js");
@@ -76,6 +82,7 @@ beforeEach(async () => {
   // at module load, which on a substrate node is the live store.
   process.env["GAP_STORE_ENDPOINT"] = "http://gap-store.fixture/resolve";
   cutoverCalls = [];
+  nextCutoverBody = PUSHED;
   shellCommands = [];
   // The resume's typecheck goes through the tools shell: answer it as a pass. Every other request
   // (gap store, concept-db) is answered unavailable, which the resume already tolerates.
@@ -126,18 +133,7 @@ async function setup(opts: { land: boolean; revert: boolean; attempt_id: string 
   git(seed, "commit", "-m", "B: base");
   git(seed, "remote", "add", "origin", origin);
   const gapId = "gap-park-reverted";
-  let landing: string | null = null;
-  if (opts.land) {
-    await put(seed, F, F_PARKED);
-    git(seed, "add", ".");
-    git(seed, "commit", "-m", `substrate-authored: apply ${gapId}-compose-report via mitosis cutover${opts.attempt_id ? `\n\nAttempt-Id: ${opts.attempt_id}` : ""}`);
-    landing = git(seed, "rev-parse", "HEAD");
-    if (opts.revert) git(seed, "revert", "--no-edit", "HEAD");
-  }
-  git(seed, "push", "-u", "origin", "dev");
-  const clone = join(ws, "git", "vessels", VESSEL);
-  await mkdir(join(ws, "git", "vessels"), { recursive: true });
-  git(ws, "clone", "-q", "-b", "dev", origin, clone);
+  // PARKED FIRST, on base B: the order the live sequence had (park -> land -> revert restores the base -> resume).
   const park = {
     gap_id: gapId,
     compose_id: `${VESSEL}-fc-test`,
@@ -150,6 +146,18 @@ async function setup(opts: { land: boolean; revert: boolean; attempt_id: string 
     attempt_id: opts.attempt_id,
   };
   await fc.writeParkedLanding(park as never);
+  let landing: string | null = null;
+  if (opts.land) {
+    await put(seed, F, F_PARKED);
+    git(seed, "add", ".");
+    git(seed, "commit", "-m", `substrate-authored: apply ${gapId}-compose-report via mitosis cutover${opts.attempt_id ? `\n\nAttempt-Id: ${opts.attempt_id}` : ""}`);
+    landing = git(seed, "rev-parse", "HEAD");
+    if (opts.revert) git(seed, "revert", "--no-edit", "HEAD");
+  }
+  git(seed, "push", "-u", "origin", "dev");
+  const clone = join(ws, "git", "vessels", VESSEL);
+  await mkdir(join(ws, "git", "vessels"), { recursive: true });
+  git(ws, "clone", "-q", "-b", "dev", origin, clone);
   const pointer = { type: "feature_compose", land: true, skip_push: true, gap: { id: gapId } };
   return { clone, park, pointer, landing, parkPath: fc.parkedLandingPath(gapId) };
 }
@@ -157,7 +165,7 @@ const exists = (p: string) => readFile(p).then(() => true, () => false);
 type Report = { body?: Record<string, unknown> } | null;
 
 describe("parked landing resume: a proposal already reverted on dev is refused, never re-landed", () => {
-  it("MUST-FAIL: land -> revert -> resume (same Attempt-Id) is refused proposal_reverted_on_dev", async () => {
+  it("MUST-FAIL: park -> land -> revert restores the parked base -> resume (same Attempt-Id) is refused proposal_reverted_on_dev", async () => {
     const s = await setup({ land: true, revert: true, attempt_id: "att-landed-then-reverted" });
     const r = (await resumeParkedLanding!(s.pointer, s.park, TOOLS)) as Report;
     expect({ cutover_called: cutoverCalls.length > 0, reason: r?.body?.["reason"] ?? null, ok: r?.body?.["ok"] ?? null })
@@ -189,5 +197,42 @@ describe("parked landing resume: a proposal already reverted on dev is refused, 
     const r = await resumeParkedLanding!(s.pointer, s.park, TOOLS);
     expect(r).toBeNull();
     expect(cutoverCalls.length).toBe(0);
+  });
+});
+
+describe("parked landing: ANY successful land deletes the park, so a landed proposal never stays resumable", () => {
+  it("MUST-FAIL: a resume whose cutover landed via host-sync (host_sync_pending + a sha) leaves no park", async () => {
+    const s = await setup({ land: false, revert: false, attempt_id: "att-host-sync" });
+    nextCutoverBody = { applied: true, push_status: "host_sync_pending", new_git_sha: "e".repeat(40) };
+    const r = (await resumeParkedLanding!(s.pointer, s.park, TOOLS)) as Report;
+    expect(cutoverCalls.length).toBe(1);
+    expect(await fc.readParkedLanding(s.park.gap_id)).toBeNull();
+    expect(r?.body?.["parked"]).toBe(false);
+  });
+
+  it("MUST-FAIL: the fresh compose deletes its park right after a cutover that landed, on the one landed definition", async () => {
+    const landedFn = (fc as unknown as { cutoverResultLanded?: (r: unknown) => boolean }).cutoverResultLanded;
+    expect(typeof landedFn).toBe("function");
+    expect(landedFn!({ push_status: "host_sync_pending", new_git_sha: "e".repeat(40) })).toBe(true);
+    expect(landedFn!({ push_status: "pushed", new_git_sha: "f".repeat(40) })).toBe(true);
+    expect(landedFn!({ push_status: "local_only", new_git_sha: "d".repeat(40) })).toBe(false);
+    expect(landedFn!({ refused: true, deferred: true, preserve_pending: true })).toBe(false);
+    const text = await readFile(new URL("../../src/resolvers/feature-compose.ts", import.meta.url), "utf8");
+    expect(text).toMatch(/cutovers\.push\(\{ vessel, result: cut\.body \}\);\s*\n\s*\/\/[^\n]*\n\s*if \(parkedAny && pointer\.gap\?\.id && cutoverResultLanded\(cut\.body\)\) await deleteParkedLanding/);
+  });
+
+  it("CONTROL: a resume whose cutover pushed leaves no park (as before)", async () => {
+    const s = await setup({ land: false, revert: false, attempt_id: "att-pushed" });
+    await resumeParkedLanding!(s.pointer, s.park, TOOLS);
+    expect(await fc.readParkedLanding(s.park.gap_id)).toBeNull();
+  });
+
+  it("CONTROL: a park whose cutover failed (commit local only, not handed to host-sync) is kept", async () => {
+    const s = await setup({ land: false, revert: false, attempt_id: "att-failed" });
+    nextCutoverBody = { applied: true, push_status: "local_only", new_git_sha: "d".repeat(40) };
+    const r = (await resumeParkedLanding!(s.pointer, s.park, TOOLS)) as Report;
+    expect(cutoverCalls.length).toBe(1);
+    expect((await fc.readParkedLanding(s.park.gap_id))?.attempt_id).toBe("att-failed");
+    expect(r?.body?.["parked"]).toBe(true);
   });
 });

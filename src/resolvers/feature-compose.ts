@@ -412,11 +412,12 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
     const r = (cut.body ?? {}) as Record<string, unknown>;
     await settleSemanticDissent(gapId, park.semantic_dissent, r);
     const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
-    if (pushed) {
-      await deleteParkedLanding(gapId);
-    } else {
+    // ANY landing spends the park (pushed or handed to host-sync), so a landed proposal never stays resumable.
+    const landed = cutoverResultLanded(r);
+    if (landed) await deleteParkedLanding(gapId);
+    if (!pushed) {
       await restoreLive();
-      console.log(`[feature-compose] cutover did not land - verified patch parked for ${gapId}`);
+      if (!landed) console.log(`[feature-compose] cutover did not land - verified patch parked for ${gapId}`);
     }
     // The same definition of "deferred" as a fresh compose's landing (CHANGE-30a): a resumed cutover that deferred
     // again is a non-attempt with its park kept, never UNFAVORABLE.
@@ -424,7 +425,7 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
     const resumedDeferred = resumedVerdict === "BUSY";
     return {
       shape: "featureComposeReport",
-      body: { ok: pushed, verdict: resumedVerdict, resumed_from: park.compose_id, parked: !pushed, ...(resumedDeferred ? { failure_kind: "environment", refuse_class: String(r["refuse_class"] ?? "deferred") } : {}), cutovers: [{ vessel: park.vessel, result: cut.body }] },
+      body: { ok: pushed, verdict: resumedVerdict, resumed_from: park.compose_id, parked: !landed, ...(resumedDeferred ? { failure_kind: "environment", refuse_class: String(r["refuse_class"] ?? "deferred") } : {}), cutovers: [{ vessel: park.vessel, result: cut.body }] },
     };
   } catch (err) {
     await restoreLive();
@@ -6677,6 +6678,15 @@ export function cutoverResultPushed(r: unknown): boolean {
   return o["push_status"] === "pushed" && typeof o["new_git_sha"] === "string" && String(o["new_git_sha"]).trim() !== "";
 }
 /**
+ * A cutover that LANDED its commit: pushed, or committed and handed to the host poller to push (host_sync_pending).
+ * Either way the commit is on its way to dev, so the park it came from is spent: a park kept past a landing is what a
+ * later revert re-arms (the revert restores the parked base, the resume's freshness check passes, and it re-lands).
+ */
+export function cutoverResultLanded(r: unknown): boolean {
+  const o = (r ?? {}) as Record<string, unknown>;
+  return (o["push_status"] === "pushed" || o["push_status"] === "host_sync_pending") && typeof o["new_git_sha"] === "string" && String(o["new_git_sha"]).trim() !== "";
+}
+/**
  * The landing verdict a compose takes from its cutovers when it asked to land (CHANGE-30a). Any push → keep the
  * draft's verdict. Nothing pushed and a cutover DEFERRED → "BUSY": a NON-ATTEMPT (isNonAttemptComposeResult), the
  * verified patch stays parked and the next compose for the gap resumes it; never UNFAVORABLE (that charged the
@@ -10865,6 +10875,8 @@ const earlyAttempt = await Promise.race([
         skip_push: pointer.skip_push ?? false,
       } as never);
       cutovers.push({ vessel, result: cut.body });
+      // THE PARK IS SPENT THE MOMENT ITS CUTOVER LANDS (pushed or host_sync_pending), not at the compose's exit.
+      if (parkedAny && pointer.gap?.id && cutoverResultLanded(cut.body)) await deleteParkedLanding(String(pointer.gap.id));
       if (pointer.gap?.id) await settleSemanticDissent(String(pointer.gap.id), semanticDissent, cut.body);
         try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
     }
@@ -11258,8 +11270,9 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
     const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
     return r.push_status === "pushed" && typeof r.new_git_sha === "string" && String(r.new_git_sha).trim() !== "";
   });
+  const anyCutoverLanded = cutovers.some((c) => cutoverResultLanded((c as Record<string, unknown>)?.result));
   if (parkedAny && pointer.gap?.id) {
-    if (anyCutoverPushed) await deleteParkedLanding(String(pointer.gap.id));
+    if (anyCutoverPushed || anyCutoverLanded) await deleteParkedLanding(String(pointer.gap.id));
     else console.log(`[feature-compose] cutover did not land — verified patch parked for ${pointer.gap.id}`);
   }
   // The same definition as the flip above (CHANGE-30a); with that flip in place this changes nothing, but a later
@@ -11281,7 +11294,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
     body: {
       ok: effectiveVerdict === "FAVORABLE",
       execution_id: emittedExecutionId,
-      parked: parkedAny && !anyCutoverPushed,
+      parked: parkedAny && !anyCutoverPushed && !anyCutoverLanded,
       verdict: effectiveVerdict,
       // A deferred landing names why (CHANGE-30a): the deferring cutover's own refuse_class, for the consumer that
       // classifies this as a non-attempt (goal-host's retryable return, check-supply's ledger).

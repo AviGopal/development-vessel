@@ -9575,6 +9575,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // ledger's is null exactly when the gap's own edit_site is unusable (another vessel, not in the clone, not src):
         // the goal then gave generic import guidance, and demanding that site here would be an incurable refusal.
         editSite: twLedger.edit_site ?? null,
+        region: twMeta.region,
         runs: csaV.TEST_WRITING_CHECK_RUNS,
         run: async (rel) => {
           const shT = await callTool(toolsEndpoint, "shell", {

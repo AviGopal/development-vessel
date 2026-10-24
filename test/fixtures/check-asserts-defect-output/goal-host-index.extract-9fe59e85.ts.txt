@@ -1,0 +1,24 @@
+// EXTRACT of goal-host-vessel src/index.ts at 9fe59e85 (the parent of 6c6d632), for the asserts-defect-output verify.
+// dispatchFailureReasons is :4851-4861 verbatim. The gap's region (:10384) is verbatim, inside _degenerateReason (:10233),
+// a local of runGoalAsPoolWalkBody (:8672); both are reduced to what the region needs. runGoalAs stands in for the
+// export that reaches it (fixture only).
+/** The distinct failure reasons of one dispatch, attempt 1 first: each walk-log HOLLOW or TRACE FAILED verdict, then the terminal reason. */
+export function dispatchFailureReasons(walkLog: readonly unknown[], finalReason: string | null | undefined): string[] {
+  const seen = new Set<string>(); const reasons: string[] = [];
+  for (const l of walkLog) {
+    const m = /(?:HOLLOW|TRACE FAILED) \u2014 (.+?)(?:; \u03b2|$)/.exec(String(l));
+    if (m && m[1]) { const k = m[1].trim().slice(0, 600); if (k && !seen.has(k)) { seen.add(k); reasons.push(k); } }
+  }
+  const fin = String(finalReason ?? "").trim().slice(0, 600);
+  if (fin && !seen.has(fin)) reasons.push(fin);
+  return reasons;
+}
+
+async function runGoalAsPoolWalkBody(r: unknown): Promise<string | null> {
+    const _degenerateReason = (r: unknown): string | null => {
+      if (r == null) return "the command produced no result";
+      return null;
+    };
+  return _degenerateReason(r);
+}
+export async function runGoalAs(r: unknown): Promise<string | null> { return runGoalAsPoolWalkBody(r); }

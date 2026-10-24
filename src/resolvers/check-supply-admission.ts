@@ -1518,12 +1518,83 @@ export function castCalleeRefusal(source: string, checkRel: string, reader: SrcR
   return { module: mod.rel, fn, reason: `${CONTRACT_MISMATCH_STAGE}:cast_callee:${fn}: the check calls ${fn} from ${mod.rel} through a cast to any / unknown (\`${text}\`), which erases the signature the call must match${params !== null ? ` (${fn} declares (${params.slice(0, 160)}))` : ""}, so a call that does not fit the contract typechecks and its red is not the defect's: call the typed export` };
 }
 
+/**
+ * A CHECK THAT ASSERTS THE DEFECT'S OWN OUTPUT IS NOT A FALSIFIER (2026-10-24). goal-host 6c6d632's check-supply check
+ * expected `toContain("the command produced no result")`: the literal the gap's region returns
+ * (`if (r == null) return "the command produced no result";`), the defect itself. It was red at the parent only because
+ * it called dispatchFailureReasons, which never reaches that region, with a fixture that function cannot parse (received
+ * ["Dispatch failed."]). The verify passed it (three identical assertion reds), and a later runtime rebinding that
+ * appends the literal turned it green and closed a child gap on it. Red at the parent is necessary, not sufficient: the
+ * verify must also read what the check EXPECTS. Refused, stage ASSERTS_DEFECT_OUTPUT_STAGE (`expects_region_output`), when
+ * the gap carries a region (classification_metadata.region, the literal grounding uses) that occurs exactly once in the
+ * edit site, and a failing assertion's Expected (bun's printout, a string) EQUALS a string literal the region returns or
+ * emits: a literal on the region's text in value position of a return, a throw, an arrow's expression body, or an
+ * argument of a console / log / warn / error / emit / write / send / push call (through parentheses, casts,
+ * conditionals, ?? / ||, array and object literals and `new`). A negated assertion (`.not.`, read off the failure's error
+ * line) asserts the fixed behaviour and is not refused. Whether what the check calls REACHES the region is not judged
+ * here: the same-file reachability the arm step uses (gap-check-supply.ts siteRegionSource) is outside the evaluator's
+ * import closure.
+ * Known limits (accepted): no region on the gap, a region not exactly once in the site, or an Expected that is not a
+ * string decides nothing; a template literal is no output literal; an Expected that is only a substring of the region's
+ * output is not refused.
+ */
+export const ASSERTS_DEFECT_OUTPUT_STAGE = "test_writing_check_asserts_defect_output";
+const EMIT_CALLEE = /(?:^console\.\w+|(?:^|\.)(?:log|warn|error|emit|write|send|push))$/;
+/** The string literals the region returns or emits (see ASSERTS_DEFECT_OUTPUT_STAGE), or null when the region is not exactly once in the site. */
+export function regionOutputLiterals(siteSrc: string, siteRel: string, region: string): { start: number; end: number; literals: string[] } | null {
+  const ts = loadTs();
+  const r = region.trim();
+  if (!ts || !r) return null;
+  const start = siteSrc.indexOf(r);
+  if (start < 0 || siteSrc.indexOf(r, start + r.length) >= 0) return null;
+  const end = start + r.length;
+  const sf = ts.createSourceFile(siteRel, siteSrc, ts.ScriptTarget.Latest, true, /\.tsx$/.test(siteRel) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const literals = new Set<string>();
+  const output = (lit: TS.Node): boolean => {
+    let n: TS.Node = lit;
+    for (let p = n.parent; p; n = p, p = p.parent) {
+      if (ts.isReturnStatement(p) || ts.isThrowStatement(p)) return true;
+      if (ts.isArrowFunction(p)) return p.body === n;
+      if (ts.isCallExpression(p)) return p.expression !== n && EMIT_CALLEE.test(p.expression.getText(sf).replace(/\s+/g, ""));
+      if (ts.isConditionalExpression(p)) { if (p.condition === n) return false; continue; }
+      if (ts.isBinaryExpression(p)) { const op = p.operatorToken.kind; if (op === ts.SyntaxKind.QuestionQuestionToken || op === ts.SyntaxKind.BarBarToken) continue; return false; }
+      if (ts.isPropertyAssignment(p)) { if (p.initializer === n) continue; return false; }
+      if (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isSatisfiesExpression(p) || ts.isNonNullExpression(p) || ts.isTypeAssertionExpression(p) || ts.isArrayLiteralExpression(p) || ts.isObjectLiteralExpression(p) || ts.isNewExpression(p)) continue;
+      return false;
+    }
+    return false;
+  };
+  const visit = (n: TS.Node): void => {
+    if (n.getEnd() <= start || n.getStart(sf) >= end) return;
+    if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.getStart(sf) >= start && n.getEnd() <= end && output(n)) literals.add(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return { start, end, literals: [...literals] };
+}
+/** The verify's refusal of a check that expects its gap region's own output (see ASSERTS_DEFECT_OUTPUT_STAGE). null = no refusal. */
+export function assertsDefectOutputRefusal(redReason: unknown, siteRel: string, siteSrc: string, region: string): { cause: "expects_region_output"; reason: string } | null {
+  const out = regionOutputLiterals(siteSrc, siteRel, region);
+  if (!out) return null;
+  const shown = region.trim().replace(/\s+/g, " ").slice(0, 160);
+  const rr = (redReason ?? {}) as { compared?: Array<{ name?: unknown; expected?: unknown }>; failures?: Array<{ name?: unknown; error?: unknown }> };
+  for (const c of Array.isArray(rr.compared) ? rr.compared : []) {
+    let expected: unknown = null;
+    try { expected = typeof c.expected === "string" && c.expected.startsWith("\"") ? JSON.parse(c.expected) : null; } catch { expected = null; }
+    if (typeof expected !== "string" || !out.literals.includes(expected)) continue;
+    const err = (Array.isArray(rr.failures) ? rr.failures : []).find((f) => f.name === c.name)?.error;
+    if (typeof err === "string" && /\)\.not\./.test(err)) continue;
+    return { cause: "expects_region_output", reason: `${ASSERTS_DEFECT_OUTPUT_STAGE}:expects_region_output: the failing assertion of "${String(c.name ?? "").slice(0, 120)}" expects ${JSON.stringify(expected).slice(0, 160)}, the literal the gap's region in ${siteRel} returns or emits (\`${shown}\`): the check asserts the defect's own output, so a change that produces the defect turns it green; assert the fixed behaviour instead` };
+  }
+  return null;
+}
+
 /** W1: how many times the verify runs the check (every run must be the same assertion red). */
 export const TEST_WRITING_CHECK_RUNS = 3;
 
 export type TestWritingJudgement = {
   ok: boolean;
-  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof EDIT_SITE_IS_OWN_CHECK | typeof MISSING_EXPORT_STAGE | typeof CONTRACT_MISMATCH_STAGE;
+  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "test_writing_check_reads_literals_only" | "edit_site_not_importable" | typeof EDIT_SITE_IS_OWN_CHECK | typeof MISSING_EXPORT_STAGE | typeof CONTRACT_MISMATCH_STAGE | typeof ASSERTS_DEFECT_OUTPUT_STAGE;
   cause?: string;
   reason: string;
   /** Set when the missing-export guard could not run (EXPORT_GUARD_UNAVAILABLE): it decided nothing. */
@@ -1543,11 +1614,12 @@ export type TestWritingJudgement = {
  * and require no export its module lacks (missingExportRefusal, the attach guard: a red on a missing name is red on every
  * tree, so it is refused here before it lands; 7b54fc7's AuthCache check passed this verify), assert no contract its
  * target lacks (contractMismatchRefusal, applied at the arm step too) and call no target through a cast that erases its
- * signature (castCalleeRefusal, after it). The static checks run
+ * signature (castCalleeRefusal, after it), and, when the gap carries a region (`region`, classification_metadata.region),
+ * not expect the region's own output (assertsDefectOutputRefusal). The static checks run
  * after the runs so every earlier stage keeps its verdict (a named import of a missing export still fails to LOAD and is
  * wrong_reason). ok only then.
  */
-export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: string; editSite: unknown; run: (checkRel: string) => Promise<string>; runs?: number }): Promise<TestWritingJudgement> {
+export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: string; editSite: unknown; region?: unknown; run: (checkRel: string) => Promise<string>; runs?: number }): Promise<TestWritingJudgement> {
   const { existsSync, readFileSync } = await import("node:fs");
   const { checkRunVerdict, classifyCheckRun, testWritingRunsVerdict } = await import("./retry-evidence.js");
   const checkRel = checkSupplyCheckPath(input.gapId);
@@ -1584,6 +1656,10 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   if (mismatch) return out(CONTRACT_MISMATCH_STAGE, mismatch.reason, { edit_site: site.edit_site, runs });
   const cast = castCalleeRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
   if (cast) return out(CONTRACT_MISMATCH_STAGE, cast.reason, { edit_site: site.edit_site, runs });
+  const region = typeof input.region === "string" ? input.region : "";
+  const siteSrc = region.trim() ? srcReaderAt(input.vesselRoot).read(site.edit_site) : null;
+  const defect = siteSrc !== null ? assertsDefectOutputRefusal(classifyCheckRun(raws[0]!), site.edit_site, siteSrc, region) : null;
+  if (defect) return out(ASSERTS_DEFECT_OUTPUT_STAGE, defect.reason, { edit_site: site.edit_site, runs, cause: defect.cause });
   const unguarded = exportGuardUnavailable();
   return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs, ...(unguarded ? { guard_decided_nothing: unguarded } : {}) });
 }

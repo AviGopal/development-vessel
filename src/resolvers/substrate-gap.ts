@@ -390,6 +390,38 @@ export interface SubstrateGapReadPointer {
    * landing verification, self-fact closure) pass include_held:true. By-id reads are never filtered.
    */
   include_held?: boolean;
+  /**
+   * A GAP-COUNT READ (the joint-liveness detector's gap_count joints). Only when given, the rows are also filtered by
+   * every condition (a dotted path on the row, e.g. classification_metadata.regressed_by.at) and the body carries a
+   * top-level `match_count`: the rows matching, counted before the limit. Absent, the response is exactly what it was.
+   * A malformed list carries no match_count (unmeasured, never "nothing matches") and says why in `where_error`.
+   */
+  where?: GapWhereCondition[];
+}
+/** One gap_count condition, as the joint-liveness detector's jointBinding records declare it. */
+export type GapWhereCondition = { path: string; op: "exists" | "missing" | "older_than_sec"; value?: number };
+
+/** `where` as conditions, or why it is not a list of them. Pure. */
+export function parseGapWhere(where: unknown): { conds: GapWhereCondition[] } | { error: string } {
+  if (!Array.isArray(where)) return { error: "where is not a list of conditions" };
+  for (const c of where as Array<Record<string, unknown>>) {
+    if (!c || typeof c !== "object" || typeof c.path !== "string" || c.path.trim() === "") return { error: "a where condition names no path" };
+    if (c.op !== "exists" && c.op !== "missing" && c.op !== "older_than_sec") return { error: `where op ${JSON.stringify(c.op)} is not exists, missing or older_than_sec` };
+    if (c.op === "older_than_sec" && (typeof c.value !== "number" || !Number.isFinite(c.value))) return { error: "an older_than_sec condition has no numeric value" };
+  }
+  return { conds: where as GapWhereCondition[] };
+}
+
+/** Whether `row` meets every condition at `nowMs` (the joint-liveness detector's gap_count rule). Pure. */
+export function gapMatchesWhere(row: unknown, conds: readonly GapWhereCondition[], nowMs: number): boolean {
+  return conds.every((c) => {
+    let v: unknown = row;
+    for (const k of c.path.split(".")) { if (v == null || typeof v !== "object") { v = undefined; break; } v = (v as Record<string, unknown>)[k]; }
+    if (c.op === "exists") return v !== undefined && v !== null && v !== "";
+    if (c.op === "missing") return v === undefined || v === null || v === "";
+    const t = Date.parse(String(v ?? ""));
+    return !Number.isNaN(t) && (nowMs - t) / 1000 > (c.value ?? 0);
+  });
 }
 
 /**
@@ -1443,6 +1475,13 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     ],
     needs_input: { missing_count: "vessel_ids", missing_vessels: "vessel_ids" },
   },
+  // substrateGap (read): the resolveSubstrateGap body. expectation_calibration and learning_credit only with
+  // include_calibration; match_count (the rows meeting every `where` condition, before the limit) only with a
+  // well-formed `where`, where_error with a malformed one (the gap_count joint's arming).
+  substrateGap: {
+    fields: ["gaps", "total", "falsifier_coverage", "expectation_calibration", "learning_credit", "match_count", "where_error"],
+    needs_input: { match_count: "where" },
+  },
   // reach-rate-scan.ts: the union of both reachRateReport bodies, the scoped re-read (activity_id) and the scan.
   reach_rate_scan: { fields: [
     "activity_id", "window_hours", "min_reach_rate", "contract_reach_rate", "count", "reached_count", "graded_count", "ungraded_count",
@@ -2243,6 +2282,12 @@ export async function resolveSubstrateGap(
     const excluded = new Set(pointer.exclude_categories);
     results = results.filter((g) => !excluded.has(String(g.category)));
   }
+  const where = pointer.where === undefined ? null : parseGapWhere(pointer.where);
+  if (where && "conds" in where) {
+    const nowMs = Date.now();
+    results = results.filter((g) => gapMatchesWhere(g, where.conds, nowMs));
+  }
+  const matchCount = results.length;
 
   // A copy: with no filter, `results` IS the shared snapshot's array, and sort() works in place.
   results = [...results]
@@ -2261,6 +2306,7 @@ export async function resolveSubstrateGap(
       // of by hand-grepping the store file.
       falsifier_coverage: structuredClone(snap.coverage),
       ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration(), learning_credit: readLearningCredit(gaps) } : {}),
+      ...(where ? ("conds" in where ? { match_count: matchCount } : { where_error: where.error }) : {}),
     },
   };
 }

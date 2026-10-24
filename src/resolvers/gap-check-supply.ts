@@ -1151,8 +1151,15 @@ export function regionGateOutcome(g: MutationGateOutcome): string {
   const decided = String(g.record["decided"] ?? "");
   return decided === "unmeasured: no region" ? decided : decided.startsWith("unmeasured") ? "unmeasured: no measurement" : "measured-passed";
 }
-/** The region gate applies to a row with no literal region (the region is then derived, derivedTextRegion). */
-export const regionGateApplies = (meta: Row): boolean => regionOf(meta) === "";
+/** The region gate applies to a row with no literal region, and (qa, 2026-10-24) to one whose literal region does not
+ *  occur in the check's edit-site file `siteSrc` (it names another file or repo, as 84460a91's row names the super-repo
+ *  transport server's resolveOverLibp2p for a check of libp2p-federation-transport src/index.ts): the region is then
+ *  derived from the evidence (derivedTextRegion). A literal that occurs in the site is where grounding centres the edit,
+ *  and gets no region mutant. With no site text to look in, only the no-literal case applies. */
+export const regionGateApplies = (meta: Row, siteSrc: string | null = null): boolean => {
+  const literal = regionOf(meta);
+  return literal === "" || (siteSrc !== null && countLiteral(siteSrc, literal) === 0);
+};
 export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null {
   const anchors = falsifiableAnchors(evidence, siteSrc, spec, null, { ...more, site_tokens: true });
   const free = commentFreeSource(siteSrc);
@@ -1526,7 +1533,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // and that refusal's premise ("no mutant of the site moves the red") does not stand. On a large site the k operator
     // mutants, spread over every declaration the check reaches, can all miss the code a correct check measures (the
     // hand-written 5e69d7a0 check: six mutants of supplyPass's reach, none on the refusal path).
-    const regionGate = (mutation?.kind === "pass" || mutation?.kind === "refuse") && regionGateApplies(meta) && site.ok
+    const regionGate = (mutation?.kind === "pass" || mutation?.kind === "refuse") && site.ok && regionGateApplies(meta, region ? regionSite : null)
       ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
       : null;
     if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
@@ -1605,8 +1612,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const ledger = ledgerOf(meta);
     const prior = (ledger.mutation_gate ?? null) as Row | null;
     if (ledger.state !== "armed" || !ledger.test_file || !ledger.vessel || String(meta["predicate_source"] ?? "") !== CHECK_SUPPLY_SOURCE) continue;
-    if (!regionGateApplies(meta) || (prior && typeof prior === "object" && prior["region_gate"])) continue;
+    if (prior && typeof prior === "object" && prior["region_gate"]) continue;
     const siteRel = vesselRelativeEditSite(meta["edit_site"] ?? ledger.edit_site ?? null);
+    let regateSite: string | null = null;
+    if (siteRel && regionOf(meta) !== "") { try { regateSite = readFileSync(join(clonesRoot(), ledger.vessel, siteRel), "utf-8"); } catch { regateSite = null; } }
+    if (!regionGateApplies(meta, regateSite)) continue;
     const er = (meta["evidence_resolve"] ?? null) as { shape?: unknown; input?: Row } | null;
     const titles = Array.isArray(er?.input?.["only_tests"]) ? (er!.input!["only_tests"] as unknown[]).filter((t): t is string => typeof t === "string") : [];
     if (!siteRel || er?.shape !== "test_suite" || titles.length === 0) continue;

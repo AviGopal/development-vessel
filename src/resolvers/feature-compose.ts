@@ -5896,6 +5896,21 @@ export function gapFailureClasses(meta: Record<string, unknown> | undefined): st
 }
 
 // `capture` (the drafter split) records which source the recall used and the rows and lines it read.
+/**
+ * WHICH LESSONS A DRAFT WAS SHOWN (qa, 2026-10-24): the recalled rows' concept ids, for the "[compose-lessons]
+ * source=concept-db" line, so per-draft exposure to lessons is visible in the journal. A response-level id list if the
+ * search carries one, else each row's id (concept_id or id) for the rows that yielded a lesson, in order; "unknown"
+ * when neither carries an id. Exported for tests.
+ */
+export function recalledLessonIds(json: unknown): string {
+  const j = (json ?? {}) as { ids?: unknown; content?: unknown };
+  const listed = Array.isArray(j.ids) ? (j.ids as unknown[]).filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+  if (listed.length > 0) return listed.join(",");
+  const rows = Array.isArray(j.content) ? (j.content as Array<Record<string, unknown>>) : [];
+  const ids = rows.filter((r) => typeof r?.["content"] === "string" && String(r["content"]).length > 0)
+    .map((r) => r["concept_id"] ?? r["id"]).filter((x): x is string => typeof x === "string" && x.length > 0);
+  return ids.length > 0 ? ids.join(",") : "unknown";
+}
 export async function composeLessonsBlock(specText?: string, failureClasses: string[] = [], capture?: DrafterLessonCapture): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
@@ -5931,7 +5946,7 @@ export async function composeLessonsBlock(specText?: string, failureClasses: str
         const json = (await resp.json()) as { content?: Array<{ content?: string }> };
         const found = (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
         if (found.length > 0) {
-          console.warn(`[compose-lessons] source=concept-db n=${found.length} class=${failureClasses[0] ?? "none"}`);
+          console.warn(`[compose-lessons] source=concept-db n=${found.length} class=${failureClasses[0] ?? "none"} ids=${recalledLessonIds(json)}`);
           const rawLessons = await Bun.file(COMPOSE_LESSONS_PATH).text().catch(() => "");
           if (capture) Object.assign(capture, { source: "concept-db", query: failureClasses[0] ?? "", rows: [...found], tail: rawLessons.split("\n").slice(-400) });
           const latestByClass = new Map<string, string>();

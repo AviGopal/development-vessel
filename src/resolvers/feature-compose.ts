@@ -2875,21 +2875,43 @@ export async function verifyPatchAddressesGap(args: {
   // A TEST-WRITING COMPOSE IS JUDGED BY THE TEST-WRITING CONTRACT, NOT THE FIX STANDARD. Its job is to add a check that
   // is red at the parent and change no behaviour, so "does this patch change behaviour / address the gap?" refuses it
   // by construction (measured: a passed test-writing check refused by the judge with "Patch only adds a test"). The
-  // contract is already judged deterministically: the only paths written are the gap's check (the floor's own predicate,
+  // contract is judged deterministically first: the only paths written are the gap's check (the floor's own predicate,
   // testWritingDiffOutsideTests) and the check is the same assertion red at the parent each run (judgeTestWritingCheck,
-  // at verify). When both hold the judge is not consulted; otherwise the fix standard below runs, as before.
+  // at verify). When both hold the fix-standard judge is not consulted, but the ADVERSARIAL lens still is, with the
+  // test-writing question: does this check fail BECAUSE of the gap's defect? A red for an unrelated reason is a gamed
+  // check (measured: one was admitted with only the refuter dissenting, its 1/2 split overruled below), so here ONE
+  // specific refutation refuses the compose. An unavailable or unparseable refuter fails closed, as infrastructure.
+  // Otherwise the fix standard below runs, as before.
   if (args.testWriting) {
     const csa = await import("./check-supply-admission.js");
     const tw = args.testWriting;
     const j = tw.judgement;
     if (tw.compose_mode === csa.CHECK_SUPPLY_COMPOSE_MODE && j?.ok === true && tw.written_paths.length > 0 && csa.testWritingDiffOutsideTests(tw.compose_mode, [...tw.written_paths], tw.gap_id).length === 0) {
-      console.log(`[fc-semantic-gate] skipped test_writing: judged by the test-writing contract (check ${j.check_file}, ${j.runs.length} red run(s) at the parent), not the fix standard`);
+      type Refutation = { refuted?: unknown; confidence?: unknown; reason?: unknown };
+      let rp: Refutation | null = null;
+      try {
+        const rraw = await args.llm(testWritingRefutationPrompt(args.gapSummary, args.diff, j));
+        const rm = rraw.match(/\{[\s\S]*\}/g);
+        rp = rm ? (parseJsonObject(rm[0]) as Refutation | null) : null;
+      } catch (e) {
+        return { addresses: false, reason: `test-writing refuter unavailable (${(e as Error).message}); the check was not examined, so it does not pass (fail closed)`, on_live_path: true, llm_consulted: true, verified: false, judge_unavailable: true };
+      }
+      if (!rp || typeof rp.refuted !== "boolean") {
+        return { addresses: false, reason: "test-writing refuter answered without a parseable verdict (no JSON object with a boolean `refuted`); the check was not examined, so it does not pass (fail closed)", on_live_path: true, llm_consulted: true, verified: false, judge_unavailable: true };
+      }
+      // The same specificity bar the fix-standard refuter is held to (confidence >= 0.8, a reason of substance).
+      const rReason = typeof rp.reason === "string" ? rp.reason.trim() : "";
+      if (rp.refuted === true && typeof rp.confidence === "number" && rp.confidence >= 0.8 && rReason.length >= 20) {
+        console.log(`[fc-semantic-gate] test_writing REFUTED (conf ${rp.confidence.toFixed(2)}): the check does not fail because of the gap's defect: ${rReason.slice(0, 200)}`);
+        return { addresses: false, reason: `test_writing refuted (conf ${rp.confidence.toFixed(2)}): the check ${j.check_file} is red, but not because of the gap's defect: ${rReason}`, on_live_path: true, llm_consulted: true, verified: true };
+      }
+      console.log(`[fc-semantic-gate] skipped test_writing: judged by the test-writing contract (check ${j.check_file}, ${j.runs.length} red run(s) at the parent) and not refuted, not by the fix standard`);
       return {
         addresses: true,
-        reason: `test_writing compose: judged by the test-writing contract, not the fix standard: it writes only the gap's check (${j.check_file}) and that check is red at the parent (${j.runs.length} run(s), the same assertion red)`,
+        reason: `test_writing compose: judged by the test-writing contract, not the fix standard: it writes only the gap's check (${j.check_file}), that check is red at the parent (${j.runs.length} run(s), the same assertion red), and the adversarial lens did not refute that it fails because of the gap's defect`,
         on_live_path: true,
-        llm_consulted: false,
-        verified: true,   // a deterministic judgement that ran (the check, red at the parent), as the CJS refusal's
+        llm_consulted: true,
+        verified: true,   // a deterministic judgement that ran (the check, red at the parent), examined by the refuter
         skipped: "test_writing",
         test_writing: { check_file: j.check_file, edit_site: j.edit_site, runs: j.runs.length },
       };
@@ -3448,6 +3470,28 @@ DIFF:
 ${diff}
 
 Output ONLY this JSON object, nothing else: {"refuted": <boolean>, "confidence": <number 0..1>, "reason": "<the specific flaw, citing lines>"}`;
+}
+
+/** The adversarial lens on a test-writing compose: not "does the patch fix the gap" (it must not), but "is the check red
+ *  BECAUSE of the gap's defect". Same output contract as refutationPrompt. */
+function testWritingRefutationPrompt(gapSummary: string, diff: string, j: import("./check-supply-admission.js").TestWritingJudgement): string {
+  const red = [...new Set(j.runs.flatMap((r) => r.red))].slice(0, 8);
+  return `You are an ADVERSARIAL reviewer of a FAILING CHECK. This patch adds ONE test (${j.check_file}) that is meant to fail on the current tree BECAUSE of the gap's defect, so the fix can be composed against it. It is NOT meant to change behaviour; do not judge it as a fix. It was run ${j.runs.length} time(s) at the parent and the same assertion failed each time${red.length > 0 ? ` (${red.join("; ")})` : ""}. Your job is to REFUTE that the failure is the gap's defect.
+
+Refute when the check fails for a reason UNRELATED to the defect the gap names, for example:
+- it asserts something the gap does not describe, or a value the code was never meant to have;
+- it fails on its own fixture, mock or setup (a stub that throws, a wrong path, a missing export it invented) rather than on the code under test;
+- it would fail on every tree, whether or not the defect is fixed (expect(1).toBe(2) in disguise, an impossible expectation);
+- it exercises a different function or path than the gap's edit site${j.edit_site ? ` (${j.edit_site})` : ""}.
+
+Cite the EXACT lines. Refute ONLY on a specific, defensible flaw. If the check fails because of the defect the gap names, do not refute.
+
+GAP: ${gapSummary}
+
+DIFF:
+${diff}
+
+Output ONLY this JSON object, nothing else: {"refuted": <boolean>, "confidence": <number 0..1>, "reason": "<why the failure is not the gap's defect, citing lines>"}`;
 }
 
 export function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = "", netNewTargets: string[] = []): string {

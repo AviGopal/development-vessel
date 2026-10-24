@@ -10,7 +10,7 @@
 // Expected:
 //   - MUST-FAIL (replay): that draft (one created check file, a passed TestWritingJudgement, a judge stub answering
 //     addresses:false "Patch only adds a test") is NOT refused: addresses:true, skipped "test_writing", the judgement as
-//     evidence, and the judge is not consulted;
+//     evidence, and the fix-standard judge is not consulted (the test-writing refuter is, and agrees);
 //   - MUST-FAIL (wiring): feature_compose's gate call hands verifyPatchAddressesGap the compose mode, verify's
 //     test-writing judgement and every written path;
 //   - CONTROL: the same draft in fix mode (no compose_mode) is still refused by the judge, as today;
@@ -48,7 +48,12 @@ const PASSED = {
 };
 
 let judgeCalls = 0;
-const judge = async (): Promise<string> => { judgeCalls++; return JSON.stringify({ addresses: false, on_live_path: true, reason: "Patch only adds a test" }); };
+// The fix-standard judge says addresses:false, as measured. The test-writing refuter (its prompt reviews a FAILING CHECK)
+// agrees the check is red because of the defect: the measured draft's shape. Only fix-judge calls are counted.
+const judge = async (prompt: string): Promise<string> => {
+  if (prompt.includes("ADVERSARIAL reviewer of a FAILING CHECK")) return JSON.stringify({ refuted: false, confidence: 0.1, reason: "the check fails on the defect the gap names" });
+  judgeCalls++; return JSON.stringify({ addresses: false, on_live_path: true, reason: "Patch only adds a test" });
+};
 function gate(testWriting?: Record<string, unknown>): Promise<Record<string, any>> {
   return fc.verifyPatchAddressesGap({
     gapSummary: `observe-mode dispatches still mint templates (repos/${VESSEL}/src/index.ts)`,
@@ -67,7 +72,7 @@ describe("semantic gate, test_writing mode: the test-writing contract, not the f
     const v = await gate({ compose_mode: csa.CHECK_SUPPLY_COMPOSE_MODE, gap_id: GAP, judgement: PASSED, written_paths: [CHECK_ABS] });
     expect(v.addresses, `refused: ${String(v.reason)}`).toBe(true);
     expect(v.skipped).toBe("test_writing");
-    expect(v.llm_consulted).toBe(false);
+    expect(v.llm_consulted, "the test-writing refuter is consulted").toBe(true);
     expect(v.hard_fail ?? false).toBe(false);
     expect(v.test_writing).toEqual({ check_file: CHECK_REL, edit_site: "src/index.ts", runs: 3 });
     expect(judgeCalls, "the fix-standard judge is not consulted").toBe(0);

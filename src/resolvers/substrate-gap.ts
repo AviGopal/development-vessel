@@ -1482,6 +1482,16 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     fields: ["gaps", "total", "falsifier_coverage", "expectation_calibration", "learning_credit", "match_count", "where_error"],
     needs_input: { match_count: "where" },
   },
+  // template-invocation-history-report.ts: the templateInvocationHistoryReport body. stale_count, the newest learned
+  // template's id and age, and max_lag_sec only with max_lag_sec given, and stale_count only when the pull could tell
+  // (learnedFreshness): the ribosome-extraction joint's arming.
+  template_invocation_history_report: {
+    fields: [
+      "total_templates", "fired_count", "unfired_count", "unfired_ratio", "unfired_capabilities", "health_verdict", "completed_at",
+      "stale_count", "newest_learned_template_id", "newest_learned_age_sec", "max_lag_sec",
+    ],
+    needs_input: { stale_count: "max_lag_sec" },
+  },
   // reach-rate-scan.ts: the union of both reachRateReport bodies, the scoped re-read (activity_id) and the scan.
   reach_rate_scan: { fields: [
     "activity_id", "window_hours", "min_reach_rate", "contract_reach_rate", "count", "reached_count", "graded_count", "ungraded_count",

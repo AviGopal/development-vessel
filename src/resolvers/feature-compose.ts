@@ -923,6 +923,10 @@ export interface SemanticGateVerdict {
   // never read from model JSON. A refusal carrying it is a NON-ATTEMPT (semanticGateInfraRefusal): it fails closed,
   // yet it says nothing about the draft, so it is neither charged to the gap nor taught to the next drafter.
   judge_unavailable?: boolean;
+  // Set when the fix-standard judge did not run because another standard judged the draft (no_touched, test_writing).
+  skipped?: string;
+  // The test-writing judgement a skipped:"test_writing" verdict stands on (judgeTestWritingCheck, run at verify).
+  test_writing?: { check_file: string; edit_site: string | null; runs: number };
 }
 
 /** A semantic-gate refusal that is infrastructure (the judge could not judge), not a judgment of the patch. */
@@ -2858,7 +2862,35 @@ export async function verifyPatchAddressesGap(args: {
   contractFiles?: Array<{ path: string; pre: string; post: string }>;
   /** The test lines the change ADDED (contractAddedTestText): the only evidence a narrowing was meant. */
   checkText?: string;
+  /**
+   * The compose's mode and, in test_writing mode, verify's test-writing judgement (judgeTestWritingCheck) and every path
+   * the compose wrote. Absent, or any other mode -> the fix standard below, as before.
+   */
+  testWriting?: { compose_mode: unknown; gap_id: unknown; judgement: import("./check-supply-admission.js").TestWritingJudgement | null | undefined; written_paths: readonly string[] };
 }): Promise<SemanticGateVerdict> {
+  // A TEST-WRITING COMPOSE IS JUDGED BY THE TEST-WRITING CONTRACT, NOT THE FIX STANDARD. Its job is to add a check that
+  // is red at the parent and change no behaviour, so "does this patch change behaviour / address the gap?" refuses it
+  // by construction (measured: a passed test-writing check refused by the judge with "Patch only adds a test"). The
+  // contract is already judged deterministically: the only paths written are the gap's check (the floor's own predicate,
+  // testWritingDiffOutsideTests) and the check is the same assertion red at the parent each run (judgeTestWritingCheck,
+  // at verify). When both hold the judge is not consulted; otherwise the fix standard below runs, as before.
+  if (args.testWriting) {
+    const csa = await import("./check-supply-admission.js");
+    const tw = args.testWriting;
+    const j = tw.judgement;
+    if (tw.compose_mode === csa.CHECK_SUPPLY_COMPOSE_MODE && j?.ok === true && tw.written_paths.length > 0 && csa.testWritingDiffOutsideTests(tw.compose_mode, [...tw.written_paths], tw.gap_id).length === 0) {
+      console.log(`[fc-semantic-gate] skipped test_writing: judged by the test-writing contract (check ${j.check_file}, ${j.runs.length} red run(s) at the parent), not the fix standard`);
+      return {
+        addresses: true,
+        reason: `test_writing compose: judged by the test-writing contract, not the fix standard: it writes only the gap's check (${j.check_file}) and that check is red at the parent (${j.runs.length} run(s), the same assertion red)`,
+        on_live_path: true,
+        llm_consulted: false,
+        verified: true,   // a deterministic judgement that ran (the check, red at the parent), as the CJS refusal's
+        skipped: "test_writing",
+        test_writing: { check_file: j.check_file, edit_site: j.edit_site, runs: j.runs.length },
+      };
+    }
+  }
   const { hardFail, reason } = reachabilityHardFail(args.reachability);
   // A TEST FILE HAS NO CALLERS BY CONSTRUCTION — callerCount IS NOT A SIGNAL THERE.
   //
@@ -10302,6 +10334,12 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         runSemanticJudge: hasGapContext,
         contractFiles,
         checkText,
+        testWriting: {
+          compose_mode: (pointer as { compose_mode?: unknown }).compose_mode,
+          gap_id: pointer.gap?.id,
+          judgement: verify.find((vr) => vr.test_writing)?.test_writing ?? null,
+          written_paths: [...applied.filter((a) => a.ok).map((a) => a.path), ...edited, ...created],
+        },
       });
 
       // Surface the DETERMINISTIC (grep-derived, no-LLM) reachable changed symbols into

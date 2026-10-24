@@ -1299,7 +1299,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   let outcomeReads = 0;
   // THIS NODE'S GOALS STILL IN FLIGHT after the read-back (the DEMAND gate below): sent or placed by this node, with a
   // dispatch id, not yet settled. A record with no dispatch id is not counted: no send of it was ever confirmed, and it
-  // waits out dispatch_stale_hours, so counted it would hold the gate shut for a day on a goal that may not exist.
+  // waits out dispatch_stale_hours, so counted it would hold the gate shut for a day on a goal that may not exist. Nor
+  // is one its goal-host answers 404 for (below).
   let inFlightMine = 0;
   for (const row of open) {
     const id = String(row["id"]);
@@ -1320,7 +1321,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (v.kind === "running") { outcomes.running += 1; if (ownSent) inFlightMine += 1; continue; }
     if (v.kind === "awaiting_titles") { outcomes.awaiting_titles += 1; if (ownSent) inFlightMine += 1; continue; }
     if (v.kind === "wait") {
-      if (ownSent) inFlightMine += 1;
+      // A dispatch its goal-host has NO RECORD of (404, pruned) holds no slot: nothing of this node's is running for it,
+      // and goal-host's retention is shorter than dispatch_stale_hours, so counted it would shut the demand gate until
+      // the bound settles it. It still waits (and is reported) and is settled by the bound as before.
+      if (ownSent && v.why !== "not_found_on_host") inFlightMine += 1;
       outcomes.waiting.push({ id, why: v.why, detail: v.detail });
       console.warn(`[gap-check-supply] outcome unread for ${id}: ${v.why}: ${v.detail}`);
       continue;

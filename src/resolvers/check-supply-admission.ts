@@ -944,6 +944,36 @@ export function missingExportRefusal(source: string, checkRel: string, reader: S
 }
 
 /**
+ * WHAT THE REPAIR OF A CHECK REFUSED FOR A MISSING EXPORT IS TOLD THE MODULE EXPORTS. The refusal's reason names at most
+ * 12 of the module's names and no signature, and the repair round quotes that reason clipped, so the round that must
+ * rewrite the check onto real exports was told neither what they are nor how to call them (f176b321, a goal-host
+ * src/index.ts check that read the internal universalToolFallback: every repair round re-drafted blind and broke the
+ * typecheck). Rendered from exportContract, the enumeration the refusal itself reads (moduleExports, with
+ * exportSignatures' declared signatures and the `shape` strings the return walk reads): every export in its order,
+ * one per line, `name: kind (parameters): ReturnType`, each signature clamped (REPAIR_SURFACE_SIGNATURE_MAX) and the
+ * whole bounded (REPAIR_SURFACE_MAX_CHARS), the rest counted. null when the module cannot be read or parsed, or exports
+ * nothing.
+ */
+export const REPAIR_SURFACE_SIGNATURE_MAX = 200;
+export const REPAIR_SURFACE_MAX_CHARS = 6000;
+export function exportedSurface(rel: string, reader: SrcReader): string | null {
+  const c = exportContract(rel, reader);
+  if (!c || c.exports.length === 0) return null;
+  const lines: string[] = [];
+  let chars = 0;
+  for (const e of c.exports) {
+    const shapes = e.returned?.shapes?.length ? ` returning shape ${e.returned.shapes.map((s) => JSON.stringify(s)).join(" | ")}` : "";
+    const sig = e.signature ? `${e.signature}${shapes}` : "";
+    const line = `${e.name}: ${e.kind}${sig ? ` ${sig.length > REPAIR_SURFACE_SIGNATURE_MAX ? `${sig.slice(0, REPAIR_SURFACE_SIGNATURE_MAX - 1)}…` : sig}` : ""}`;
+    if (chars + line.length + 1 > REPAIR_SURFACE_MAX_CHARS) break;
+    lines.push(line);
+    chars += line.length + 1;
+  }
+  const more = c.exports.length - lines.length;
+  return `${lines.join("\n")}${more > 0 ? `\n… and ${more} more` : ""}${c.open ? "\n(and what it re-exports from a module not readable here)" : ""}`;
+}
+
+/**
  * A CHECK THAT ASSERTS A CONTRACT ITS TARGET DOES NOT HAVE IS NOT A FALSIFIER. 333be5f (template-input-lint
  * harness-check-scenario) asserted `expect(result.shape).toBe('template_input_lint_issues')` on a resolver that returns
  * shape "templateInputLintReport", then `result.body.unusedInputs`, a field its body never sets. That is an assertion red
@@ -1498,6 +1528,8 @@ export type TestWritingJudgement = {
   reason: string;
   /** Set when the missing-export guard could not run (EXPORT_GUARD_UNAVAILABLE): it decided nothing. */
   guard_decided_nothing?: string;
+  /** Set on a MISSING_EXPORT_STAGE refusal: the refused module's exported surface (exportedSurface), for the repair. */
+  exported_surface?: { module: string; text: string };
   check_file: string;
   edit_site: string | null;
   runs: Array<{ verdict: string; keys: string[]; red: string[]; unhandled: boolean }>;
@@ -1543,7 +1575,10 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   const runs = v.runs.map((r) => ({ verdict: r.verdict, keys: r.keys.map((k) => k.replace("\u0000", " :: ")), red: r.red.slice(0, 10), unhandled: r.unhandled }));
   if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });
   const missing = missingExportRefusal(source, checkRel, srcReaderAt(input.vesselRoot));
-  if (missing) return out(MISSING_EXPORT_STAGE, missing.reason, { edit_site: site.edit_site, runs });
+  if (missing) {
+    const surface = exportedSurface(missing.module, srcReaderAt(input.vesselRoot));
+    return out(MISSING_EXPORT_STAGE, missing.reason, { edit_site: site.edit_site, runs, ...(surface ? { exported_surface: { module: missing.module, text: surface } } : {}) });
+  }
   // The runs agree (W1), so the first one's compared values stand for all; 333be5f passed this verify before.
   const mismatch = contractMismatchRefusal(source, checkRel, classifyCheckRun(raws[0]!), srcReaderAt(input.vesselRoot));
   if (mismatch) return out(CONTRACT_MISMATCH_STAGE, mismatch.reason, { edit_site: site.edit_site, runs });

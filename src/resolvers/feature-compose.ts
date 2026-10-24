@@ -6021,6 +6021,10 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   const gateDetail = fv.draft?.gate_detail;
   const fields: string[] = [];
   if (hidden(gateDetail)) fields.push(`GATE DETAIL (the pre-land gate's own reason): ${gateDetail!.trim().slice(0, 1500)}`);
+  // A check refused for reading a name its module does not export is repaired onto the module's real exports, so the
+  // round is told them (check-supply-admission.ts exportedSurface), not left to guess from the reason's first 12 names.
+  const surface = fv.test_writing?.exported_surface;
+  if (surface && hidden(surface.text)) fields.push(`EXPORTED SURFACE of ${surface.module} (the check may read, call and mock only these names; call each function with the parameters its signature declares, and reach internal code through one of them):\n${surface.text}`);
   if (failing.length > 0) {
     fields.push(`OWN CHECK STILL RED (${fv.own!.test_file}), the tests this draft must turn green:\n` + failing.slice(0, 8).map((f) => `  - ${f.name}${f.expected !== undefined || f.received !== undefined ? ` (expected ${String(f.expected ?? "?").slice(0, 160)}, received ${String(f.received ?? "?").slice(0, 160)})` : f.error ? ` (${f.error.slice(0, 200)})` : ""}`).join("\n"));
   }

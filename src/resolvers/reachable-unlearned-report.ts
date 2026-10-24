@@ -1,6 +1,7 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readTraceWindowCounts } from "../lib/trace-window-counts.js";
+import { fetchTemplateCatalogue } from "../lib/template-catalogue-fetch.js";
 
 export interface ReachableUnlearnedReportPointer {
   type: "reachable_unlearned_report";
@@ -39,29 +40,14 @@ export async function resolveReachableUnlearnedReport(
   const confidenceFloor = pointer.confidence_floor ?? 10;
   const auth = { Authorization: `ApiKey ${METABOB_API_KEY}` };
 
-  // Fetch all templates (paginated, up to 500)
-  const templates: Template[] = [];
-  let offset = 0;
-  const pageSize = 100;
   // Fetch the FULL catalogue. Prior bug: the `< 500` cap plus `break` on the
   // first short page truncated this — the corpus is ~1500 and the templates
   // endpoint intermittently returns a short first page under load, so the
-  // detector emitted (lift-gate) verdicts over a sliver of reality. Loop until
-  // the endpoint-reported `total` is fetched or a page is empty; a short page
-  // is NOT a stop signal.
-  let templatesTotal = Infinity;
-  for (let guard = 0; templates.length < templatesTotal && guard < 100; guard++) {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
-      headers: auth,
-    });
-    if (!r.ok) break;
-    const page = await r.json() as { templates?: Template[]; total?: number };
-    if (typeof page.total === "number") templatesTotal = page.total;
-    const rows = page.templates ?? [];
-    if (rows.length === 0) break;
-    templates.push(...rows);
-    offset += rows.length;
-  }
+  // detector emitted (lift-gate) verdicts over a sliver of reality. The walk
+  // runs until the endpoint-reported `total` is fetched or a page is empty; a
+  // short page is NOT a stop signal. An unchanged catalogue is not re-paged:
+  // the last complete walk is revalidated by its ETag (lib/template-catalogue-fetch.ts).
+  const { templates } = await fetchTemplateCatalogue<Template>(METABOB_ENDPOINT, METABOB_API_KEY);
 
   // Fetch traces from the lookback window (for "learned" classification) AND a
   // wider window (for rotation freshness). Without the wider window, every

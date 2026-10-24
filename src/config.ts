@@ -101,6 +101,13 @@ export const WORKSPACE_ROOT = env("WORKSPACE_ROOT", process.cwd());
  * The container volume root. Runtime state the substrate rewrites (scenario queues among it) lives
  * here, not under WORKSPACE_ROOT, which the env file points at the super-repo clone: a file the
  * substrate rewrites is not a file git should carry.
+ *
+ * No existing derivation to reuse: every on-volume site in this vessel names the volume by the bare
+ * literal (8 scenario-queue literals in pick-priority-scenario, vessel-arrival-scan, drafter-trigger-tick,
+ * observe-and-author-from-gaps, vessel-scaffold-trigger-tick and draft-gap-closing-activity; 176
+ * "/workspace/..." literal lines in all). The other form, `process.env["WORKSPACE_ROOT"] ?? "/workspace"`
+ * (18 sites), is not a volume derivation: under the env file it resolves to the super-repo clone, so
+ * reusing it would bring back the split this constant closes. This is the one named source new sites use.
  */
 export const VOLUME_ROOT = "/workspace";
 /** The failure-mode scenario queue: the bridge writes it, the drafter, harness and reprobe read it. */

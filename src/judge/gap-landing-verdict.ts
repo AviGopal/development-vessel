@@ -292,16 +292,35 @@ const PENDING_VERIFY_SWEEP_LIMIT = 25;
  *  PENDING_VERIFY_SWEEP_LIMIT slice. Taken after it, held gaps sorted first and spent the slots: 158 of 350 checks
  *  in a day went to held gaps that were skipped on arrival (diag-s1, 2026-10-10). `held` counts the stamped gaps
  *  dropped for a hold, for the sweep's tally line. Exported for tests. */
-export function pendingSweepCandidates(gaps: Record<string, unknown>[]): { unheld: Record<string, unknown>[]; held: number } {
+export function pendingSweepCandidates(gaps: Record<string, unknown>[]): { unheld: Record<string, unknown>[]; held: number; needs_predicate: number } {
   const unheld: Record<string, unknown>[] = [];
   let held = 0;
+  let needsPredicate = 0;
   for (const g of gaps) {
     const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
     if (!(typeof m.pending_outcome_verification === "string" && m.pending_outcome_verification.length >= 7)) continue;
     if (m.operator_hold === true) { held += 1; continue; }
+    // Decided needs_predicate on this landing and still unmeasurable: re-checking it can change nothing, so it takes
+    // no slot. A predicate armed since (a human's VERIFY_SHAPE:/EXPECTED_LITERAL: answer) or a new landing brings it back.
+    if (needsPredicateDecided(m)) { needsPredicate += 1; continue; }
     unheld.push(g);
   }
-  return { unheld, held };
+  return { unheld, held, needs_predicate: needsPredicate };
+}
+/**
+ * A NO-PREDICATE LANDING REACHES A TERMINAL SWEEP DECISION. A single landing whose row carries no measurement
+ * predicate (landVerdictIsMeasured false) reads 'pending' (provenance) or 'unknown' on every pass: nothing the sweep
+ * can read changes while the row is held pending_verification, so re-checking it only spent the slots (36 of 39
+ * candidates on one node, 2026-10-24, closed nothing). The first such reading is the decision: needs_predicate
+ * {landed, at} is recorded on the row, the row stays held pending verification (never closed, never re-admitted for
+ * a re-land), and a human is asked for a check on the pending-verify-<gap> panel, whose labelled answer lines arm one.
+ * Whether that decision stands: it names the row's current landing and the row is still unmeasurable. Exported for tests.
+ */
+export const NEEDS_PREDICATE = "needs_predicate";
+export function needsPredicateDecided(meta: Record<string, unknown>): boolean {
+  const d = meta[NEEDS_PREDICATE] as { landed?: unknown } | null | undefined;
+  const landed = d && typeof d === "object" && typeof d.landed === "string" ? d.landed : "";
+  return landed.length >= 7 && landed === meta.pending_outcome_verification && !landVerdictIsMeasured(meta);
 }
 // When this process last examined each pending gap, whatever the verdict. Only a 'pending' verdict
 // persists pending_last_checked_at, so without this a gap stuck at present/unknown/not_in_clone sorted
@@ -502,11 +521,11 @@ const pendingVerificationEscalated = new Set<string>();
  * escalateRelandToHuman this records NO close-verdict — a pending gap has not failed, so labelling it
  * would poison the posterior with a verdict reality has not yet delivered.
  */
-function escalatePendingVerification(gapId: string, category: string, summary: string, ask: Ask, sha?: string): void {
+function escalatePendingVerification(gapId: string, category: string, summary: string, ask: Ask, sha?: string, needsPredicate = false): void {
   if (!gapId || pendingVerificationEscalated.has(gapId)) return;
   pendingVerificationEscalated.add(gapId);
   const shaNote = sha ? ` (landed ${String(sha).slice(0, 12)})` : "";
-  void ask({ type: "uiQuestion_write", id: "pending-verify-" + gapId, title: "Gap landed but is unverified — did the change actually fix it?", body: "Gap " + gapId + " (" + category + ") had a single substrate-authored landing" + shaNote + ", but the close-oracle has no way to MEASURE whether the change resolved the condition (no literal/resolver predicate — provenance only). Rather than close it green on the commit alone (the inert-diff hole), it is held PENDING. Please confirm: did the landed change actually fix this, or is it inert/wrong? Summary: " + summary.slice(0, 300), kind: "gap_pending_verification", importance: "medium" } as never)
+  void ask({ type: "uiQuestion_write", id: "pending-verify-" + gapId, title: "Gap landed but is unverified — did the change actually fix it?", body: "Gap " + gapId + " (" + category + ") had a single substrate-authored landing" + shaNote + ", but the close-oracle has no way to MEASURE whether the change resolved the condition (no literal/resolver predicate — provenance only). Rather than close it green on the commit alone (the inert-diff hole), it is held PENDING. Please confirm: did the landed change actually fix this, or is it inert/wrong? " + (needsPredicate ? "NEEDS_PREDICATE: the sweep has decided it can never verify this landing and stops re-checking it; a line VERIFY_SHAPE: <shape>, or EDIT_SITE: repos/<vessel>/src/... with EXPECTED_LITERAL: <text>, arms a check the sweep then reads on this same landing. " : "") + "Summary: " + summary.slice(0, 300), kind: "gap_pending_verification", importance: "medium" } as never)
     .then((r) => {
       const shape = (r as { shape?: unknown } | undefined)?.shape;
       if (shape === "structuredError") console.warn(`[gap-escalation] pending-verify uiQuestion_write REJECTED for ${gapId} — no human was asked`);
@@ -514,6 +533,7 @@ function escalatePendingVerification(gapId: string, category: string, summary: s
     })
     .catch((e: unknown) => console.warn(`[gap-escalation] pending-verify uiQuestion_write THREW for ${gapId}: ${String(e)} — no human was asked`));
 }
+
 
 /**
  * Mark a gap PENDING-VERIFICATION: keep it open, stamp pending_outcome_verification (so the
@@ -1875,7 +1895,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -1932,6 +1952,7 @@ try {
 // Then process existing pending verifications as before
 const candidates = pendingSweepCandidates(gaps);
 tally.held = candidates.held;
+tally.needs_predicate_held = candidates.needs_predicate;
 const pending = candidates.unheld
       // Measurable gaps first: predicate-less stamped gaps can never resolve, and taking the first N in
       // store order let them hold every slot. Then LEAST RECENTLY CHECKED first (never-checked, i.e. new
@@ -2036,6 +2057,13 @@ const pending = candidates.unheld
         if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
           escalateRelandToHuman(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""), deps.ask);
         }
+        continue;
+      }
+      // A NO-PREDICATE landing reading 'pending', or 'unknown' without earned trust, is decided here (needsPredicateDecided).
+      if (!landVerdictIsMeasured(meta) && (verdict === "pending" || (verdict === "unknown" && !closeOracleEarnedTrust("landed_commit")))) {
+        tally.needs_predicate += 1;
+        await markPendingVerification({ ...g, classification_metadata: { ...meta, [NEEDS_PREDICATE]: { landed: sha, verdict, at: new Date().toISOString() } } }, sha, `pending sweep: ${NEEDS_PREDICATE}: single landing, no measurement predicate (read ${verdict}); held, a human is asked for a check`);
+        escalatePendingVerification(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""), deps.ask, sha, true);
         continue;
       }
       if (verdict === "pending") {

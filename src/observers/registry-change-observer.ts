@@ -1,6 +1,7 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT, GOAL_HOST_VESSEL_ENDPOINT, FAILURE_MODE_SCENARIOS_DIR } from "../config.js";
 import { resolveDispatch } from "../routes/impulses.js";
 import { join } from "node:path";
+import { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "../seed/probe-reachable-unlearned.js";
 
 type LifecycleEvent = {
   type: string;
@@ -70,9 +71,12 @@ async function fireAggregatorsIfDue(): Promise<void> {
 export async function runTopologyChain(): Promise<void> {
   const snapshotBody = await fireTopologySnapshot();
 
-  // Fan out: reachable-unlearned and unknown-shape in parallel
-  const [unlearnedBody, unknownBody] = await Promise.all([
-    fireReachableUnlearnedReport(),
+  // Fan out: reachable-unlearned and unknown-shape in parallel. The reachable-unlearned fan-out IS this vessel's
+  // probe-reachable-unlearned report, so it shares that probe's report window: every rescore event (each completion of
+  // a draft-gap-closing-activity, for one) runs the chain, and two such events seconds apart ran the full catalogue
+  // scan twice. Nothing below reads its body, so a closed window skips the call.
+  const [, unknownBody] = await Promise.all([
+    reportWindowOpen(PROBE_REACHABLE_UNLEARNED_TEMPLATE.id) ? fireReachableUnlearnedReport() : Promise.resolve({}),
     fireUnknownShapeReport(),
   ]);
 
@@ -148,6 +152,7 @@ function shouldDispatch(parentExecutionId: string, targetTemplateId: string): bo
 
 // Last report run per probe template id (vessel-qualified, e.g. "development-vessel:probe-reachable-unlearned"), so
 // a burst of probe successes from one vessel runs that probe's report once per DISPATCH_DEDUPE_MS, not once per event.
+// The topology chain's fan-out takes the same window under this vessel's probe id (see runTopologyChain).
 const recentProbeReports = new Map<string, number>();
 
 function reportWindowOpen(probeTemplateId: string): boolean {

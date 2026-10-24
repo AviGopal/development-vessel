@@ -19,7 +19,7 @@ mock.module("../../src/routes/impulses.js", () => ({
 }));
 
 // Import AFTER mock.module so the observer binds to the mock
-const { runTopologyChain, resetAggregatorDebounce } = await import(
+const { runTopologyChain, resetAggregatorDebounce, _resetDispatchDedupe } = await import(
   "../../src/observers/registry-change-observer.js"
 );
 
@@ -34,6 +34,7 @@ describe("topology chain dispatch (§4.2)", () => {
     unlearnedOverride = {};
     unknownOverride = {};
     resetAggregatorDebounce();
+    _resetDispatchDedupe();
   });
 
   it("always fires snapshot + unlearned-report + unknown-report as base chain", async () => {

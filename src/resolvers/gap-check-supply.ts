@@ -1093,6 +1093,53 @@ export function echoSatisfiableRefusal(checkSrc: string): { reason: string } | n
   const shown = expects.flatMap((e) => e.lits.map((l) => l.s !== undefined ? JSON.stringify(l.s) : String(l.rx))).slice(0, 6).join(", ");
   return { reason: `${CHECK_ECHO_SATISFIABLE_STAGE}: every literal the check asserts (${shown}) is already in the input it passes the code under test, so code that echoes its input passes it and no fix is measured: assert on what the code computes from an input that does not contain the expected text` };
 }
+/**
+ * A CHECK THAT EXPECTS A LITERAL NOBODY SAID (qa ruling, 2026-10-24). development-vessel 85ca4d09's check expects
+ * runGapStoreMergeMigration to return { status: "skipped", reason: "local_copy_on_forwarding_node_is_stale_and_must_be_retired" }:
+ * a reason no code writes and the gap never names. Its red is the invented value's, and a "fix" that writes that
+ * string turns it green. Refused at arm, statically, as CHECK_EXPECTS_INVENTED_LITERAL_STAGE, when an expected string
+ * literal of a toBe / toEqual / toMatchObject / toContain / toMatch assertion (in the matcher's argument, or in the
+ * initializer of the const it names) carries a snake_case identifier or a phrase of three or more words, and occurs
+ * in neither the edit-site source nor the gap's own text (summary, falsifier_spec, must_fail, control). A negated
+ * assertion expects an absence and is not read. KNOWN LIMIT: a check whose expected outcome the gap's fix contradicts
+ * (general inverted intent) has no deterministic gate; this catches only the invented-literal form of it.
+ */
+export const CHECK_EXPECTS_INVENTED_LITERAL_STAGE = "check_expects_invented_literal";
+const EXPECTING_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual", "toMatchObject", "toContain", "toMatch"]);
+export function inventedLiteralRefusal(checkSrc: string, siteSrc: string | null, gapText: string): { reason: string } | null {
+  if (siteSrc === null) return null;
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return null; }
+  type Node = import("typescript").Node;
+  const sf = ts.createSourceFile("c.ts", checkSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const consts = new Map<string, Node>();
+  const collect = (n: Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) consts.set(n.name.text, n.initializer);
+    ts.forEachChild(n, collect);
+  };
+  collect(sf);
+  const expected: string[] = [];
+  const strings = (n: Node, depth = 0): void => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) expected.push(n.text);
+    else if (ts.isIdentifier(n) && depth === 0 && consts.has(n.text)) { strings(consts.get(n.text)!, 1); return; }
+    ts.forEachChild(n, (c) => strings(c, depth));
+  };
+  const visit = (n: Node): void => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && EXPECTING_MATCHERS.has(n.expression.name.text)) {
+      let base: import("typescript").Expression = n.expression.expression;
+      let negated = false;
+      while (ts.isPropertyAccessExpression(base)) { if (base.name.text === "not") negated = true; base = base.expression; }
+      if (!negated && ts.isCallExpression(base) && ts.isIdentifier(base.expression) && base.expression.text === "expect") for (const a of n.arguments) strings(a);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const carries = (l: string): boolean => /[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+/.test(l) || l.trim().split(/\s+/).filter(Boolean).length >= 3;
+  const invented = expected.filter((l) => carries(l) && !siteSrc.includes(l) && !gapText.includes(l));
+  if (invented.length === 0) return null;
+  const shown = invented.slice(0, 3).map((l) => JSON.stringify(l.slice(0, 100))).join(", ");
+  return { reason: `${CHECK_EXPECTS_INVENTED_LITERAL_STAGE}: the check expects ${shown}, which occurs in neither the edit site nor the gap's own text, so its red is the invented value's and writing that text would turn it green: expect what the gap says the code must produce, in the gap's or the code's own words` };
+}
 /** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
 async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[] }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
   const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
@@ -1472,8 +1519,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const region = regionOf(meta);
     const regionSite = region && site.ok ? vesselReader.read(site.edit_site) : null;
     const misses = site.ok && regionSite !== null ? checkMissesRegionRefusal(regionSite, site.edit_site, src, region) : null;
-    // THE CHECK IS NOT ECHO-SATISFIABLE (echoSatisfiableRefusal): static, before anything runs.
-    const echo = misses ? null : echoSatisfiableRefusal(src);
+    // THE CHECK IS NOT ECHO-SATISFIABLE (echoSatisfiableRefusal), NOR DOES IT EXPECT AN INVENTED LITERAL
+    // (inventedLiteralRefusal): static, before anything runs.
+    const gapText = [row["summary"], meta["falsifier_spec"], meta["must_fail"], meta["control"]].filter((x) => typeof x === "string").join("\n");
+    const echo = misses ? null : echoSatisfiableRefusal(src) ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText) : null);
     if (echo) {
       refused += 1;
       notArmed.push({ id, reason: echo.reason });

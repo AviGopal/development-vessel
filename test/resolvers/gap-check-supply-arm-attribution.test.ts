@@ -275,3 +275,73 @@ describe("the arm entry is a copy taken at arm time", () => {
     expect(led["arm"]).toMatchObject({ armed_by_node: HOLDER_NODE, handed_off_from: A });
   });
 });
+
+/** A re-attempt: the row back at a dispatched goal, its check grown to `n` titles (so a new check is judged). */
+async function reattempt(id: string, n: number): Promise<void> {
+  const row = structuredClone((await stored(id))!);
+  const meta = metaOf(row);
+  meta["check_supply"] = { ...ledgerOf(row), state: "goal_dispatched" };
+  row["classification_metadata"] = meta;
+  const w = await asHolder(() => sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: row } as never));
+  expect(w.shape).not.toBe("structuredError");
+  await asHolder(() => sg.__settleBirthEvaluationsForTests());
+  const tests = Array.from({ length: n }, (_, i) => `test("attr rearm ${i} ${RUN}", () => { expect(mod.widget).toBe(2); });`).join("\n");
+  writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\n${tests}\n`);
+}
+const armsOf = async (id: string): Promise<Row[]> => ((ledgerOf(await stored(id))["arms"] ?? []) as Row[]);
+
+describe("every arm keeps its own entry: a re-arm adds one, bounded", () => {
+  it("[MUST-FAIL] armed on B from A's hand-off, re-attempted, armed on C: both arm entries are readable with their own attribution", async () => {
+    const A = FORWARDING_NODE;
+    const C = `rearm-node-${RUN}`;
+    const id = T("attr-rearm");
+    await seed(id);
+    await forwardingTick(later(), A); // dispatch
+    writeCheck(id, `attr rearm first ${RUN}`, 2);
+    await forwardingTick(later(), A); // A hands the check off
+    await holderTick(later()); // B (the holder) arms it
+    expect(ledgerOf(await stored(id))["state"]).toBe("armed");
+    await reattempt(id, 2);
+    await forwardingTick(later(), C); // C hands the new check off
+    await forwardingTick(later(), C); // and arms it from the holder's verdict
+    const led = ledgerOf(await stored(id));
+    expect(led["state"]).toBe("armed");
+    const arms = (led["arms"] ?? []) as Row[];
+    expect(arms.length).toBe(2);
+    expect(arms[0]).toMatchObject({ armed_by_node: HOLDER_NODE, handed_off_from: A });
+    expect(arms[1]).toMatchObject({ armed_by_node: C, handed_off_from: C });
+    expect(led["arm"]).toEqual(arms[1]); // the latest
+  });
+
+  it("[CONTROL] a single local arm has one entry", async () => {
+    const id = T("attr-one");
+    await seed(id);
+    await holderTick(later());
+    writeCheck(id, `attr one ${RUN}`, 2);
+    await holderTick(later());
+    const arms = await armsOf(id);
+    expect(arms.length).toBe(1);
+    expect(arms[0]!["armed_by_node"]).toBe(HOLDER_NODE);
+    expect(arms[0]!["handed_off_from"]).toBeUndefined();
+  });
+
+  it("[CONTROL] the bound: six arms keep the last five, the oldest dropped", async () => {
+    const id = T("attr-bound");
+    await seed(id);
+    await holderTick(later());
+    writeCheck(id, `attr bound ${RUN}`, 2);
+    await holderTick(later()); // arm 1
+    const seen: Row[] = [(await armsOf(id)).at(-1)!];
+    for (let n = 2; n <= 6; n++) {
+      await reattempt(id, n);
+      await holderTick(later()); // arm n, judged and armed here
+      expect(ledgerOf(await stored(id))["state"]).toBe("armed");
+      seen.push((await armsOf(id)).at(-1)!);
+    }
+    const arms = await armsOf(id);
+    expect(new Set(seen.map((e) => e["armed_at"])).size).toBe(6);
+    expect(arms.length).toBe(5);
+    expect(arms).toEqual(seen.slice(1));
+  });
+});
+

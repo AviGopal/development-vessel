@@ -133,6 +133,9 @@ type Ledger = {
   handed_off_from?: string;
   /** The arm's own entry, copied when it was written: a later hand-off rewrites handed_off_from above, never this. */
   arm?: { armed_at: string; armed_by_node: string; handed_off_from?: string };
+  /** Every arm's entry, oldest first, the last ARM_HISTORY_MAX: a re-arm (another node, or the same one again) adds one
+   *  and never overwrites an earlier arm's attribution. `arm` above is the latest of them. */
+  arms?: Array<{ armed_at: string; armed_by_node: string; handed_off_from?: string }>;
   /** The outcome read back for the last dispatch (status, reached, why it was lost, where and when it was read). */
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
@@ -154,6 +157,8 @@ export const SEND_PENDING = "send_pending";
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
 const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
+/** How many arm entries a ledger keeps (check_supply.arms); the oldest is dropped past it. */
+const ARM_HISTORY_MAX = 5;
 const settledHistory = (l: Ledger): Row[] => {
   const prior = Array.isArray(l.history) ? l.history.slice(-4) : [];
   if (l.state === "dispatch_failed" || l.state === "dispatch_lost")
@@ -1272,12 +1277,13 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // The row's handed_off_from is the LATEST hand-off's: a re-attempt handed off by another node rewrites it. The arm
     // entry keeps the copy taken here, so who armed what, from whose hand-off, survives the next hand-off.
     const armEntry = { armed_at: nowIso, ...attribution };
+    const arms = [...(Array.isArray(ledger.arms) ? ledger.arms : []), armEntry].slice(-ARM_HISTORY_MAX);
     const w = await writeMeta(row, {
       evidence_resolve,
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, arm: armEntry, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
+      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, arm: armEntry, arms, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

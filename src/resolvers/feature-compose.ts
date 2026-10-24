@@ -6038,6 +6038,29 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   ].join("\n");
   return `A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\n${head}\n\nThe gate's output (its first ${REPAIR_OUTPUT_SLICE} chars; the reason above may lie past them):\n\n${slice}${errorSiteWindow}${ask}`;
 }
+/**
+ * THE CREATED-FILE REPAIR'S PROMPT (repairCreatedFile, the full re-author of a file this change created). It quotes the
+ * first 4000 chars of the verify output as "TYPECHECK OUTPUT". A test-writing compose CREATES its check, and the verify
+ * appends a refused check's reason (testWritingDetail) at the END of that output, past the pipeline log, so a check
+ * refused check_references_missing_export was rewritten without its reason or the module's exports. When the verify
+ * refused the test-writing check, the gate's detail and the refused module's exported surface (check-supply-admission.ts
+ * exportedSurface) go AHEAD of the slice as fields of their own; any other failure gets today's prompt, byte for byte.
+ */
+export function createdFileRepairPrompt(rel: string, errText: string, curContent: string, fv?: Pick<VerifyResult, "test_writing" | "draft">): string {
+  const tw = fv?.test_writing;
+  const fields: string[] = [];
+  if (tw && !tw.ok) {
+    const detail = fv?.draft?.gate_detail?.trim();
+    if (detail) fields.push(`GATE DETAIL (the pre-land gate's own reason; the check below was REFUSED for it): ${detail.slice(0, 1500)}`);
+    if (tw.exported_surface) fields.push(`EXPORTED SURFACE of ${tw.exported_surface.module} (the check may read, call and mock only these names; call each function with the parameters its signature declares, and reach internal code through one of them):\n${tw.exported_surface.text}`);
+  }
+  return `The file ${rel} was created by this change and fails \`bun run typecheck\`. Re-author it COMPLETELY and correctly.\n\n` +
+    (fields.length ? `${fields.join("\n")}\n\n` : "") +
+    `TYPECHECK OUTPUT:\n${errText.slice(0, 4000)}\n\n` +
+    `CURRENT CONTENT of ${rel}:\n${curContent.slice(0, 24000)}\n\n` +
+    `Emit the ENTIRE corrected file and nothing else — no prose, no code fences, no commentary. ` +
+    `Preserve every export the rest of the vessel depends on. Change as little as the errors require.`;
+}
 /** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
 export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };
 /** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
@@ -9744,7 +9767,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const tail = srcIdx >= 0 ? rel.slice(srcIdx + 1) : rel; // "src/..."
     return errText.includes(tail) || errText.includes(base) || errText.includes(rel);
   };
-  const repairCreatedFile = async (abs: string, errText: string): Promise<boolean> => {
+  const repairCreatedFile = async (abs: string, errText: string, fv?: VerifyResult): Promise<boolean> => {
     const { rel } = createdRelOf(abs);
     const cur = await callTool(toolsEndpoint, "fs_read", { path: abs });
     const curContent = (cur.body as { content?: unknown })?.content;
@@ -9766,15 +9789,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // 160 bytes over the ~5,000-line compose resolver — this repair path truncated
       // the very file it lives in. That is the `catastrophic_truncation` signature
       // the mitosis cutover screens for, produced here from inside.
-      const out = await llmCall(
-        llmEndpointNew,
-        `The file ${rel} was created by this change and fails \`bun run typecheck\`. Re-author it COMPLETELY and correctly.\n\n` +
-        `TYPECHECK OUTPUT:\n${errText.slice(0, 4000)}\n\n` +
-        `CURRENT CONTENT of ${rel}:\n${curContent.slice(0, 24000)}\n\n` +
-        `Emit the ENTIRE corrected file and nothing else — no prose, no code fences, no commentary. ` +
-        `Preserve every export the rest of the vessel depends on. Change as little as the errors require.`,
-        model,
-      );
+      const out = await llmCall(llmEndpointNew, createdFileRepairPrompt(rel, errText, curContent, fv), model);
       let body = out.trim();
       // Strip accidental code fences if the model added them despite instructions.
       if (body.startsWith("```")) body = body.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
@@ -9820,7 +9835,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       if (createdInVessel.length > 0) {
         let rewroteAny = false;
         for (const cabs of createdInVessel) {
-          if (await repairCreatedFile(cabs, errText)) { anyFixed = true; rewroteAny = true; }
+          if (await repairCreatedFile(cabs, errText, fv)) { anyFixed = true; rewroteAny = true; }
         }
         // A full rewrite changes this vessel's whole error landscape, so the surgical
         // edit fix below would be derived from now-stale errText. Skip surgical for this

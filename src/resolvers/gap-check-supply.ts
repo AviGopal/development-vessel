@@ -1174,6 +1174,35 @@ export function inventedLiteralRefusal(checkSrc: string, siteSrc: string | null,
   const shown = invented.slice(0, 3).map((l) => JSON.stringify(l.slice(0, 100))).join(", ");
   return { reason: `${CHECK_EXPECTS_INVENTED_LITERAL_STAGE}: the check expects ${shown}, which occurs in neither the edit site nor the gap's own text, so its red is the invented value's and writing that text would turn it green: expect what the gap says the code must produce, in the gap's or the code's own words` };
 }
+/**
+ * AN ARM REFUSAL REACHES THE DRAFTER (qa loop-closing ruling, 2026-10-24). A check refused at arm wrote its reason on
+ * the check-supply ledger only; the drafter's evidence (drafter/evidence.ts priorAttemptFeedbackBlock, which renders
+ * classification_metadata.failure_lessons, with attemptEvidenceBlock for structured records) never saw it, so the
+ * next check goal's draft could repeat the refused check. A refusal of one of these classes now APPENDS a structured
+ * record to the row's existing failure_lessons, under its existing cap (8, the oldest non-lock record evicted first,
+ * as feature-compose keeps it): its class, stage "arm", the own check (test_file, and the failure the arm judged),
+ * the full reason, and the refused check's text capped at 4 KB.
+ */
+// The stages, by value: REGION_RED_UNCHANGED_STAGE is declared further down, and a const is not readable before it.
+export const ARM_LESSON_CLASSES: ReadonlySet<string> = new Set(["region_red_unchanged", "red_independent_of_edit_site", "check_echo_satisfiable", "check_expects_invented_literal"]);
+export const FAILURE_LESSONS_MAX = 8;
+export const ARM_LESSON_EXCERPT_MAX = 4096;
+export function withArmRefusalLesson(meta: Row, a: { reason: string; testFile: string; checkSrc: string; firstFailure?: Row | null; at: string }): Row[] | null {
+  const cls = /^([a-z_]+):/.exec(a.reason)?.[1] ?? "";
+  if (!ARM_LESSON_CLASSES.has(cls)) return null;
+  const lessons = (Array.isArray(meta["failure_lessons"]) ? [...(meta["failure_lessons"] as Row[])] : []);
+  const ff = a.firstFailure ?? null;
+  lessons.push({
+    class: cls, stage: "arm", at: a.at, reason: a.reason,
+    own_check: { test_file: a.testFile, ...(ff ? { failing: [{ name: String(ff["name"] ?? ""), ...(ff["error"] != null ? { error: String(ff["error"]) } : {}), ...(ff["expected"] != null ? { expected: `Expected: ${String(ff["expected"])}` } : {}), ...(ff["received"] != null ? { received: `Received: ${String(ff["received"])}` } : {}) }] } : {}) },
+    check_excerpt: a.checkSrc.slice(0, ARM_LESSON_EXCERPT_MAX),
+  });
+  while (lessons.length > FAILURE_LESSONS_MAX) {
+    const i = lessons.findIndex((l) => l?.["no_effect_vs_parent"] !== true && !Array.isArray(l?.["constraints"]));
+    lessons.splice(i >= 0 ? i : 0, 1);
+  }
+  return lessons;
+}
 /** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
 async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[] }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
   const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
@@ -1561,7 +1590,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       refused += 1;
       notArmed.push({ id, reason: echo.reason });
       console.warn(`[gap-check-supply] ${id}: ${echo.reason.slice(0, 240)} — not armed`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: echo.reason, judged_titles: titles } });
+      const echoLessons = withArmRefusalLesson(meta, { reason: echo.reason, testFile: ledger.test_file, checkSrc: src, at: nowIso });
+      if (!pointer.dry_run) await writeMeta(row, { ...(echoLessons ? { failure_lessons: echoLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: echo.reason, judged_titles: titles } });
       continue;
     }
     if (misses) {
@@ -1660,7 +1690,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
       // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
       const handedOff = !unknown && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
-      if (!pointer.dry_run) await writeMeta(row, { ...(handedOff ? { evidence_resolve: null } : {}), check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
+      const armLessons = state === "arm_refused" && wrongReason ? withArmRefusalLesson(meta, { reason: wrongReason, testFile: ledger.test_file, checkSrc: src, firstFailure, at: nowIso }) : null;
+      if (!pointer.dry_run) await writeMeta(row, { ...(handedOff ? { evidence_resolve: null } : {}), ...(armLessons ? { failure_lessons: armLessons } : {}), check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
       continue;
     }
     if (pointer.dry_run) { armed.push(id); continue; }
@@ -1744,7 +1775,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (g.kind === "refuse") {
       refused += 1;
       notArmed.push({ id, reason: g.reason });
-      await writeMeta(row, { evidence_resolve: null, check_supply: { ...ledger, state: "arm_refused", reason: g.reason, judged_titles: titles, mutation_gate } });
+      let checkSrc = "";
+      try { checkSrc = readFileSync(join(clonesRoot(), ledger.vessel, ledger.test_file), "utf-8"); } catch { checkSrc = ""; }
+      const regateLessons = withArmRefusalLesson(meta, { reason: g.reason, testFile: ledger.test_file, checkSrc, firstFailure: firstFailureOf(baseline["red_reason"]), at: nowIso });
+      await writeMeta(row, { evidence_resolve: null, ...(regateLessons ? { failure_lessons: regateLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: g.reason, judged_titles: titles, mutation_gate } });
     } else {
       await writeMeta(row, { check_supply: { ...ledger, mutation_gate } });
     }

@@ -6295,6 +6295,21 @@ export function featureComposeInputProblem(pointer: { verify_vessels?: unknown }
   return null;
 }
 
+/**
+ * THE SEMANTIC-REJECT LESSON IS APPENDED TO THE ROW'S LESSONS (verified bug, qa 2026-10-24). The spec-matched write-back
+ * read the matched row's failure_lessons at its TOP level, where the store never keeps them (node1: 0 of 4,296 open
+ * rows had a top-level failure_lessons; 930 had it under classification_metadata). So it always read [], and its write
+ * replaced classification_metadata.failure_lessons with ONE entry, erasing the gap's per-gap drafter memory each time
+ * it fired. The lessons are read where they live (classification_metadata, a top-level list only as a fallback) and
+ * the new one is appended under the existing cap (the last 8). Exported for tests.
+ */
+export function semanticRejectLessons(matched: Record<string, unknown>, lesson: Record<string, unknown>): Array<Record<string, unknown>> {
+  const meta = (typeof matched["classification_metadata"] === "object" && matched["classification_metadata"] !== null ? matched["classification_metadata"] : {}) as Record<string, unknown>;
+  const existing = Array.isArray(meta["failure_lessons"]) ? (meta["failure_lessons"] as Array<Record<string, unknown>>)
+    : Array.isArray(matched["failure_lessons"]) ? (matched["failure_lessons"] as Array<Record<string, unknown>>) : [];
+  return [...existing, lesson].slice(-8);
+}
+
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   // OBSERVE (compose-observe.ts): goal-host's observe dispatch. Admitted exactly as the landing compose it measures,
   // drafted and verified, never landed; its writers read the mode from this compose's context, which ends with it.
@@ -10502,9 +10517,6 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
                 (g["spec"] as string).trim() === specText.trim(),
             );
             if (matched && typeof matched["id"] === "string") {
-              const existingLessons: Array<Record<string, unknown>> = Array.isArray(matched["failure_lessons"])
-                ? (matched["failure_lessons"] as Array<Record<string, unknown>>)
-                : [];
               const gateAsUnknown = semantic_gate as unknown as Record<string, unknown>;
               const newLesson = {
                 at: new Date().toISOString(),
@@ -10516,7 +10528,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
                   ? (gateAsUnknown["reason"] as string).slice(0, 1500)
                   : JSON.stringify(semantic_gate).slice(0, 1500),
               };
-              const updatedLessons = [...existingLessons, newLesson].slice(-8);
+              const updatedLessons = semanticRejectLessons(matched, newLesson);
               const existingMeta = (typeof matched["classification_metadata"] === "object" && matched["classification_metadata"] !== null
                 ? matched["classification_metadata"]
                 : {}) as Record<string, unknown>;

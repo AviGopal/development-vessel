@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
 import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
+import { installCutoverExecGuard, type ExecGuard } from "../resolvers/cutover-exec-guard.js";
 
 export type Row = Record<string, any>;
 export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped" | "seed_new" | "seed_new_versioned";
@@ -165,6 +166,7 @@ export const markEvent = (e: string): void => { events.push(e); };
 
 // ── the harness ──────────────────────────────────────────────────────────────────────────────────────────────
 export function createHarness(ROOT: string, RUNTIME: string) {
+  let execGuard: ExecGuard | null = null;
   const CLONES = join(ROOT, "clones");
   const norm = (s: string): string => s
     .split(RUNTIME).join("<RUNTIME>")
@@ -472,6 +474,11 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       if (active) return;
       active = true;
       installFs();
+      // The compose's attempt checks read the target unit's LoadState (attempt-checks.ts systemd_units). Never the
+      // host's systemctl (the node gate runs this inside the live container): answered as a host with no systemd, so
+      // that check reads unknown wherever the suite runs.
+      execGuard = installCutoverExecGuard();
+      execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
     },
     /** Put node:fs, fetch, console and Math.random back. */
     restore(): void {
@@ -479,6 +486,9 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       active = false;
       mock.module("node:fs/promises", () => ORIG_P);
       mock.module("node:fs", () => ORIG_S);
+      const unrouted = execGuard?.restore() ?? [];
+      execGuard = null;
+      if (unrouted.length > 0) throw new Error(`drafter-split harness: blocked host spawn(s) with no route: ${unrouted.join("; ")}`);
     },
     /** Run one fixture through `fc.resolveFeatureCompose` and return its recording. */
     async run(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Row }> }, fixture: Fixture, onBody?: (body: Row) => void): Promise<Recording> {

@@ -1521,8 +1521,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const mutation = verdict === "present" && !gateReason && site.ok
       ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles, baseline: report, k: coverageKnobs(rhythm.body).k })
       : null;
-    // Then, on a row with no literal region, the region derived from the evidence's observed output (regionMutantGate).
-    const regionGate = mutation?.kind === "pass" && regionGateApplies(meta) && site.ok
+    // Then, on a row with no literal region, the region derived from the evidence (regionMutantGate). It also runs when
+    // the edit-site gate refused: the region mutant is a mutant of the site, so a red it moves does depend on the site,
+    // and that refusal's premise ("no mutant of the site moves the red") does not stand. On a large site the k operator
+    // mutants, spread over every declaration the check reaches, can all miss the code a correct check measures (the
+    // hand-written 5e69d7a0 check: six mutants of supplyPass's reach, none on the refusal path).
+    const regionGate = (mutation?.kind === "pass" || mutation?.kind === "refuse") && regionGateApplies(meta) && site.ok
       ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
       : null;
     if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
@@ -1532,8 +1536,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${waiting.detail})`);
       continue;
     }
-    const wrongReason = gateReason ?? (mutation?.kind === "refuse" ? mutation.reason : null) ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
-    const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}) } } : {};
+    const regionMoved = regionGate?.kind === "pass" && Number(regionGate.record["changed"] ?? 0) > 0;
+    const siteRefusal = mutation?.kind === "refuse" && !regionMoved ? mutation.reason : null;
+    const wrongReason = gateReason ?? siteRefusal ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
+    const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}), ...(mutation.kind === "refuse" && regionMoved ? { refusal_overridden_by: "region_gate" } : {}) } } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
     if (verdict !== "present" || wrongReason) {

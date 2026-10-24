@@ -86,7 +86,7 @@ import {
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
-import { codeContract } from "./code-introspect.js";
+import { codeContract, type CodeContract } from "./code-introspect.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { coverageKnobs, RAN_PACING, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
@@ -341,7 +341,15 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
   if (b) add({ kind: "behaviour", value: b[0].trim() });
   return out;
 }
-const anchorText = (anchors: readonly CheckAnchor[]): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
+/**
+ * A SYMBOL ANCHOR IS NOT A CALLABLE UNLESS THE SITE EXPORTS IT. A symbol anchors a check when it resolves in the site's
+ * code, and an internal function does: the goal then said "Build it on … symbol `universalToolFallback` …: call the
+ * code", the drafter called it off the namespace import, and the verify refused the check,
+ * check_references_missing_export (f176b321, three times on goal-host src/index.ts). Given the site's exported names
+ * (its codeContract, the list the goal shows), a symbol anchor it does not export is said to be internal and reached
+ * through an export on the list. No names (no reader, an unreadable site, an open list) labels nothing.
+ */
+const anchorText = (anchors: readonly CheckAnchor[], site?: { rel: string; exported: ReadonlySet<string> }): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`${site && !site.exported.has(a.value) ? ` (internal to ${site.rel}, not exported: the test cannot call it, so reach it through an export on the list that does)` : ""}` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
 
 /**
  * QUOTE WHAT THE GATE WOULD READ AS AN UNRENDERED BINDING (CHANGE-32a). A check goal is built from a gap's own prose,
@@ -377,10 +385,13 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
   const imp = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel)
     ? `Import the module the defect lives in as a namespace, import * as mod from "${importSpecifier(testFile, siteRel)}", and assert on it`
     : "Import the src module the defect lives in as a namespace (import * as mod from \"../../src/<file>\") and assert on it";
+  const codeSite = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel) ? siteRel : null;
+  const contract = codeSite && reader ? codeContract(codeSite, reader) : null;
+  const exported = contract && !("unavailable" in contract) && contract.open === null && contract.exports.length > 0 ? { rel: codeSite!, exported: new Set(contract.exports.map((e) => e.name)) } : undefined;
   const named = anchors.length
-    ? `Build it on what the evidence names (${anchorText(anchors)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
+    ? `Build it on what the evidence names (${anchorText(anchors, exported)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
     : "";
-  const exportsList = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel) ? (reader ? exportListSentence(siteRel, reader, summary) : unreadSiteSentence(siteRel)) : "";
+  const exportsList = codeSite ? (reader ? exportListSentence(codeSite, reader, summary, contract ?? undefined) : unreadSiteSentence(codeSite)) : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
     `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named +
     priorAttemptSentence(prior) +
@@ -413,8 +424,8 @@ export const EXPORT_SIGNATURES_MAX_CHARS = 2000;
 export function unreadSiteSentence(siteRel: string): string {
   return `${siteRel} could not be read here, so its exports and their signatures are not listed: open it before writing the test, and call only what it exports, with the parameters each function declares. `;
 }
-export function exportListSentence(siteRel: string, reader: SrcReader, summary: string): string {
-  const contract = codeContract(siteRel, reader);
+export function exportListSentence(siteRel: string, reader: SrcReader, summary: string, read?: CodeContract): string {
+  const contract = read ?? codeContract(siteRel, reader);
   if ("unavailable" in contract) return contract.unavailable === "not readable" ? unreadSiteSentence(siteRel) : `${siteRel} could not be parsed here (${contract.unavailable}), so its exports and their signatures are not listed: open it before writing the test, and call only what it exports, with the parameters each function declares. `;
   const ex = { names: new Map(contract.exports.map((e) => [e.name, e.kind])), open: contract.open };
   if (ex.names.size === 0) return "";

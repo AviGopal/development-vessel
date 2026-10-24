@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 const { thisNode } = await import("../../src/resolvers/self-fact-reconcile.js");
@@ -29,7 +30,11 @@ let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
 let store: Map<string, Record<string, any>>;
-afterAll(() => { restoreCutoverFsModules(); restoreCutoverFetch(); });
+afterAll(() => { restoreCutoverFsModules(); restoreCutoverFetch(); restoreCutoverExecModules(); });
+// SYSTEMD THROUGH A STUB, never the real tool (the test preload blocks systemctl in the live container). The landing's
+// attempt checks read `systemctl show <clone>/host-repo.service -p LoadState --value` for the temp host repo; this
+// node's systemd answered that read "not-found", exit 0, when the file was green before the preload.
+let execGuard: ExecGuard;
 
 const VESSEL = "development-vessel";
 const GAP = "gap-cutover-landing-lease-target";
@@ -49,6 +54,8 @@ beforeEach(async () => {
 
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "host-repo-load-state", match: (c) => /^systemctl show \S+\/host-repo\.service -p LoadState --value$/.test(c), respond: () => ({ exitCode: 0, stdout: "not-found\n" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   store = routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -58,6 +65,8 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const unroutedExec = execGuard.restore();
+  if (unroutedExec.length > 0) throw new Error(`unrouted systemd call(s): ${unroutedExec.join("; ")}`);
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   await rm(ws, { recursive: true, force: true });

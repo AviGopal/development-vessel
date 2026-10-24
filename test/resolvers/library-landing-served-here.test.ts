@@ -7,11 +7,12 @@
 //
 // Hermetic: a temp clone root (VESSELS_CLONE_ROOT) with one real two-commit git repo; systemd and the last-good pin come
 // from the reader's existing deps seam (__setAutoRevertDepsForTests), never from the live host.
-import { afterAll, beforeAll, afterEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "library-served-here-"));
 const VESSEL = "fixture-library";
@@ -39,8 +40,21 @@ beforeAll(async () => {
   process.env["VESSELS_CLONE_ROOT"] = ROOT;
   mod = await import("../../src/judge/gap-landing-verdict.js");
 });
-afterEach(() => { mod.__setAutoRevertDepsForTests(null); });
+// SYSTEMD THROUGH A STUB, never the real tool (the test preload blocks systemctl in the live container). The unit-backed
+// case reads `systemctl list-units --all --plain --no-legend mitosis-self-restart-*`; this node's systemd printed
+// nothing, exit 0 (no self-restart owed), when the file was green before the preload.
+let execGuard: ExecGuard;
+beforeEach(() => {
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "self-restart-units", match: (c) => c === "systemctl list-units --all --plain --no-legend mitosis-self-restart-*", respond: () => ({ exitCode: 0, stdout: "" }) });
+});
+afterEach(() => {
+  mod.__setAutoRevertDepsForTests(null);
+  const unrouted = execGuard.restore();
+  if (unrouted.length > 0) throw new Error(`unrouted systemd call(s): ${unrouted.join("; ")}`);
+});
 afterAll(() => {
+  restoreCutoverExecModules();
   if (savedRoot === undefined) delete process.env["VESSELS_CLONE_ROOT"]; else process.env["VESSELS_CLONE_ROOT"] = savedRoot;
   rmSync(ROOT, { recursive: true, force: true });
 });

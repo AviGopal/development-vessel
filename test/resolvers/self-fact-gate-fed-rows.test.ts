@@ -5,11 +5,43 @@
 // /workspace/.gate (InaccessiblePaths), so pull-sync (root) publishes the accepted copy to a dir the vessel
 // can only read: /workspace/.gate-public/{self-facts.json, source.json}. Gated + accepted + hash match ⇒ that
 // copy; ungated marker ⇒ origin/dev as before; anything else ⇒ FAIL CLOSED (no row judged, reason logged).
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+
+// SYSTEMD THROUGH A STUB, never the real tool: the node gate runs this file inside the live container, where the test
+// preload blocks systemctl. The answers are what this node's systemd printed for the same reads when the file was
+// green before the preload, read live on that node:
+//   - `systemctl is-active <unit>`: "active", exit 0, for each unit below;
+//   - `systemctl show substrate-pull-sync -p ExecMainStartTimestamp --value --timestamp=unix`: "@<unix>", about a
+//     minute before the read (the timer-gated rows need a run inside their window);
+//   - the rows' `journalctl ... --grep <pattern>` reads (activity-api, development-vessel, substrate-pull-sync):
+//     no matching line, exit 1 ("nothing matched", a read), except substrate-pull-sync's TEST GATE BLIND read, which
+//     printed six matching lines (exit 0), the same line at the six times below.
+const LIVE_GATE_BLIND = ["10:30:22", "11:25:37", "11:58:14", "12:29:07", "13:30:09", "16:14:18"]
+  .map((t) => `[pull-sync 2026-10-24T${t}+00:00] activity-api: !!! TEST GATE BLIND — suite produced no countable result (killed_at_wall: TEST_TIMEOUT_SECONDS=503); HOLDING activity-api (a gate that did not measure never promotes; runtime keeps its current code)\n`)
+  .join("");
+const LIVE_IS_ACTIVE: Record<string, string> = { "substrate-pull-sync.timer": "active", "activity-api": "active", "development-vessel": "active" };
+let sysGuard: ExecGuard;
+beforeEach(() => {
+  sysGuard = installCutoverExecGuard();
+  sysGuard.route({
+    name: "is-active",
+    match: (c) => /^systemctl is-active \S+$/.test(c) && c.split(" ")[2]! in LIVE_IS_ACTIVE,
+    respond: (c) => ({ exitCode: 0, stdout: `${LIVE_IS_ACTIVE[c.split(" ")[2]!]}\n` }),
+  });
+  sysGuard.route({ name: "timer-last-run", match: (c) => /^systemctl show substrate-pull-sync -p ExecMainStartTimestamp --value --timestamp=unix$/.test(c), respond: () => ({ exitCode: 0, stdout: `@${Math.floor(Date.now() / 1000) - 60}\n` }) });
+  sysGuard.route({ name: "journal-grep", match: (c) => /^journalctl -u \S+ --since -\d+h( --until -\d+min)? --no-pager -o cat --grep /.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
+  sysGuard.route({ name: "journal-gate-blind", match: (c) => /^journalctl -u substrate-pull-sync --since -24h --no-pager -o cat --grep TEST GATE BLIND$/.test(c), respond: () => ({ exitCode: 0, stdout: LIVE_GATE_BLIND }) });
+});
+afterEach(() => {
+  const unrouted = sysGuard.restore();
+  if (unrouted.length > 0) throw new Error(`unrouted systemd call(s): ${unrouted.join("; ")}`);
+});
+afterAll(() => restoreCutoverExecModules());
 
 const ROOT = join(tmpdir(), `self-fact-gate-fed-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });

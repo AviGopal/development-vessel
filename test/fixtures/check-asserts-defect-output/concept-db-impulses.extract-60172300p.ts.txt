@@ -1,0 +1,135 @@
+// EXTRACT of concept-db src/routes/impulses.ts at 60172300's parent: the 78b70967 extract (below, unchanged) plus the
+// write-scope refusal block verbatim (:152-217, WRITE_SCOPE through writeScopeRefusal), which 60172300's check quotes
+// ("Write scope required", WRITE_SCOPE_REQUIRED). The block is never called on this path, as in the original, where the
+// 400 pointer.type validation answers first.
+// EXTRACT of concept-db src/routes/impulses.ts at 78b70967 (the parent of 23f78717), for the region-mutant arm gate.
+// The app constant (:50), its /resolve registration (:524), resolveImpulse's request validation (:534-557, the
+// "Missing or invalid pointer.type" 400 verbatim), the three unimplemented write cases (:824-828 verbatim), the case
+// after them (:829, reduced), the default (:1276) and the catch (:1288) are kept; the shape guard (:563) is reduced to
+// "no caller, no write". Hono and the JWT reader come from ./hono-standin (fixture only), as they come from other
+// modules in the original, so the same-file declarations the check reaches are the original's.
+import type { Context } from './hono-standin';
+import { Hono, getJwtAuthFromContext } from './hono-standin';
+
+export const WRITE_SCOPE = 'write';
+export const ADMIN_SCOPE = 'admin';
+
+export function isWriteShape(shape: string): boolean {
+  return shape.endsWith('_write');
+}
+
+export function mayWriteConcepts(auth: JwtAuthContext | null | undefined): boolean {
+  const scopes = Array.isArray(auth?.scopes) ? auth!.scopes : [];
+  return scopes.includes(WRITE_SCOPE) || scopes.includes(ADMIN_SCOPE);
+}
+
+/**
+ * Shapes that write without the `_write` suffix. impulseSignatureConcept
+ * upserts a concept whose text is built from the caller's pointer_type and
+ * shape, so it needs the write grant like any `_write` shape.
+ */
+export const UNSUFFIXED_WRITE_SHAPES: readonly string[] = ['impulseSignatureConcept'];
+
+export function needsWriteScope(shape: string): boolean {
+  return isWriteShape(shape) || UNSUFFIXED_WRITE_SHAPES.includes(shape);
+}
+
+export interface WriteScopeRefusal {
+  success: false;
+  error: 'Write scope required';
+  code: 'WRITE_SCOPE_REQUIRED';
+  shape?: string;
+  tool?: string;
+  message: string;
+}
+
+/**
+ * The write grant at every concept-db write ingress: this resolve route, the
+ * REST writes under /concepts and the MCP tools under /mcp. Null when the
+ * caller may write (mayWriteConcepts); otherwise logs one [auth-refused] line
+ * at the scope_guard layer and returns the 403 body. Callers check it before
+ * any resolver runs, so a refused request writes nothing. The refusal names
+ * the scope needed, never the caller's credential.
+ */
+export function writeScopeRefusal(
+  c: Context,
+  jwtAuth: JwtAuthContext | null | undefined,
+  target: { shape?: string; tool?: string } = {},
+): WriteScopeRefusal | null {
+  if (mayWriteConcepts(jwtAuth)) return null;
+  const route = `${c.req.method} ${c.req.path}`;
+  logAuthRefused({
+    route,
+    shape: target.shape,
+    layer: 'scope_guard',
+    reason: `WRITE_SCOPE_REQUIRED: credential lacks the write scope${target.tool ? ` (tool ${target.tool})` : ''}`,
+    caller_hint: currentRequestAuthScope()?.callerHint ?? callerHint(c),
+  });
+  const subject = target.shape ? `Shape "${target.shape}"` : target.tool ? `Tool "${target.tool}"` : `"${route}"`;
+  return {
+    success: false,
+    error: 'Write scope required',
+    code: 'WRITE_SCOPE_REQUIRED',
+    ...(target.shape ? { shape: target.shape } : {}),
+    ...(target.tool ? { tool: target.tool } : {}),
+    message:
+      `${subject} requires a credential issued with the "${WRITE_SCOPE}" scope (or "${ADMIN_SCOPE}"); ` +
+      'a read-only credential may read concepts but not write them.',
+  };
+}
+
+const impulses = new Hono();
+
+impulses.post('/resolve', (c) => resolveImpulse(c));
+
+async function resolveImpulse(c: Context): Promise<Response> {
+  const jwtAuth = getJwtAuthFromContext(c);
+
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const pointer = body?.impulse?.pointer ?? body?.pointer;
+  if (!pointer || typeof pointer !== 'object') {
+    return c.json({ error: 'Missing required field: pointer' }, 400);
+  }
+
+  const shape = pointer.type;
+  if (typeof shape !== 'string') {
+    return c.json({ error: 'Missing or invalid pointer.type' }, 400);
+  }
+
+  if (!jwtAuth && shape.endsWith('_write')) {
+    return c.json({ success: false, error: 'Authentication required', code: 'AUTH_REQUIRED', shape }, 401);
+  }
+
+  try {
+    let result: { content: unknown; metadata: Record<string, unknown> };
+
+    switch (shape) {
+      case 'concept_delete_write':
+      case 'concept_retire_write':
+      case 'concept_supersede_write':
+        // Stub to satisfy advertised shape contract. Implementation is pending.
+        throw new Error(`'${pointer.shape}' is not yet implemented.`);
+
+      case 'impulseCooccurrenceEdges': {
+        result = { content: { edges: [] }, metadata: { shape: 'impulseCooccurrenceEdges', count: 0 } };
+        break;
+      }
+
+      default:
+        return c.json({ error: `Unknown impulse shape: "${shape}"` }, 400);
+    }
+
+    return c.json(result);
+  } catch (error) {
+    const err = error as Error;
+    return c.json({ error: 'Resolution failed', shape, message: err.message }, 500);
+  }
+}
+
+export { impulses };

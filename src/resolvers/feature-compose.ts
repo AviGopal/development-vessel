@@ -52,6 +52,7 @@ import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, trunc
 import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
+import { sweepGitOut } from "../judge/gap-check-judge.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
@@ -287,6 +288,29 @@ export function parkedLandingProblem(park: ParkedLanding): string | null {
 }
 
 /**
+ * The park's own landing, when it already landed on dev and was then reverted there; null otherwise. A park outlives
+ * a landing whose push was not read as pushed, and once that landing is reverted the park's base is the live file
+ * again, so the base check below passes and the resume re-lands the reverted change (a resume re-applied a reverted
+ * landing under the same Attempt-Id). The landing is the commit on HEAD carrying the park's Attempt-Id trailer (with
+ * no attempt id: the proposal's `apply <gap>-compose-report via` subject); it counts as reverted when every park file
+ * it touched reads at HEAD as it did before it (the reverse patch is present after it). Never throws.
+ */
+export function parkRevertedOnDev(cloneDir: string, park: ParkedLanding): { landing_sha: string; revert_sha: string | null } | null {
+  const needle = park.attempt_id ? `Attempt-Id: ${park.attempt_id}` : `apply ${park.gap_id}-compose-report via`;
+  const landings = (sweepGitOut(cloneDir, ["log", "--format=%H", "-F", `--grep=${needle}`, "HEAD"]) ?? "").split("\n").filter((x) => /^[0-9a-f]{40}$/.test(x));
+  for (const sha of landings) {
+    if (/^revert/i.test(sweepGitOut(cloneDir, ["log", "-1", "--format=%s", sha]) ?? "")) continue;
+    const touched = new Set((sweepGitOut(cloneDir, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]) ?? "").split("\n").filter(Boolean));
+    const files = park.files.filter((f) => touched.has(f.path));
+    if (files.length === 0) continue;
+    if (!files.every((f) => sweepGitOut(cloneDir, ["show", `HEAD:${f.path}`]) === sweepGitOut(cloneDir, ["show", `${sha}^:${f.path}`]))) continue;
+    const revert = (sweepGitOut(cloneDir, ["log", "--format=%H", "-E", "-i", "--grep", `reverts (\\w+ ){0,4}(commit )?(${sha}|${sha.slice(0, 12)})`, `${sha}..HEAD`]) ?? "").split("\n")[0] || null;
+    return { landing_sha: sha, revert_sha: revert };
+  }
+  return null;
+}
+
+/**
  * Finish a parked landing: re-check the base, sync the verified files into the live
  * tree, typecheck ONLY (the park already passed the suite and the semantic gate), and
  * cut over. Returns null when the park is stale or fails typecheck - the park is then
@@ -304,6 +328,15 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
   }
   const gapId = park.gap_id;
   const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+  // A PROPOSAL ALREADY REVERTED ON DEV IS NOT RE-LANDED: refused before the base check, which a revert satisfies.
+  const reverted = parkRevertedOnDev(`${cloneRoot}/${park.vessel}`, park);
+  if (reverted) {
+    await deleteParkedLanding(gapId);
+    const why = `its landing ${reverted.landing_sha.slice(0, 12)} is on dev and was reverted${reverted.revert_sha ? ` by ${reverted.revert_sha.slice(0, 12)}` : ""}`;
+    await appendComposeLesson("proposal_reverted_on_dev", `parked landing refused before resume: ${why}`, park.vessel, pointer.gap);
+    console.log(`[feature-compose] proposal_reverted_on_dev for ${gapId} - ${why}; park deleted, not re-landed`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "resume", reason: "proposal_reverted_on_dev", error: `parked landing for ${gapId}: ${why}`, resumed_from: park.compose_id, landing_sha: reverted.landing_sha, revert_sha: reverted.revert_sha } };
+  }
   for (const f of park.files) {
     // A null base means "absent when parked" only if it is still absent. An un-isolated compose parks
     // null for a file that exists (it takes no pre-sync snapshot), and the cutover below would then
@@ -356,6 +389,8 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       console.log(`[feature-compose] park_stale for ${gapId} - typecheck failed on the current base, redrafting`);
       return null;
     }
+    const headFirst = Bun.spawnSync(["git", "-C", `${cloneRoot}/${park.vessel}`, "show", `HEAD:${park.files[0]!.path}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const devBaseSha = headFirst.exitCode === 0 ? parkHash("sha256").update(headFirst.stdout).digest("hex").slice(0, 12) : null;
     const cut = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",
       vessel_name: park.vessel,
@@ -363,7 +398,9 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       mitosis_version_id: `${park.vessel}-resume-${ts}`,
       mitosis_root: stagingRoot,
       staged_files: park.files.map((f) => f.path),
-      staged_base_sha: parkHash("sha256").update(park.files[0]!.base_content ?? park.files[0]!.content).digest("hex").slice(0, 12),
+      // RE-STAGED ON CURRENT DEV: the base is the first file as committed at the clone's HEAD now, as a fresh compose
+      // stages it, not the hash the park recorded; the recorded base is the fallback only when HEAD lacks the file.
+      staged_base_sha: devBaseSha ?? parkHash("sha256").update(park.files[0]!.base_content ?? park.files[0]!.content).digest("hex").slice(0, 12),
       evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck (resume)", "parked: shape-dispatch", "parked: bun test (baseline-delta, flake-confirmed)"] },
       gap_id: gapId,
       proposal_id: `${gapId}-compose-report`,

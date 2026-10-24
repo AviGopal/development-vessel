@@ -1,4 +1,5 @@
 import { resolve, relative, isAbsolute } from "path";
+import { VOLUME_RUNTIME_READ_DIRS } from "../config.js";
 
 // Multi-root workspace guard shared by the fs resolvers. WORKSPACE_ROOT is
 // always allowed; EXTRA_WORKSPACE_ROOTS (comma-separated absolute paths) opens
@@ -59,12 +60,21 @@ export function resolveInAnyWorkspace(path: string, workspaceRoot: string): stri
   return resolveWithin(path, allowedWorkspaceRoots(workspaceRoot));
 }
 
-/** Validate a read path and return its resolved absolute form. */
-export function resolveInAnyWorkspaceForRead(path: string, workspaceRoot: string): string {
-  return resolveWithin(path, [
+// Reads also reach the volume dirs the substrate itself writes (VOLUME_RUNTIME_READ_DIRS: the pattern
+// clusters and the failure-mode scenario queues). Their writers resolve the volume root while
+// WORKSPACE_ROOT is the super-repo clone, so draft-activity-from-pattern's load_cluster and the
+// scenario-queue listers were refused on every run. Each dir is named; the rest of the volume is not.
+export function allowedReadRoots(workspaceRoot: string): string[] {
+  return [
     ...allowedWorkspaceRoots(workspaceRoot),
     process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
-  ]);
+    ...VOLUME_RUNTIME_READ_DIRS,
+  ];
+}
+
+/** Validate a read path and return its resolved absolute form. */
+export function resolveInAnyWorkspaceForRead(path: string, workspaceRoot: string): string {
+  return resolveWithin(path, allowedReadRoots(workspaceRoot));
 }
 
 export function assertInAnyWorkspace(path: string, workspaceRoot: string): void {

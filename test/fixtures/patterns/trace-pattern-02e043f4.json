@@ -1,0 +1,28 @@
+{
+  "pattern_id": "trace-pattern-02e043f4",
+  "summary": "The substrate has successfully produced the output-shape combination [uiFeedback_write] 4 times in the observation window via these EXISTING activities: satisfier:uiFeedback_write. Capture this recurrent topology as a reusable composite by COMPOSING those existing activities — author a chain whose tasks set \"resolver\" to one of the existing activity ids listed above (activities-as-resolvers), so executing it dispatches them and forms genuine composition edges. Do NOT re-implement their work with leaf resolvers, and do NOT author a meta-activity. Reuse the existing producers; only mint new leaf work for a shape that has no producer.",
+  "observation_window": "2026-10-12T06:30:01.545Z/2026-10-13T06:30:01.545Z",
+  "n_observations": 4,
+  "n_contrast_examples": 0,
+  "expected_outputs": [
+    "uiFeedback_write"
+  ],
+  "example_trace_ids": [
+    "walk-satisfier-fixture-1",
+    "walk-satisfier-fixture-2",
+    "walk-satisfier-fixture-3",
+    "walk-satisfier-fixture-4"
+  ],
+  "contrast_trace_ids": [],
+  "producing_activities": [
+    "satisfier:uiFeedback_write"
+  ],
+  "topology_hint": "COMPOSE the existing producers via activities-as-resolvers. For each composing task, set the task's \"resolver\" field to the EXACT activity id string of one of these existing activities: [satisfier:uiFeedback_write] — e.g. {\"id\":\"t1\",\"resolver\":\"satisfier:uiFeedback_write\",\"outputShapes\":[...]}. The engine reads the \"resolver\" VALUE ITSELF as the activity to dispatch (getTemplate(task.resolver) → dispatchCompose), forming one genuine composition edge per task. Do NOT set resolver to the word \"activity\" and do NOT put the activity id in config — the id MUST be the resolver value. Chain them so the LAST task emits one of [uiFeedback_write]. ONLY fall back to a leaf resolver (http_fetch, json_path_extract, fs_write, concept_create_write) for a needed shape that has NO existing producer. Use the {{<task>_json}} form to thread a prior task's output into the next. Do NOT author a read_scenario → analyse → write-a-Proposal scaffold; emit no *Proposal output.",
+  "deny_list": [
+    "fs_read of a scenario file",
+    "activityTemplateProposal",
+    "patch_proposal",
+    "read_scenario"
+  ],
+  "bridge_source": "trace_recurring_pattern_scan"
+}

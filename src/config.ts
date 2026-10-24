@@ -114,6 +114,18 @@ export const VOLUME_ROOT = "/workspace";
 export const FAILURE_MODE_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-modes/scenarios`;
 /** The vessel-authoring scenario queue (missing_capability gaps). */
 export const FAILURE_MODE_VESSEL_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-modes/vessel-scenarios`;
+/** Recurring-pattern clusters: the trace and arrival scans write them, draft-activity-from-pattern reads them. */
+export const PATTERNS_DIR = `${VOLUME_ROOT}/patterns`;
+/**
+ * The volume dirs the substrate itself writes and then reads back through fs_read / fs_list / fs_grep.
+ * Listed one by one, never the whole volume: the read guard roots at WORKSPACE_ROOT (the super-repo
+ * clone), so without these a reader of its own runtime state is refused "path outside workspace root".
+ */
+export const VOLUME_RUNTIME_READ_DIRS: readonly string[] = [
+  PATTERNS_DIR,
+  FAILURE_MODE_SCENARIOS_DIR,
+  FAILURE_MODE_VESSEL_SCENARIOS_DIR,
+];
 
 /**
  * Full configuration block. The `discovery.shapes` array is the single source

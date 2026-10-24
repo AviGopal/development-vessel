@@ -1,5 +1,6 @@
 import { resolve, relative, isAbsolute } from "path";
 import type { ResolverResult } from "./types.js";
+import { VOLUME_RUNTIME_READ_DIRS } from "../config.js";
 
 export interface FsReadPointer {
   type: "fs_read";
@@ -17,6 +18,9 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
   const runtimeDir = process.env["MITOSIS_RUNTIME_DIR"];
   if (runtimeDir) allowedRoots.push(runtimeDir);
   allowedRoots.push("/vessels");
+  // The volume dirs the substrate writes and reads back (pattern clusters, scenario queues), named
+  // one by one; see allowedReadRoots in workspace-roots.ts.
+  allowedRoots.push(...VOLUME_RUNTIME_READ_DIRS);
   const extraRoots = process.env["FS_READ_EXTRA_ROOTS"];
   if (extraRoots) {
     for (const entry of extraRoots.split(",")) {

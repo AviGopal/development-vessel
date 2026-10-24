@@ -1727,12 +1727,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // 2a. THE REGION GATE, CAUGHT UP (qa re-arm ruling, 2026-10-24). Rows armed before the region gate existed carry no
   // mutation_gate.region_gate, so nothing measured that their check depends on the gap's region, and their
   // fixed_elsewhere close now holds (gap-landing-verdict regionGateAtClose). Each pass re-runs the gate on at most
-  // `region_regate_per_tick` (shaped, default 2) ARMED check-supply rows with no literal region and no region_gate: the
+  // `region_regate_per_tick` (shaped, default 3) ARMED check-supply rows with no literal region and no region_gate: the
   // check once more as it stands (the baseline the gate compares), then once under the region mutant (regionMutantGate).
   // Refused: un-armed (arm_refused, evidence_resolve cleared), the reason the next goal's lesson, as at arm. Otherwise
   // the reading is recorded and the row stays armed. A check no longer red at HEAD is recorded unmeasured, so it is not
   // re-run every pass. A row a gate run cannot be read for waits for the next pass.
-  const regateMax = Math.floor(posNum(rhythm.body["region_regate_per_tick"], 2));
+  const regateMax = Math.floor(posNum(rhythm.body["region_regate_per_tick"], 3));
   const regated: Array<{ id: string; outcome: string }> = [];
   for (const row of open) {
     if (regated.length >= regateMax) break;

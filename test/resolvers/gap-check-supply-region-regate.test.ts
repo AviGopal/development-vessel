@@ -1,7 +1,7 @@
 // THE REGION GATE CATCHES UP ON ROWS ARMED BEFORE IT (qa re-arm ruling, 2026-10-24). A check-supply row armed before
 // the region gate carries no mutation_gate.region_gate: nothing measured that its check depends on the gap's region,
 // and its fixed_elsewhere close now holds. Each supply pass re-runs the gate on at most region_regate_per_tick (shaped,
-// default 2) such ARMED rows: the check as it stands (the baseline), then under the region mutant. Refused: un-armed
+// default 3) such ARMED rows: the check as it stands (the baseline), then under the region mutant. Refused: un-armed
 // (arm_refused, evidence_resolve cleared) with the lesson; otherwise the reading is recorded and the row stays armed. A
 // row that already has a region_gate is never re-run. END TO END on the harness of gap-check-supply-region-mutant.test.ts:
 // the concept-db extract and 23f78717's check, verbatim, every run through the REAL resolveTestSuite.
@@ -186,11 +186,11 @@ describe("the region gate is re-run on armed rows that lack it, at most two a pa
     expect(regatedIds(await tick())).not.toContain(id);
   }, 120_000);
 
-  it("[CONTROL] a row armed with a region_gate is not re-run; and at most two rows are re-gated per pass", async () => {
+  it("[CONTROL] a row armed with a region_gate is not re-run; and at most three rows (the shaped default) are re-gated per pass", async () => {
     const gated = await armedRow("rg-gated", CHECK_REACHES, TITLE_REACHES, { ...PRE_GATE, region_gate: { region: "derived_from_text_anchor", anchor: "not yet implemented", measured: 1, changed: 1, unmeasured: 0 } });
-    const ids = [await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE), await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE), await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE)];
+    const ids = [await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE), await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE), await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE), await armedRow("rg-cap", CHECK_REACHES, TITLE_REACHES, PRE_GATE)];
     const first = regatedIds(await tick());
-    expect(first.length).toBe(2);
+    expect(first.length).toBe(3);
     expect(first).not.toContain(gated);
     const second = regatedIds(await tick());
     expect(second.length).toBe(1);

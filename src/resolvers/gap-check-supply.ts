@@ -33,7 +33,8 @@
  *      not import the edit site, or one that reads a name its module does not export (check-supply-admission.ts
  *      missingExportRefusal: check_references_missing_export), or whose red asserts a shape or body field the function
  *      it calls never returns (contractMismatchRefusal: check_asserts_contract_mismatch) writes no check: the gap stays
- *      unarmed (fail closed). The first failure's error line and Expected/Received are kept on the ledger. No region is written, so
+ *      unarmed (fail closed), and so does one whose calls never reach the gap's region (checkMissesRegionRefusal:
+ *      check_call_misses_region). The first failure's error line and Expected/Received are kept on the ledger. No region is written, so
  *      the arm-time region gate has nothing to refuse; the write still passes through it.
  *
  * OUTCOME (the dispatch is read back; a dispatch alone earns no credit): every dispatch records the node that sent
@@ -97,6 +98,7 @@ import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY } from "../config.js";
 import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
+import { regionOf } from "../lib/region-literal.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
 /** The predicate_source a system-authored check carries: the discriminator the measures count. */
@@ -925,6 +927,44 @@ export function siteRegionSource(siteSrc: string, checkSrc: string): string {
   for (const st of keep) for (let i = st.getStart(site); i < st.getEnd(); i += 1) chars[i] = siteSrc[i]!;
   return chars.join("");
 }
+/**
+ * THE CHECK'S CALLS MUST REACH THE GAP'S REGION (arm step only, 2026-10-24). goal-host 6c6d632's check called
+ * dispatchFailureReasons, which never reaches its gap's region (`if (r == null) return "the command produced no
+ * result";`, in runGoalAsPoolWalkBody), so its red was its fixture's, not the defect's, and the mutation gate below,
+ * mutating the declarations the check names, counted that red moving as "the check tests the site". Refused
+ * (CHECK_MISSES_REGION_STAGE) when the gap carries a region (classification_metadata.region) that occurs exactly once in
+ * the edit site inside a NAMED top-level declaration, the check names declarations of the site, and neither they nor
+ * the same-file declarations they reach (siteRegionSource) contain it. A region in an unnamed top-level statement (a
+ * route registration, a loop) decides nothing: siteRegionSource keeps only named declarations. Static, before the run.
+ * Not applied at the verify: check-supply-admission.ts is an evaluator file and this module is outside its closure.
+ */
+export const CHECK_MISSES_REGION_STAGE = "check_call_misses_region";
+export function checkMissesRegionRefusal(siteSrc: string, siteRel: string, checkSrc: string, region: string): { reason: string } | null {
+  const r = region.trim();
+  if (!r) return null;
+  const start = siteSrc.indexOf(r);
+  if (start < 0 || siteSrc.indexOf(r, start + r.length) >= 0) return null;
+  const end = start + r.length;
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return null; }
+  const site = ts.createSourceFile("s.ts", siteSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const top = site.statements.find((st) => st.getStart(site) <= start && st.getEnd() >= end);
+  const enclosing = !top ? null
+    : (ts.isFunctionDeclaration(top) || ts.isClassDeclaration(top)) && top.name ? top.name.text
+    : ts.isVariableStatement(top) && top.declarationList.declarations.every((d) => ts.isIdentifier(d.name)) ? top.declarationList.declarations.map((d) => (d.name as import("typescript").Identifier).text).join(", ")
+    : null;
+  if (!enclosing) return null;
+  const kept = siteRegionSource(siteSrc, checkSrc);
+  if (kept === siteSrc || kept.slice(start, end) === r) return null;
+  const reached: string[] = [];
+  for (const st of site.statements) {
+    if (kept[st.getStart(site)] === " ") continue;
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) reached.push(st.name.text);
+    else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) reached.push(d.name.text);
+  }
+  const shown = r.replace(/\s+/g, " ").slice(0, 160);
+  return { reason: `${CHECK_MISSES_REGION_STAGE}: what the check calls in ${siteRel} (${reached.slice(0, 8).join(", ")}${reached.length > 8 ? ", …" : ""}, with the same-file declarations it reaches) never reaches the gap's region (\`${shown}\`, in ${enclosing}), so its red is not the defect's: call an export that reaches the region` };
+}
 async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number }): Promise<MutationGateOutcome> {
   let src: string | null = null;
   try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
@@ -1194,6 +1234,17 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       notArmed.push({ id, reason: missing.reason });
       console.warn(`[gap-check-supply] ${id}: ${missing.reason.slice(0, 240)} — not armed`);
       if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: missing.reason, judged_titles: titles } });
+      continue;
+    }
+    // THE CHECK'S CALLS REACH THE REGION (checkMissesRegionRefusal): static, before anything runs, like the export guard.
+    const region = regionOf(meta);
+    const regionSite = region && site.ok ? vesselReader.read(site.edit_site) : null;
+    const misses = site.ok && regionSite !== null ? checkMissesRegionRefusal(regionSite, site.edit_site, src, region) : null;
+    if (misses) {
+      refused += 1;
+      notArmed.push({ id, reason: misses.reason });
+      console.warn(`[gap-check-supply] ${id}: ${misses.reason.slice(0, 240)} — not armed`);
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: misses.reason, judged_titles: titles } });
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };

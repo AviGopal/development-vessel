@@ -1023,6 +1023,76 @@ export function checkMissesRegionRefusal(siteSrc: string, siteRel: string, check
   const shown = r.replace(/\s+/g, " ").slice(0, 160);
   return { reason: `${CHECK_MISSES_REGION_STAGE}: what the check calls in ${siteRel} (${reached.slice(0, 8).join(", ")}${reached.length > 8 ? ", …" : ""}, with the same-file declarations it reaches) never reaches the gap's region (\`${shown}\`, in ${enclosing}), so its red is not the defect's: call an export that reaches the region` };
 }
+/**
+ * A CHECK THE CODE CAN PASS BY ECHOING ITS INPUT (qa ruling A, 2026-10-24). goal-host da804a66's check passes
+ * verifyGoalReached a goal containing "right predicate with a baseline" and "independent verifier", and asserts
+ * /predicate.*baseline/ and /independent/ over the verdict's reason: a judge that quotes the goal back passes it, and
+ * so would a "fix" that only echoes. Refused at arm, statically, as CHECK_ECHO_SATISFIABLE_STAGE, when EVERY expect()
+ * in the check is satisfied by echo: it matches at least one string or regex literal (in the expect's argument or
+ * its matcher's), and each of them occurs in (a string), or matches (a regex), a string literal the check passes in a
+ * call to the code under test (a member of a namespace import, or a named import, of a relative module). A negated
+ * expect, or one with no literal (toBe(true) on a computed value, a status number), is not echo, so a log-line check
+ * whose asserted text is not in its inputs stays allowed. Same parser as siteRegionSource.
+ */
+export const CHECK_ECHO_SATISFIABLE_STAGE = "check_echo_satisfiable";
+export function echoSatisfiableRefusal(checkSrc: string): { reason: string } | null {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return null; }
+  type Node = import("typescript").Node;
+  const sf = ts.createSourceFile("c.ts", checkSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const ns = new Set<string>();
+  const named = new Set<string>();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !st.importClause || !ts.isStringLiteral(st.moduleSpecifier) || !st.moduleSpecifier.text.startsWith(".")) continue;
+    const nb = st.importClause.namedBindings;
+    if (nb && ts.isNamespaceImport(nb)) ns.add(nb.name.text);
+    if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) named.add(el.name.text);
+    if (st.importClause.name) named.add(st.importClause.name.text);
+  }
+  const strings = (n: Node, out: string[]): string[] => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) out.push(n.text);
+    else if (ts.isTemplateExpression(n)) { out.push(n.head.text); for (const sp of n.templateSpans) out.push(sp.literal.text); }
+    ts.forEachChild(n, (c) => { strings(c, out); });
+    return out;
+  };
+  const underTest = (e: import("typescript").Expression): boolean => {
+    let x: import("typescript").Expression = e;
+    while (ts.isPropertyAccessExpression(x)) { if (ts.isIdentifier(x.expression) && ns.has(x.expression.text)) return true; x = x.expression; }
+    return ts.isIdentifier(x) && named.has(x.text);
+  };
+  const inputs: string[] = [];
+  const expects: Array<{ negated: boolean; lits: Array<{ s?: string; rx?: RegExp }> }> = [];
+  const literalsIn = (n: Node, out: Array<{ s?: string; rx?: RegExp }>): void => {
+    if (ts.isRegularExpressionLiteral(n)) {
+      const m = /^\/(.*)\/([a-z]*)$/s.exec(n.text);
+      if (m) { try { out.push({ rx: new RegExp(m[1]!, m[2]!.replace(/[gy]/g, "")) }); } catch { /* unreadable: not echo */ } }
+    } else if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) out.push({ s: n.text });
+    if (ts.isCallExpression(n) && underTest(n.expression)) return; // the code's own call is an input, not an assertion
+    ts.forEachChild(n, (c) => literalsIn(c, out));
+  };
+  const visit = (n: Node): void => {
+    if (ts.isCallExpression(n) && underTest(n.expression)) for (const a of n.arguments) strings(a, inputs);
+    // expect(<arg>)[.not][.resolves|.rejects].<matcher>(<args>)
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      let base: import("typescript").Expression = n.expression.expression;
+      let negated = false;
+      while (ts.isPropertyAccessExpression(base)) { if (base.name.text === "not") negated = true; base = base.expression; }
+      if (ts.isCallExpression(base) && ts.isIdentifier(base.expression) && base.expression.text === "expect") {
+        const lits: Array<{ s?: string; rx?: RegExp }> = [];
+        for (const a of base.arguments) literalsIn(a, lits);
+        for (const a of n.arguments) literalsIn(a, lits);
+        expects.push({ negated, lits });
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const echoed = (l: { s?: string; rx?: RegExp }): boolean => l.s !== undefined ? l.s.length > 0 && inputs.some((i) => i.includes(l.s!)) : inputs.some((i) => l.rx!.test(i));
+  if (expects.length === 0 || inputs.length === 0) return null;
+  if (!expects.every((e) => !e.negated && e.lits.length > 0 && e.lits.every(echoed))) return null;
+  const shown = expects.flatMap((e) => e.lits.map((l) => l.s !== undefined ? JSON.stringify(l.s) : String(l.rx))).slice(0, 6).join(", ");
+  return { reason: `${CHECK_ECHO_SATISFIABLE_STAGE}: every literal the check asserts (${shown}) is already in the input it passes the code under test, so code that echoes its input passes it and no fix is measured: assert on what the code computes from an input that does not contain the expected text` };
+}
 /** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
 async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[] }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
   const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
@@ -1379,6 +1449,15 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const region = regionOf(meta);
     const regionSite = region && site.ok ? vesselReader.read(site.edit_site) : null;
     const misses = site.ok && regionSite !== null ? checkMissesRegionRefusal(regionSite, site.edit_site, src, region) : null;
+    // THE CHECK IS NOT ECHO-SATISFIABLE (echoSatisfiableRefusal): static, before anything runs.
+    const echo = misses ? null : echoSatisfiableRefusal(src);
+    if (echo) {
+      refused += 1;
+      notArmed.push({ id, reason: echo.reason });
+      console.warn(`[gap-check-supply] ${id}: ${echo.reason.slice(0, 240)} — not armed`);
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: echo.reason, judged_titles: titles } });
+      continue;
+    }
     if (misses) {
       refused += 1;
       notArmed.push({ id, reason: misses.reason });

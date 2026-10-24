@@ -302,7 +302,7 @@ export function pendingSweepCandidates(gaps: Record<string, unknown>[]): { unhel
     if (m.operator_hold === true) { held += 1; continue; }
     // Decided needs_predicate on this landing and still unmeasurable: re-checking it can change nothing, so it takes
     // no slot. A predicate armed since (a human's VERIFY_SHAPE:/EXPECTED_LITERAL: answer) or a new landing brings it back.
-    if (needsPredicateDecided(m)) { needsPredicate += 1; continue; }
+    if (needsPredicateDecided(m, g.reopened_at)) { needsPredicate += 1; continue; }
     unheld.push(g);
   }
   return { unheld, held, needs_predicate: needsPredicate };
@@ -314,13 +314,70 @@ export function pendingSweepCandidates(gaps: Record<string, unknown>[]): { unhel
  * candidates on one node, 2026-10-24, closed nothing). The first such reading is the decision: needs_predicate
  * {landed, at} is recorded on the row, the row stays held pending verification (never closed, never re-admitted for
  * a re-land), and a human is asked for a check on the pending-verify-<gap> panel, whose labelled answer lines arm one.
- * Whether that decision stands: it names the row's current landing and the row is still unmeasurable. Exported for tests.
+ * Whether that decision stands: it names the row's current landing, the row is still unmeasurable, and the row was
+ * not reopened after it (a reopened_at later than needs_predicate.at clears it: the row is examined and decided anew).
+ * Exported for tests.
  */
 export const NEEDS_PREDICATE = "needs_predicate";
-export function needsPredicateDecided(meta: Record<string, unknown>): boolean {
-  const d = meta[NEEDS_PREDICATE] as { landed?: unknown } | null | undefined;
+export function needsPredicateDecided(meta: Record<string, unknown>, reopenedAt?: unknown): boolean {
+  const d = meta[NEEDS_PREDICATE] as { landed?: unknown; at?: unknown } | null | undefined;
   const landed = d && typeof d === "object" && typeof d.landed === "string" ? d.landed : "";
+  if (typeof reopenedAt === "string" && Number.isFinite(Date.parse(reopenedAt)) && !(Date.parse(String(d?.at ?? "")) >= Date.parse(reopenedAt))) return false;
   return landed.length >= 7 && landed === meta.pending_outcome_verification && !landVerdictIsMeasured(meta);
+}
+
+/**
+ * A TERMINAL PARTIAL CLOSE IS RE-OPENED FOR A VERDICT (row a-landed-partial-close-over-semantic-dissent-is-terminal-…,
+ * qa option 3). A landing closed landed_partial (under the lane's own semantic dissent, or stamped landed_unverified),
+ * or closed landed_verified while it carries a landed_unverified marker and no grounded label, escaped every
+ * verifier: the sweep reads open rows only. The sweep re-opens such a CLOSED, stamped row as pending verification,
+ * recording partial_reopen {by, pass, sha, at, reopen_count, prior} (the pass stamp stands in for a trace id; prior
+ * keeps the close the store clears on an open write). Ruling (a) is unchanged: a fresh dissent landing still closes
+ * landed_partial. Only the re-opened landing is not re-closed landed_partial by the same dissent; it ends falsified,
+ * reverted, or needs_predicate. Exported for tests.
+ */
+export const PARTIAL_REOPEN = "partial_reopen";
+function hasUnverifiedMarker(m: Record<string, unknown>): boolean {
+  return m.landed_unverified === true || (typeof m.landed_unverified_reason === "string" && m.landed_unverified_reason.trim() !== "") || (Array.isArray(m.semantic_dissent) && m.semantic_dissent.length > 0);
+}
+/** Whether a partial_reopen marker names this landing. */
+export function partialReopenedFor(meta: Record<string, unknown>, sha: string): boolean {
+  const r = meta[PARTIAL_REOPEN] as { sha?: unknown } | null | undefined;
+  const a = r && typeof r === "object" && typeof r.sha === "string" ? r.sha.trim() : "";
+  const b = String(sha ?? "").trim();
+  return a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+/** A closed row the sweep re-opens: stamped, closed landed_partial (or landed_verified with an unverified marker and no
+ *  grounded label for the landing), and not already re-opened by the sweep for this landing. */
+export function partialReopenCandidate(g: Record<string, unknown>): boolean {
+  if (String(g.status ?? "") !== "closed") return false;
+  const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+  const sha = typeof m.pending_outcome_verification === "string" ? m.pending_outcome_verification : "";
+  if (sha.length < 7 || partialReopenedFor(m, sha)) return false;
+  if (m.closed_reason === "landed_partial") return true;
+  if (m.closed_reason !== "landed_verified" || !hasUnverifiedMarker(m)) return false;
+  const l = landingLabelHere(m, sha);
+  return !(l?.grounded === true && l.shadow !== true);
+}
+/** The re-open row, built from the FRESH closed row, or null when it is no longer a candidate. */
+export function partialReopenRow(fresh: Record<string, unknown> | null, pass: string, at: string): Record<string, unknown> | null {
+  if (!fresh || !partialReopenCandidate(fresh)) return null;
+  const m0 = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+  const sha = String(m0.pending_outcome_verification);
+  const meta: Record<string, unknown> = {
+    ...m0,
+    disposition: isParkingDisposition(m0.disposition) ? m0.disposition : "pending_verification",
+    [PARTIAL_REOPEN]: { by: "gap-sweep", pass, sha, at, reopen_count: Number(fresh.reopen_count ?? 0) + 1, prior: { closed_reason: m0.closed_reason ?? null, close_basis: m0.close_basis ?? null, closed_at: fresh.closed_at ?? m0.closed_at ?? null } },
+    pending_note: `re-opened by the pending-land sweep (${pass}): a ${String(m0.closed_reason)} close of ${sha.slice(0, 12)} is not a verdict`,
+  };
+  return { ...fresh, status: "open", classification_metadata: meta };
+}
+/** The store's own reopen of this row is the sweep's partial re-open of this landing (the reopen_count it recorded):
+ *  that reopen is not a re-detection, so the stale-evidence release does not apply to it. A later reopen does. */
+export function reopenIsSweepPartialReopen(g: Record<string, unknown>, sha: string): boolean {
+  const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+  const r = m[PARTIAL_REOPEN] as { reopen_count?: unknown } | null | undefined;
+  return partialReopenedFor(m, sha) && !!r && Number(r.reopen_count) === Number(g.reopen_count ?? 0);
 }
 // When this process last examined each pending gap, whatever the verdict. Only a 'pending' verdict
 // persists pending_last_checked_at, so without this a gap stuck at present/unknown/not_in_clone sorted
@@ -1895,8 +1952,21 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0, partial_reopened: 0, partial_reclose_suppressed: 0 };
   try {
+    // RE-OPEN TERMINAL PARTIAL CLOSES (partialReopenCandidate) before the open read, so this pass examines them. Bounded.
+    try {
+      const closedRead = await resolveSubstrateGap({ type: "substrateGap", status: "closed", limit: Number.MAX_SAFE_INTEGER, exclude_categories: [...DECISION_LOG_GAP_CATEGORIES], include_held: true } as never);
+      const pass = `gap-sweep:${new Date().toISOString()}`;
+      for (const c of (((closedRead?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? []).filter(partialReopenCandidate).slice(0, PENDING_VERIFY_SWEEP_LIMIT)) {
+        const row = partialReopenRow(await readGapFresh(String(c.id ?? "")), pass, new Date().toISOString());
+        if (!row) continue;
+        const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "closed", gap: row } as never);
+        if (w?.shape === "structuredError" || (w?.body as { action?: unknown } | undefined)?.action === "skipped") continue;
+        tally.partial_reopened += 1;
+        console.warn(`[gap-sweep] re-opened ${String(c.id)} as pending verification (${pass}): its ${String(((c.classification_metadata ?? {}) as Record<string, unknown>).closed_reason)} close was not a verdict`);
+      }
+    } catch (err) { console.warn(`[gap-sweep] partial re-open skipped: ${String(err).slice(0, 200)}`); }
     const read = await resolveSubstrateGap({
       type: "substrateGap",
       status: "open",
@@ -1996,7 +2066,7 @@ const pending = candidates.unheld
       }
       // A REOPENED row is not re-closed on a landing older than its re-detection (see staleCloseEvidence):
       // checked BEFORE the evidence run, which proves nothing about this reopen and can cost a test_suite.
-      const staleSweep = staleCloseEvidence(g, sha);
+      const staleSweep = reopenIsSweepPartialReopen(g, sha) ? null : staleCloseEvidence(g, sha);
       if (staleSweep) {
         tally.stale += 1;
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: ${staleSweep.reason} — credited sha ${sha.slice(0, 12)} landed ${staleSweep.committed_at ?? "at an unknown time"}, gap re-detected ${staleSweep.redetected_at}; no outcome appended, released for a landing after the re-detection`);
@@ -2144,6 +2214,13 @@ const pending = candidates.unheld
           await recordOrphanSiblingRefusal(g, sha, orphan);
           continue;
         }
+      }
+      // A landing the sweep re-opened from a partial close is not re-closed landed_partial by the same dissent: it stays
+      // held pending verification until it is falsified, reverted or decided needs_predicate (partialReopenRow).
+      if (partialReopenedFor(meta, sha) && landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta), independentLabel) === "landed_partial") {
+        tally.partial_reclose_suppressed += 1;
+        console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but re-opened landing ${sha.slice(0, 12)} is NOT re-closed landed_partial: held pending verification`);
+        continue;
       }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;

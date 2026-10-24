@@ -293,3 +293,26 @@ describe("reach_rate_scan", () => {
     });
   });
 });
+
+// THE FLOOR ABSTAINS: NO DEFECT MARKER UNDER min_graded_volume (2026-10-24, qa). Below the graded-volume floor the
+// scoped read abstains (reach_rate null, so heuristic 2 reads 'present' and the gap stays open); it does not assert
+// the defect either, because one or two graded runs are not a reach rate. A check demanding reach_below_floor on a
+// below-floor family (dev 815860b7) asked for the opposite of this contract. Pinned here so the contract is a test.
+describe("reach_rate_scan below the graded-volume floor", () => {
+  it("abstains: reach_rate is null and reach_below_floor is absent", async () => {
+    const res = await resolveReachRateScan({
+      type: "reach_rate_scan",
+      activity_id: "activity-with-one-good-run",
+      dry_run: true,
+      min_graded_volume: 10,
+      min_reach_rate: 0.95,
+      _rows: [
+        { activity_id: "activity-with-one-good-run", count: 1, success_rate: 1.0, reached_count: 1, graded_count: 1, ungraded_count: 0, reach_rate: 1.0 },
+      ],
+    } as never);
+    const b = res.body as Record<string, unknown>;
+    expect(res.shape).toBe("reachRateReport");
+    expect(b["reach_rate"]).toBeNull();
+    expect(b["reach_below_floor"]).toBeUndefined();
+  });
+});

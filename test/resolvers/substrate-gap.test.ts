@@ -2,8 +2,9 @@ import { afterAll, describe, it, expect } from "bun:test";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { tmpdir } from "os";
 import { join } from "path";
-import { rmSync, existsSync } from "fs";
+import { rmSync, existsSync, mkdtempSync } from "fs";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 // THE STORE IS HELD HERE, under this suite's temp root. On a node that forwards its gap store (GAP_STORE_ENDPOINT set)
 // every read and write goes to the holder (gapStoreIsLocal), and the scrubbed test runner points it at an address
@@ -36,6 +37,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import(
   "../../src/resolvers/substrate-gap.js"
 );
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 
 describe("substrateGap resolver", () => {
   it("write creates a gap with default status=open", async () => {
@@ -171,29 +173,56 @@ describe("substrateGap resolver", () => {
   // (set at the top of this file, before import) suppresses that; this test proves
   // the suppression actually reaches Bun.spawn, and that flipping it off restores
   // the original trigger behavior (the guard doesn't silently disable production).
+  // BOTH SPAWN SEAMS ARE STUBBED (2026-10-24). The unit start is Bun.spawnSync(["systemctl", "start", "--no-block",
+  // "gap-compose.service"]) since 2026-09-11/14; only the too-soon-after-a-compose fallback uses Bun.spawn. Stubbing
+  // Bun.spawn alone left the real spawnSync live: an eligible guard-off write would have started the real unit. The
+  // guard-off probe is ARMED (class1: expected_literal at an edit site), because the write path nudges only a gap
+  // composeEligibilitySkipReason admits; an unarmed probe is skipped before either seam. Stubbing as
+  // substrate-gap-write-nudge-eligibility.test.ts: both seams, fetch (policy reads answered as explicit open records),
+  // a temp compose slot dir with a free autonomous slot.
   it("does not spawn systemctl when SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER=1, but does when unset", async () => {
     const realSpawn = Bun.spawn;
+    const realSpawnSync = Bun.spawnSync;
     const realFetch = globalThis.fetch;
     const spawnCalls: unknown[][] = [];
-    const fakeExited = Promise.resolve(0);
-    (Bun as unknown as { spawn: typeof Bun.spawn }).spawn = ((...args: unknown[]) => {
+    const spawnSyncCalls: unknown[][] = [];
+    (Bun as unknown as { spawn: unknown }).spawn = ((...args: unknown[]) => {
       spawnCalls.push(args);
-      return { exited: fakeExited } as unknown as ReturnType<typeof Bun.spawn>;
-    }) as typeof Bun.spawn;
+      return { exited: Promise.resolve(0), stderr: new Response("").body };
+    }) as unknown;
+    (Bun as unknown as { spawnSync: unknown }).spawnSync = ((...args: unknown[]) => {
+      spawnSyncCalls.push(args);
+      return { exitCode: 0, stdout: Buffer.from(""), stderr: Buffer.from("") };
+    }) as unknown;
     // The "guard off" branch below also reaches the second production side effect
     // in this same code block — a self-fetch nudge to THIS vessel's own live HTTP
     // surface (http://127.0.0.1:8090 by default). Left real, this test would
     // recreate, on every run, exactly the production side effect it exists to
-    // prove is suppressed. Stub it to a no-op response.
-    (globalThis as { fetch: typeof fetch }).fetch = (() =>
-      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
-    const g = globalThis as { __gapComposeLastTrigger?: number; __composeDrainInflight?: boolean };
+    // prove is suppressed. Stubbed: the policy reads get the explicit open records
+    // (the spend envelope fails closed on anything else), everything else a no-op.
+    (globalThis as { fetch: typeof fetch }).fetch = (async (_input: unknown, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+        return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
+      }
+      if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const slotDir = mkdtempSync(join(tmpdir(), "compose-trigger-guard-slots-"));
+    const savedSlotDir = process.env["COMPOSE_SLOT_DIR"];
+    const savedMaxConcurrent = process.env["COMPOSE_MAX_CONCURRENT"];
+    process.env["COMPOSE_SLOT_DIR"] = slotDir;
+    process.env["COMPOSE_MAX_CONCURRENT"] = "2"; // autonomous lane cap = 1, free
+    __resetPolicyReadsForTests();
+    const g = globalThis as { __gapComposeLastTrigger?: number; __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
     const savedTrigger = g.__gapComposeLastTrigger;
     const savedInflight = g.__composeDrainInflight;
+    const savedLastAt = g.__composeDrainLastAt;
     try {
-      // Guard ON (the default for this whole file): no spawn.
+      // Guard ON (the default for this whole file): no spawn of either kind.
       g.__gapComposeLastTrigger = undefined;
       g.__composeDrainInflight = false;
+      g.__composeDrainLastAt = undefined;
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -206,6 +235,7 @@ describe("substrateGap resolver", () => {
         },
       });
       expect(spawnCalls.length).toBe(0);
+      expect(spawnSyncCalls.length).toBe(0);
 
       // Guard OFF: the real production path fires (against the fake Bun.spawn, so
       // still nothing real launches), proving the guard is additive, not a
@@ -222,16 +252,27 @@ describe("substrateGap resolver", () => {
           summary: "must start gap-compose.service when the test guard is off",
           detected_at: "2026-08-30T00:00:01Z",
           status: "open",
+          classification_metadata: {
+            edit_site: "repos/development-vessel/src/compose-trigger-guard-off-probe.ts",
+            expected_literal: "COMPOSE_TRIGGER_GUARD_OFF_PROBE_LITERAL",
+          },
         },
       });
-      expect(spawnCalls.length).toBe(1);
-      expect(spawnCalls[0]?.[0]).toEqual(["systemctl", "start", "gap-compose.service"]);
+      expect(spawnSyncCalls.length).toBe(1);
+      expect(spawnSyncCalls[0]?.[0]).toEqual(["systemctl", "start", "--no-block", "gap-compose.service"]);
+      expect(spawnCalls.length).toBe(0);
     } finally {
       process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
       g.__gapComposeLastTrigger = savedTrigger;
       g.__composeDrainInflight = savedInflight;
+      g.__composeDrainLastAt = savedLastAt;
       (Bun as unknown as { spawn: typeof Bun.spawn }).spawn = realSpawn;
+      (Bun as unknown as { spawnSync: typeof Bun.spawnSync }).spawnSync = realSpawnSync;
       (globalThis as { fetch: typeof fetch }).fetch = realFetch;
+      if (savedSlotDir === undefined) delete process.env["COMPOSE_SLOT_DIR"]; else process.env["COMPOSE_SLOT_DIR"] = savedSlotDir;
+      if (savedMaxConcurrent === undefined) delete process.env["COMPOSE_MAX_CONCURRENT"]; else process.env["COMPOSE_MAX_CONCURRENT"] = savedMaxConcurrent;
+      rmSync(slotDir, { recursive: true, force: true });
+      __resetPolicyReadsForTests();
     }
   });
 });

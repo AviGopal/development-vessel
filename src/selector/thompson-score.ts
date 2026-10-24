@@ -45,22 +45,22 @@ export function recordToParams(
  * Draw a Thompson sample from Beta(alpha, beta) using the
  * Johnk method (no external dependencies, pure TS).
  *
- * Returns a value in (0, 1) — never null.
+ * Returns a value in (0, 1) — never null. `rng` is the uniform source (Math.random unless a caller seeds it).
  */
-export function sampleBeta(alpha: number, beta: number): number {
+export function sampleBeta(alpha: number, beta: number, rng: () => number = Math.random): number {
   // Guard: clamp to valid range
   const a = Math.max(alpha, 1e-6);
   const b = Math.max(beta, 1e-6);
 
   // Special case: uniform
   if (a === 1 && b === 1) {
-    return Math.random();
+    return rng();
   }
 
   // Johnk's method: works well for a,b >= 1
   // For robustness we use the gamma-ratio method via log-transform.
-  const x = sampleGamma(a);
-  const y = sampleGamma(b);
+  const x = sampleGamma(a, rng);
+  const y = sampleGamma(b, rng);
   const total = x + y;
   if (total <= 0) return 0.5; // degenerate guard
   return x / total;
@@ -70,10 +70,10 @@ export function sampleBeta(alpha: number, beta: number): number {
  * Sample from Gamma(shape, 1) using Marsaglia-Tsang method.
  * shape must be > 0.
  */
-function sampleGamma(shape: number): number {
+function sampleGamma(shape: number, rng: () => number = Math.random): number {
   if (shape < 1) {
     // Boost via: Gamma(shape) = Gamma(shape+1) * U^(1/shape)
-    return sampleGamma(shape + 1) * Math.pow(Math.random(), 1 / shape);
+    return sampleGamma(shape + 1, rng) * Math.pow(rng(), 1 / shape);
   }
   const d = shape - 1 / 3;
   const c = 1 / Math.sqrt(9 * d);
@@ -81,11 +81,11 @@ function sampleGamma(shape: number): number {
     let x: number;
     let v: number;
     do {
-      x = randn();
+      x = randn(rng);
       v = 1 + c * x;
     } while (v <= 0);
     v = v * v * v;
-    const u = Math.random();
+    const u = rng();
     if (u < 1 - 0.0331 * (x * x) * (x * x)) {
       return d * v;
     }
@@ -97,9 +97,9 @@ function sampleGamma(shape: number): number {
 }
 
 /** Standard normal sample via Box-Muller. */
-function randn(): number {
-  const u1 = Math.random() || 1e-10;
-  const u2 = Math.random() || 1e-10;
+function randn(rng: () => number = Math.random): number {
+  const u1 = rng() || 1e-10;
+  const u2 = rng() || 1e-10;
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 

@@ -91,7 +91,7 @@ import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyR
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { coverageKnobs, RAN_PACING, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
-import { dispatchGoalOnPeer, placeCompose, readPlacedDispatch } from "./compose-placement.js";
+import { dispatchGoalOnPeer, placeCompose, placementArmKnobs, readPlacedDispatch } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
@@ -156,7 +156,7 @@ type Ledger = {
 export const SEND_PENDING = "send_pending";
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
-const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
+export const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
 /** How many arm entries a ledger keeps (check_supply.arms); the oldest is dropped past it. */
 const ARM_HISTORY_MAX = 5;
 const settledHistory = (l: Ledger): Row[] => {
@@ -1648,7 +1648,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // PLACEMENT (law 11, compose-placement.ts): with no free local slot of the class this compose is admitted as (a
     // supply compose is never armed: feature_compose's composeArmed), a peer that composes the vessel, sees the row,
     // admits the targets and has a free slot takes it. Decided before the record, so the record names where it went.
-    const placement = await placeCompose({ gap_id: id, vessel, targets, armed: false }, localNode, placedThisTick);
+    const placement = await placeCompose({ gap_id: id, vessel, targets, armed: false }, localNode, placedThisTick, { arm: placementArmKnobs(rhythm.body) });
     const placed = placement.where === "peer" ? placement : null;
     if (placed) console.log(`[gap-check-supply] ${id}: placed on ${placed.node}: ${placed.why}`);
     const { goal: _priorGoal, not_before: _priorNotBefore, placed_by: _priorPlacedBy, placement: _priorPlacement, ...ledgerRest } = ledger;

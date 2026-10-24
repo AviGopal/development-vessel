@@ -1,7 +1,28 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { resolveSubstrateHealthTick } from "../../src/resolvers/substrate-health-tick.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveSubstrateHealthTick, __setSubstrateHealthTickDepsForTests } from "../../src/resolvers/substrate-health-tick.js";
 
 const originalFetch = globalThis.fetch;
+
+// The tick's host edges go through its deps seam, never the real systemctl/journalctl (the node gate runs this file
+// inside the live container, so the live units' state would decide the verdict). Every unit reads `active` unless a
+// test says otherwise; the registry is unread (null), and nothing reaches the gap store.
+const HB_DIR = mkdtempSync(join(tmpdir(), "health-tick-hb-"));
+let unitActive: (unit: string) => string = () => "active";
+let gapWrites = 0;
+const stubDeps = () => __setSubstrateHealthTickDepsForTests({
+  unitState: async (unit) => { const active = unitActive(unit); return { active, enabled: active === "active" ? "" : "enabled" }; },
+  registryIds: async () => null,
+  lastRegisterFailure: async () => null,
+  alarmTicks: async () => null,
+  writeGap: async () => { gapWrites++; return null; },
+  heartbeatPath: () => join(HB_DIR, "substrate-heartbeat.json"),
+  readGap: async () => null,
+  editSiteFor: () => null,
+  armRead: async () => null,
+});
 
 // Confidence is computed from EXECUTION TRACES (per active template), not from
 // template thompson_alpha/beta fields (those reset to 1 on every re-seed). The
@@ -62,10 +83,13 @@ describe("substrate-health-tick resolver", () => {
   beforeAll(() => {
     process.env["METABOB_ENDPOINT"] = "https://activity.test";
     process.env["METABOB_API_KEY"] = "test-key";
+    stubDeps();
   });
 
   afterAll(() => {
     globalThis.fetch = originalFetch;
+    __setSubstrateHealthTickDepsForTests(null);
+    rmSync(HB_DIR, { recursive: true, force: true });
   });
 
   it("returns substrateHealthReport shape", async () => {
@@ -110,9 +134,8 @@ describe("substrate-health-tick resolver", () => {
   it("overall_passing reduces to vessels_passing when confidence + stability pass, corpus is complete, and optimality is null", async () => {
     // confidence_passing=true, stability_passing=true, corpus_complete=true,
     // optimality_passing=null→treated as pass. The only remaining free variable
-    // is vessel liveness (systemctl, not controllable from a unit test), so the
-    // AND reduces to vessels_passing. Asserting the relationship is deterministic
-    // regardless of whether the test host can see the substrate's services.
+    // is vessel liveness, read through the deps seam: every unit active here, so
+    // vessels_passing and overall_passing are both true.
     globalThis.fetch = makeFetch();
     const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick" });
     const body = result.body as {
@@ -122,7 +145,27 @@ describe("substrate-health-tick resolver", () => {
     expect(body.health_verdict.stability_passing).toBe(true);
     expect(body.health_verdict.corpus_complete).toBe(true);
     // measurable (no null dimensions) → overall is a real boolean equal to vessels_passing
+    expect(body.health_verdict.vessels_passing).toBe(true);
     expect(body.health_verdict.overall_passing).toBe(body.health_verdict.vessels_passing);
+  });
+
+  it("one vessel unit inactive (and enabled) -> vessels_passing=false, so overall_passing=false", async () => {
+    globalThis.fetch = makeFetch();
+    unitActive = (unit) => (unit === "development-vessel.service" ? "inactive" : "active");
+    try {
+      // no inventory at this path: the tick watches its fallback vessel list, which names development-vessel
+      const result = await resolveSubstrateHealthTick({ type: "substrate_health_tick", inventory_path: join(HB_DIR, "no-inventory.json") });
+      const body = result.body as { health_verdict: { overall_passing: boolean | null; vessels_passing: boolean }; vessel_liveness: { down: string[] } };
+      expect(body.vessel_liveness.down).toEqual(["development-vessel"]);
+      expect(body.health_verdict.vessels_passing).toBe(false);
+      expect(body.health_verdict.overall_passing).toBe(false);
+    } finally {
+      unitActive = () => "active";
+    }
+  });
+
+  it("no tick in this file reached the gap store", () => {
+    expect(gapWrites).toBe(0);
   });
 
   it("posterior_confidence contains percentile fields", async () => {

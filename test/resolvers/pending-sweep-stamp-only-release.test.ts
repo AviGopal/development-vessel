@@ -15,7 +15,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isolatedChildEnv } from "./isolated-gap-store-run.js";
+import { isolatedChildEnv, childUnitSeamLine } from "./isolated-gap-store-run.js";
 import { isAwaitingLandVerification } from "../../src/judge/gap-eligibility.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-stamp-only-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -72,6 +72,7 @@ function sweepInIsolation(): { exit: number; out: string } {
     `  return new Response(JSON.stringify({ body: { ran: true, total: 1, pass: red ? 0 : 1, fail: red ? 1 : 0, skip: 0, requested_not_passing: red ? 1 : 0 } }), { status: 200 });`,
     `});`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    childUnitSeamLine(GLV),
     `const ask = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
     `console.log("SWEEP_RESULT " + JSON.stringify(await sweepPendingLandVerifications({ ask })));`,
   ].join("\n");

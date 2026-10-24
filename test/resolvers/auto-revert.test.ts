@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "auto-revert-test-"));
 const LOAD_ENV: Record<string, string> = {
@@ -53,6 +54,7 @@ const BUN_FAILING =
 
 let ws = "";
 let guard: import("./cutover-fetch-guard.js").FetchGuard;
+let execGuard: ExecGuard;
 let fsGuard: import("./cutover-fs-guard.js").FsGuard;
 let lines: string[] = [];
 let origWarn: typeof console.warn;
@@ -142,6 +144,10 @@ function useDeps(cutover: (p: Record<string, unknown>) => Promise<unknown>, extr
   gtf.__setAutoRevertDepsForTests({
     cutover,
     unitStartedAt: () => 0,
+    // The fixture vessel's unit is loaded and active here; when it restarted is each test's unitStartedAt. Never the
+    // host's systemctl: the node gate runs this file inside the live container.
+    unitLoadState: () => "loaded",
+    unitActive: () => "active",
     tuning: async (name: string) => tuning[name] ?? null,
     readGap: async (id: string) => gaps.get(id) ?? null,
     writeGap: async (gap: Record<string, unknown>) => {
@@ -164,6 +170,7 @@ beforeAll(async () => {
   gtf = await import("../../src/judge/gap-landing-verdict.js");
 });
 afterAll(() => {
+  restoreCutoverExecModules();
   fsMod?.restoreCutoverFsModules();
   fetchMod?.restoreCutoverFetch();
   for (const [k, v] of Object.entries(savedLoadEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -194,6 +201,11 @@ beforeEach(async () => {
   cut.__setOwnCheckDepsForTests({ readGap: async () => ({ shape: "substrateGap", body: { gaps: [] } }), writeGap: fail("own-check write"), runSuite: fail("own-check run"), lease: fail("gap landing lease") });
   guard = fetchMod.installCutoverFetchGuard();
   fsGuard = fsMod.installCutoverFsGuard();
+  // systemd answers through exec-guard routes: no self-restart is owed, and the attempt checks' unit read finds no
+  // systemd (their systemd_units check reads unknown, as on a host without it).
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "self-restart-owed", match: (c) => /systemctl list-units .*mitosis-self-restart/.test(c), respond: () => ({ exitCode: 0, stdout: "" }) });
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = fetchMod.FIXTURE_GAP_STORE;
   fetchMod.routeFixtureGapStore(guard);
   fetchMod.routeFleetUnreachable(guard);
@@ -209,6 +221,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   console.warn = origWarn; console.error = origError;
+  const execViolations = execGuard.restore();
   const violations = guard.restore();
   // The one write this file cannot redirect: when another file in the same process imported gap-to-feature first,
   // its class-posterior path was fixed then (M0's recorded landing updates it). The guard BLOCKED that write; it is
@@ -221,6 +234,7 @@ afterEach(() => {
   rmSync(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 describe("auto-revert: a regressed lane landing is reverted once, by the lane, and nothing else is", () => {

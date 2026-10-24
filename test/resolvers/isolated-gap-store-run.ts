@@ -66,6 +66,15 @@ export function isolateLearnedStateInProcess(root: string): Record<string, strin
   return next;
 }
 
+/** The line a pending-land sweep child runs right after importing the landing verdict (`glvPath`): the served-here
+ *  read (landedCommitRunningHere) answers through its deps seam instead of the host's systemctl. The test preload does
+ *  not reach a child, and the node gate runs these files inside the live container, where development-vessel (the
+ *  fixtures' vessel name) is a real unit whose state decided the verdict. The seam answers: unit loaded and active, not
+ *  restarted onto the landing (started at 0), so a landing that is not test-only reads "awaiting restart", as it did
+ *  when the child could not resolve systemctl. A test-only landing reads "running" before any of it is consulted. */
+export const childUnitSeamLine = (glvPath: string): string =>
+  `(await import(${JSON.stringify(glvPath)})).__setAutoRevertDepsForTests({ unitLoadState: () => "loaded", unitActive: () => "active", unitStartedAt: () => 0 });`;
+
 export type CaseRow = { name: string; ok: boolean; detail: string };
 
 export function runCasesIsolated(casesFile: string): CaseRow[] {

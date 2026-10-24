@@ -17,7 +17,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, spyOn } from "bun
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isolatedChildEnv } from "./isolated-gap-store-run";
+import { isolatedChildEnv, childUnitSeamLine } from "./isolated-gap-store-run";
 import * as lc from "../../src/judge/learning-credit.js";
 import * as glv from "../../src/judge/gap-landing-verdict.js";
 import * as cut from "../../src/resolvers/vessel-mitosis-cutover.js";
@@ -134,6 +134,7 @@ function sweepTwice(): { exit: number; out: string } {
     `  return new Response(JSON.stringify({ body: { ran: true, total: 1, pass: red ? 0 : 1, fail: red ? 1 : 0, skip: 0, requested_not_passing: red ? 1 : 0 } }), { status: 200 });`,
     `});`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    childUnitSeamLine(GLV),
     `const ask = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
     `console.log("SWEEP1 " + JSON.stringify(await sweepPendingLandVerifications({ ask })));`,
     `console.log("SWEEP2 " + JSON.stringify(await sweepPendingLandVerifications({ ask })));`,

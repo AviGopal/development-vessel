@@ -19,6 +19,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -51,7 +52,18 @@ let shapeOnlySha = "";
 // `count: 1` hits generic heuristic 4 (a count key present and nonzero => 'absent'), which
 // is a positively-measured healthy verdict rather than an absence of information.
 const originalFetch = globalThis.fetch;
-beforeAll(() => {
+// The served-here read (landedCommitRunningHere) answers through the landing verdict's deps seam and an exec-guard route,
+// never the host's systemctl: the node gate runs this file inside the live container, where development-vessel (the
+// fixture's vessel name) is a real unit whose state decided the verdict.
+// It means: the landed commits RUN here (unit loaded and active, started after they were committed, no self-restart
+// owed), so the only thing that decides a close is the measurement.
+// (The landing verdict is imported in the hooks, not statically: a static import is evaluated before this file sets
+// WORKSPACE_ROOT, and the gap store captures its root at module load.)
+let execGuard: ExecGuard;
+beforeAll(async () => {
+  (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests({ unitLoadState: () => "loaded", unitActive: () => "active", unitStartedAt: () => Math.floor(Date.now() / 1000) + 3600 });
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "self-restart-owed", match: (c) => /systemctl list-units .*mitosis-self-restart/.test(c), respond: () => ({ exitCode: 0, stdout: "" }) });
   // Respond PER SHAPE. A single shared body cannot exercise both rows: generic heuristic 4
   // fires on a `count` key even when the predicate declared no field, so a body carrying
   // `count` would close the shape-only row for the wrong reason and hide the fall-through
@@ -112,8 +124,12 @@ beforeAll(() => {
     { ...base, id: "gap-pending-shape-only", category: "systematic_failure", summary: "predicate names a shape but no field — nothing was asked", status: "open", classification_metadata: { pending_outcome_verification: shapeOnlySha, pending_set_at: now, evidence_resolve: { shape: "opaque_probe" } } },
   ]));
 });
-afterAll(() => {
+afterAll(async () => {
   globalThis.fetch = originalFetch;
+  (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests(null);
+  const unrouted = execGuard.restore();
+  restoreCutoverExecModules();
+  expect(unrouted).toEqual([]);
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ }
 });
 

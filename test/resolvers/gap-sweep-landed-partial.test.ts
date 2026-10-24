@@ -7,7 +7,7 @@
 // gapStoreRootForTest), so in a multi-file `bun test` run this file cannot choose its store. The sweep therefore
 // runs in a FRESH `bun` process whose WORKSPACE_ROOT, VESSELS_CLONE_ROOT and calibration paths are this file's
 // temp dir; it can never read or write a real store. Real git; no network (fetch stubbed in the child).
-import { isolatedChildEnv } from "./isolated-gap-store-run";
+import { isolatedChildEnv, childUnitSeamLine } from "./isolated-gap-store-run";
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -71,6 +71,7 @@ function sweepInIsolation(): { exit: number; out: string } {
     `const PARENT = ${JSON.stringify(partialSha)};`,
     `globalThis.fetch = (async (_u, init) => { let b = {}; try { b = JSON.parse(String(init?.body ?? "{}")); } catch {} const ref = b?.impulse?.pointer?.base_ref; return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: ref === PARENT ? 1 : 0 } }), { status: 200 }); });`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    childUnitSeamLine(GLV),
     `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
     `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,

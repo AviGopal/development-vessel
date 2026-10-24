@@ -17,7 +17,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isolatedChildEnv } from "./isolated-gap-store-run.js";
+import { isolatedChildEnv, childUnitSeamLine } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-orphan-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -97,6 +97,7 @@ function sweepInIsolation(): { exit: number; out: string } {
     `  return new Response(JSON.stringify({ body: { ran: true, total: 1, pass: red ? 0 : 1, fail: red ? 1 : 0, skip: 0, requested_not_passing: red ? 1 : 0, failingTests: [] } }), { status: 200 });`,
     `});`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    childUnitSeamLine(GLV),
     `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
     `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,

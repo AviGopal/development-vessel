@@ -11,6 +11,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const ROOT = join(tmpdir(), `reland-esc-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -31,7 +32,17 @@ const uiWrites: Array<{ url: string; body: string }> = [];
 const originalFetch = globalThis.fetch;
 
 let latestSha = "";
-beforeAll(() => {
+// The served-here read (landedCommitRunningHere) answers through the landing verdict's deps seam and an exec-guard route,
+// never the host's systemctl: the node gate runs this file inside the live container, where development-vessel (the
+// fixture's vessel name) is a real unit whose state decided the verdict.
+// It means: the re-landed commit RUNS here, so only the re-land rule keeps the gap open.
+// (The landing verdict is imported in the hooks, not statically: a static import is evaluated before this file sets
+// WORKSPACE_ROOT, and the gap store captures its root at module load.)
+let execGuard: ExecGuard;
+beforeAll(async () => {
+  (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests({ unitLoadState: () => "loaded", unitActive: () => "active", unitStartedAt: () => Math.floor(Date.now() / 1000) + 3600 });
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "self-restart-owed", match: (c) => /systemctl list-units .*mitosis-self-restart/.test(c), respond: () => ({ exitCode: 0, stdout: "" }) });
   // Set env HERE (not just top-level): bun shares one process across test files and
   // vesselsCloneRoot()/WORKSPACE_ROOT are read at call time, so a sibling file's top-level
   // assignment can clobber ours. Setting in beforeAll wins right before this file's test runs.
@@ -77,8 +88,12 @@ beforeAll(() => {
     },
   ]));
 });
-afterAll(() => {
+afterAll(async () => {
   globalThis.fetch = originalFetch;
+  (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests(null);
+  const unrouted = execGuard.restore();
+  restoreCutoverExecModules();
+  expect(unrouted).toEqual([]);
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ }
 });
 

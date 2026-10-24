@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isolatedChildEnv } from "./isolated-gap-store-run.js";
+import { isolatedChildEnv, childUnitSeamLine } from "./isolated-gap-store-run.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
 import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
@@ -90,6 +90,7 @@ function sweepTwiceInIsolation(): { exit: number; first: string; second: string;
     `  return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: 0 } }), { status: 200 });`,
     `});`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    childUnitSeamLine(GLV),
     `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
     `const r1 = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP1_DONE " + JSON.stringify(r1));`,

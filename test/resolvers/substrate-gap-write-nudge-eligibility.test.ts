@@ -16,6 +16,13 @@ import { join } from "node:path";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
+// THE STORE IS HELD HERE, under this suite's temp root. On a node that forwards its gap store (GAP_STORE_ENDPOINT set)
+// every read and write goes to the holder (gapStoreIsLocal), and the scrubbed test runner points it at an address
+// nothing answers: every write failed gap_store_unavailable before an assertion was reached. Restored after the suite.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+delete process.env["GAP_STORE_ENDPOINT"];
+afterAll(() => { if (savedGapStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 const root = mkdtempSync(join(tmpdir(), "write-nudge-eligibility-"));
 process.env["WORKSPACE_ROOT"] = root;
 isolateLearnedStateInProcess(root); // learned state (posteriors, calibration, credit) under the temp root too, never /workspace

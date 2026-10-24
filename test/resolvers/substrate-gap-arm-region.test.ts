@@ -4,6 +4,13 @@ import { join } from "path";
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
+// THE STORE IS HELD HERE, under this suite's temp root. On a node that forwards its gap store (GAP_STORE_ENDPOINT set)
+// every read and write goes to the holder (gapStoreIsLocal), and the scrubbed test runner points it at an address
+// nothing answers: every write failed gap_store_unavailable before an assertion was reached. Restored after the suite.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+delete process.env["GAP_STORE_ENDPOINT"];
+afterAll(() => { if (savedGapStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 // ARM-TIME REGION GATE (2026-10-03, gap arm-time-gap-writes-accept-prose-regions-so-class2-gaps-ground-on-the-file-top).
 //
 // Compose grounding (gap-to-feature region->line) looks for classification_metadata.region as a LITERAL

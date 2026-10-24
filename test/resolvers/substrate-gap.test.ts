@@ -5,6 +5,13 @@ import { join } from "path";
 import { rmSync, existsSync } from "fs";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
+// THE STORE IS HELD HERE, under this suite's temp root. On a node that forwards its gap store (GAP_STORE_ENDPOINT set)
+// every read and write goes to the holder (gapStoreIsLocal), and the scrubbed test runner points it at an address
+// nothing answers: every write failed gap_store_unavailable before an assertion was reached. Restored after the suite.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+delete process.env["GAP_STORE_ENDPOINT"];
+afterAll(() => { if (savedGapStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
 const gapEventPublishStub = stubGapEventPublish();
 afterAll(() => gapEventPublishStub.restore());

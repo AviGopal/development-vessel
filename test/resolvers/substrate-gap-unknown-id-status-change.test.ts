@@ -7,6 +7,13 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { gapStoreRootForTest, resolveSubstrateGapWrite } from "../../src/resolvers/substrate-gap.js";
 
+// THE STORE IS HELD HERE, under this suite's temp root. On a node that forwards its gap store (GAP_STORE_ENDPOINT set)
+// every read and write goes to the holder (gapStoreIsLocal), and the scrubbed test runner points it at an address
+// nothing answers: every write failed gap_store_unavailable before an assertion was reached. Restored after the suite.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+delete process.env["GAP_STORE_ENDPOINT"];
+afterAll(() => { if (savedGapStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 const root = gapStoreRootForTest();
 const path = join(root, "gaps", "gaps.json");
 let saved: string | null = null;

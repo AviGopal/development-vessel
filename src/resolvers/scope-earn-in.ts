@@ -639,7 +639,9 @@ export function coverageKnobs(body: Row): { threshold: number; k: number; maxTes
   return { threshold, k, maxTests };
 }
 const MAX_MUTANTS = 20;
-export type Mutant = { operator: "negate_condition" | "empty_body" | "flip_boolean" | "flip_comparison"; start: number; end: number; original: string; replacement: string; line: number };
+/** An operator mutant. `replace_statement` is never selected here (OPERATORS): it is aimed at one span by
+ *  regionStatementMutant, for the check-supply arm step's region gate. */
+export type Mutant = { operator: "negate_condition" | "empty_body" | "flip_boolean" | "flip_comparison" | "replace_statement"; start: number; end: number; original: string; replacement: string; line: number };
 const OPERATORS: Mutant["operator"][] = ["negate_condition", "empty_body", "flip_boolean", "flip_comparison"];
 const FLIP: Record<string, string> = { "===": "!==", "!==": "===", "==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">" };
 type TsModule = typeof import("typescript");
@@ -660,7 +662,7 @@ function loadTs(): TsModule | null {
 export function selectMutants(src: string, k: number, ts: TsModule | null = loadTs()): Mutant[] {
   if (!ts) return [];
   const sf = ts.createSourceFile("m.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const sites: Record<Mutant["operator"], Mutant[]> = { negate_condition: [], empty_body: [], flip_boolean: [], flip_comparison: [] };
+  const sites: Record<Mutant["operator"], Mutant[]> = { negate_condition: [], empty_body: [], flip_boolean: [], flip_comparison: [], replace_statement: [] };
   const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1;
   const add = (operator: Mutant["operator"], node: { getStart(): number; getEnd(): number }, replacement: (orig: string) => string) => {
     const start = node.getStart(), end = node.getEnd();
@@ -694,6 +696,33 @@ export function selectMutants(src: string, k: number, ts: TsModule | null = load
     for (let i = 0; i < q; i += 1) out.push(sites[o][Math.min(n - 1, Math.floor(((i + 0.5) * n) / q))]!);
   }
   return out.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * THE STATEMENT-REPLACE MUTANT OF ONE SPAN (the check-supply arm step's region gate, 2026-10-24). The smallest statement
+ * of `src` that contains [start, end) is replaced by an inert one: `void 0;`, or, for a return, a return of undefined
+ * (`return undefined as any;` in a TypeScript file, so the file still typechecks), never the enclosing function. null
+ * when that statement is a declaration (function, class, variable, import, export, type) or a block: replacing a
+ * declaration breaks its references, so the run would measure nothing. Needs the TypeScript parser (loaded once).
+ */
+export function regionStatementMutant(src: string, start: number, end: number, file = "m.ts", ts: TsModule | null = loadTs()): Mutant | null {
+  if (!ts || start < 0 || end <= start || end > src.length) return null;
+  const sf = ts.createSourceFile("m.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const K = ts.SyntaxKind;
+  const declaration = new Set<number>([K.FunctionDeclaration, K.ClassDeclaration, K.InterfaceDeclaration, K.TypeAliasDeclaration, K.EnumDeclaration, K.ModuleDeclaration, K.ImportDeclaration, K.ImportEqualsDeclaration, K.ExportDeclaration, K.ExportAssignment, K.VariableStatement, K.Block]);
+  const isStatementKind = (k: number): boolean => (k >= K.FirstStatement && k <= K.LastStatement) || declaration.has(k);
+  let found: import("typescript").Node | null = null;
+  const visit = (n: import("typescript").Node): void => {
+    if (n.getStart(sf) > start || n.getEnd() < end) return;
+    if (isStatementKind(n.kind)) found = n;
+    ts.forEachChild(n, visit);
+  };
+  ts.forEachChild(sf, visit);
+  const st = found as import("typescript").Node | null;
+  if (!st || declaration.has(st.kind)) return null;
+  const s0 = st.getStart(sf), e0 = st.getEnd();
+  const replacement = ts.isReturnStatement(st) ? (/\.[cm]?tsx?$/.test(file) ? "return undefined as any;" : "return undefined;") : "void 0;";
+  return { operator: "replace_statement", start: s0, end: e0, original: src.slice(s0, e0), replacement, line: sf.getLineAndCharacterOfPosition(s0).line + 1 };
 }
 
 /**

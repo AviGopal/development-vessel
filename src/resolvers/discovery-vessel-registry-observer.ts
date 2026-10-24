@@ -29,6 +29,40 @@ export interface DiscoveryVesselRegistryObserverPointer {
    * response is exactly what it was. It is re-measured on every read, so a gap armed with it has no TTL to race.
    */
   vessel_ids?: string[];
+  /**
+   * AN ENDPOINT-HEALTH CHECK (the discovery-endpoints-healthy joint). Only when true, the answer also carries top-level
+   * `unanswered_count` and `unanswered`: the registered endpoints whose GET /health did not answer 2xx within
+   * HEALTH_PROBE_TIMEOUT_MS, probed HEALTH_PROBE_CONCURRENCY at a time, with no credential. Absent, the response is
+   * exactly what it was.
+   */
+  probe_health?: boolean;
+}
+
+/** Per-probe timeout and probes in flight for probe_health: a full registry is probed in a few seconds, never a stall. */
+export const HEALTH_PROBE_TIMEOUT_MS = 2_000;
+export const HEALTH_PROBE_CONCURRENCY = 4;
+
+/** The rows whose endpoint did not answer GET /health with a 2xx, as "<vesselId>@<endpoint> (<why>)", in row order. */
+export async function unansweredEndpoints(rows: ReadonlyArray<{ vesselId?: unknown; endpoint?: unknown }>): Promise<string[]> {
+  const targets = rows.filter((r) => typeof r.endpoint === "string" && r.endpoint.trim() !== "");
+  const out: Array<string | null> = new Array(targets.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const i = next++;
+      const t = targets[i]!;
+      const ep = String(t.endpoint).trim().replace(/\/+$/, "");
+      try {
+        const r = await fetch(`${ep}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) });
+        if (!r.ok) out[i] = `${String(t.vesselId ?? "")}@${ep} (http ${r.status})`;
+        try { await r.body?.cancel(); } catch { /* already consumed */ }
+      } catch {
+        out[i] = `${String(t.vesselId ?? "")}@${ep} (no answer)`;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HEALTH_PROBE_CONCURRENCY, targets.length) }, worker));
+  return out.filter((x): x is string => x !== null);
 }
 
 /**
@@ -52,6 +86,7 @@ export function missingLocalVessels(names: readonly string[], rowIds: readonly s
 
 interface VesselEntry {
   vesselId: string;
+  endpoint?: string;
   vesselName?: string;
   lastSeen?: string;
   status?: string;
@@ -205,6 +240,8 @@ export async function resolveDiscoveryVesselRegistryObserver(
   const missing = Array.isArray(pointer.vessel_ids)
     ? missingLocalVessels(pointer.vessel_ids.filter((v): v is string => typeof v === "string"), perVessel.map((p) => String(p.vessel_id ?? "")))
     : null;
+  // Only on a successful read, like missing_count: an unread registry probes nothing and carries no unanswered_count.
+  const unanswered = pointer.probe_health === true ? await unansweredEndpoints(vessels) : null;
 
   return {
     shape: "discoveryRegistryState",
@@ -219,6 +256,7 @@ export async function resolveDiscoveryVesselRegistryObserver(
       per_vessel: perVessel,
       generated_at: new Date().toISOString(),
       ...(missing ? { missing_count: missing.length, missing_vessels: missing } : {}),
+      ...(unanswered ? { unanswered_count: unanswered.length, unanswered } : {}),
     },
   };
 }

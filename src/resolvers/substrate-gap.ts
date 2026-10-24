@@ -1467,13 +1467,16 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
   ] },
   // discovery-vessel-registry-observer.ts: the discoveryRegistryState body (error/http_status/roundtrip_ms only on some
   // answers); missing_count and missing_vessels only on a successful read with vessel_ids given (the local-registration
-  // check the unregistered-vessel and joint detectors arm with).
+  // check the unregistered-vessel and joint detectors arm with); unanswered_count and unanswered only on a successful
+  // read with probe_health true (the discovery-endpoints-healthy joint's arming).
   discovery_vessel_registry_observer: {
     fields: [
       "endpoint", "reachable", "error", "http_status", "roundtrip_ms", "total_vessels", "healthy_count", "stale_count",
-      "stale_threshold_ms", "per_vessel", "generated_at", "missing_count", "missing_vessels",
+      "stale_threshold_ms", "per_vessel", "generated_at", "missing_count", "missing_vessels", "unanswered_count", "unanswered",
     ],
-    needs_input: { missing_count: "vessel_ids", missing_vessels: "vessel_ids" },
+    needs_input: { missing_count: "vessel_ids", missing_vessels: "vessel_ids", unanswered_count: "probe_health", unanswered: "probe_health" },
+    // probe_health is a boolean: only true probes, so an arming that names unanswered_count with it false never measures.
+    inputProblem: (input) => ("probe_health" in input && input["probe_health"] !== true ? { field: "probe_health", reason: "probe_health must be true for unanswered_count to be measured" } : null),
   },
   // substrateGap (read): the resolveSubstrateGap body. expectation_calibration and learning_credit only with
   // include_calibration; match_count (the rows meeting every `where` condition, before the limit) only with a

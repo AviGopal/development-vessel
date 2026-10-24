@@ -195,7 +195,12 @@ describe("the release acts on the gap as the store holds it now (releasedRow)", 
   it("a row that became awaiting_operator_review or needs_information is not written (human hold kept)", () => {
     expect(releasedRow(fresh("open", { disposition: "awaiting_operator_review" }), "why")).toBeNull();
     expect(releasedRow(fresh("open", { disposition: "needs_information" }), "why")).toBeNull();
-    expect(releasedRow(fresh("open", { disposition: "" }), "why")).toBeNull();
+    // A row already released (disposition cleared, its stamp marked released) has nothing left to release. Its input is
+    // the release path's own output, which records the released stamp (pending_released_sha): a stamp with no marker
+    // still holds, by design (land-verification-hold-fixtures.json).
+    const once = releasedRow(fresh("open", { disposition: "pending_verification" }), "why")!;
+    expect((once.classification_metadata as Record<string, unknown>).pending_released_sha).toBe("abcdef1234567");
+    expect(releasedRow(once, "why")).toBeNull();
     expect(releasedRow(null, "why")).toBeNull();
   });
 

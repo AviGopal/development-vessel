@@ -140,12 +140,27 @@ export function routedOffCompose(row: Record<string, unknown>): boolean {
  *  Not a parking disposition: no human is waited on, the supply tick is. The eligibility predicate holds it. */
 export const CHECK_SUPPLY_DISPOSITION = "needs_localization";
 
-/** A landed gap held for its verdict: disposition pending_verification (markPendingVerification) with nothing yet
- *  saying the landing failed. regressed_by or a BEHAVIORAL VERIFICATION FAILED summary means it did not fix the
- *  gap, so the gap is work again; the sweep's not-resolved verdict lifts the disposition (liftLandVerificationHold). */
+/** The landed sha a row is held for, or null: pending_outcome_verification as a string of length >= 7 (the rule
+ *  pendingSweepCandidates and pickSkipPending read it by) that the sweep has not released (pending_released_sha, the
+ *  stamp a not-resolved release let go of). A cleared "" stamp holds nothing; a NEW sha after a release holds again.
+ *  A release made before the marker existed (disposition cleared to "", stamp kept, no pending_released_sha) cannot be
+ *  told apart from a re-landing over it, so it is HELD, by design (qa ruling): the sweep's next pass releases it. */
+export function landedShaHold(meta: Record<string, unknown>): string | null {
+  const sha = meta.pending_outcome_verification;
+  return typeof sha === "string" && sha.length >= 7 && sha !== meta.pending_released_sha ? sha : null;
+}
+
+/** A landed gap held for its verdict: disposition pending_verification (markPendingVerification), OR a landed-sha
+ *  stamp the sweep has not released (landedShaHold), with nothing yet saying the landing failed. The cutover's
+ *  stampPendingLand writes only the sha (pending_outcome_verification, pending_set_at, the landed_unverified fields)
+ *  and NO disposition, so keyed on the disposition alone the hold never held a cutover-stamped row and it could be
+ *  composed and re-landed. regressed_by or a BEHAVIORAL VERIFICATION FAILED summary means it did not fix the gap, so
+ *  the gap is work again; the sweep's not-resolved verdict lifts the hold (liftLandVerificationHold). The parity
+ *  contract with boredom-vessel's mirror (src/goal-generation.ts isAwaitingLandVerification) is the fixture set
+ *  test/fixtures/land-verification-hold-fixtures.json, read byte for byte by both vessels' tests. */
 export function isAwaitingLandVerification(gap: Record<string, unknown>): boolean {
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
-  if (meta.disposition !== "pending_verification") return false;
+  if (meta.disposition !== "pending_verification" && landedShaHold(meta) === null) return false;
   if (meta.regressed_by !== undefined && meta.regressed_by !== null) return false;
   if (String(gap.summary ?? "").includes("BEHAVIORAL VERIFICATION FAILED")) return false;
   return true;
@@ -223,8 +238,16 @@ export function composeEligibilitySkipReason(row: Record<string, unknown>): Comp
 /** The metadata that releases a pending_verification hold ("" because the gap store carries omitted keys
  *  forward), or null when there is no such hold: parking dispositions are a human's to lift, and a null lets the
  *  sweep write once rather than every tick. */
+/** The release of a land-verification hold, or null when there is none to lift: the pending_verification disposition
+ *  is cleared to "" (the store carries omitted keys forward), and a held landed-sha stamp is LEFT AS IS and recorded as
+ *  released (pending_released_sha), so the row stops being held for that landing and a later landing's new sha holds
+ *  it again. */
 export function liftLandVerificationHold(meta: Record<string, unknown>): Record<string, unknown> | null {
-  return meta.disposition === "pending_verification" ? { ...meta, disposition: "" } : null;
+  // A human or supply hold set meanwhile (a parking or check-supply disposition) is not the sweep's to lift.
+  if (typeof meta.disposition === "string" && meta.disposition !== "" && meta.disposition !== "pending_verification") return null;
+  const sha = landedShaHold(meta);
+  if (meta.disposition !== "pending_verification" && sha === null) return null;
+  return { ...meta, ...(meta.disposition === "pending_verification" ? { disposition: "" } : {}), ...(sha !== null ? { pending_released_sha: sha } : {}) };
 }
 
 /** Whether the verifier's 'present' for this gap is a MEASUREMENT (class 1 literal, class 1b expected literal,

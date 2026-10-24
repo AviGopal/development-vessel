@@ -115,6 +115,46 @@ export function buildConceptWritePointer(event: NormalizedLifecycleEvent): {
   };
 }
 
+/**
+ * ONE WRITE PER EXECUTION, ON ITS COMPLETION EVENT. activity-api re-emits execution_completed (carrying `reached` and
+ * `verdict: true`) when POST /reach persists an execution's FIRST verdict, so the ribosome can extract after a verdict
+ * that arrives late. This writer's intent is the completion itself (a substrate-authored template that closed cleanly;
+ * it reads no verdict), so the verdict re-emit is a second copy of an event it already handled, arriving minutes later,
+ * outside the 60 s dedupe window: it is skipped. The completion event, and the lifecycle.execution.succeeded form, are
+ * handled exactly as before. Pure apart from the dedupe map; exported for tests.
+ */
+export function writebackFor(parsed: Record<string, unknown>): { pointer: ReturnType<typeof buildConceptWritePointer>; tid: string; execId: string } | null {
+  let event: NormalizedLifecycleEvent;
+  if (parsed["type"] === "execution_completed") {
+    const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+    if (d["verdict"] === true || parsed["verdict"] === true) return null;
+    event = {
+      type: "lifecycle:execution:succeeded",
+      activity_template_id:
+        (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
+      execution_id: d["execution_id"] as string | undefined,
+      output_shapes: d["output_shapes"] as string[] | undefined,
+    };
+  } else if (parsed["type"] === "lifecycle.execution.succeeded") {
+    const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+    event = {
+      type: "lifecycle:execution:succeeded",
+      activity_template_id:
+        (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
+      execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
+      output_shapes:
+        (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
+    };
+  } else {
+    event = parsed as unknown as NormalizedLifecycleEvent;
+  }
+  if (!shouldWriteback(event)) return null;
+  const execId = event.execution_id ?? "no-exec";
+  const tid = stripWrapping(event.activity_template_id) ?? "no-tid";
+  if (!dedupeFresh(`${tid}::${execId}`)) return null;
+  return { pointer: buildConceptWritePointer(event), tid, execId };
+}
+
 let _stopController: AbortController | null = null;
 
 export function stopAutocompleteConceptWriter(): void {
@@ -145,39 +185,11 @@ export function startAutocompleteConceptWriter(): void {
     });
 
     ws.addEventListener("message", (ev) => {
-      let event: NormalizedLifecycleEvent;
-      try {
-        const parsed = JSON.parse(String(ev.data)) as Record<string, unknown>;
-        if (parsed["type"] === "execution_completed") {
-          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
-          event = {
-            type: "lifecycle:execution:succeeded",
-            activity_template_id:
-              (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
-            execution_id: d["execution_id"] as string | undefined,
-            output_shapes: d["output_shapes"] as string[] | undefined,
-          };
-        } else if (parsed["type"] === "lifecycle.execution.succeeded") {
-          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
-          event = {
-            type: "lifecycle:execution:succeeded",
-            activity_template_id:
-              (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
-            execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
-            output_shapes:
-              (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
-          };
-        } else {
-          event = parsed as unknown as NormalizedLifecycleEvent;
-        }
-      } catch {
-        return;
-      }
-      if (!shouldWriteback(event)) return;
-      const execId = event.execution_id ?? "no-exec";
-      const tid = stripWrapping(event.activity_template_id) ?? "no-tid";
-      if (!dedupeFresh(`${tid}::${execId}`)) return;
-      const pointer = buildConceptWritePointer(event);
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(String(ev.data)) as Record<string, unknown>; } catch { return; }
+      const w = writebackFor(parsed);
+      if (!w) return;
+      const { pointer, tid, execId } = w;
       resolveDispatch(pointer)
         .then((r) => {
           const body = (r?.body ?? {}) as Record<string, unknown>;

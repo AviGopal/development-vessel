@@ -339,6 +339,55 @@ async function defaultRunActivity(
 
 let _stopController: AbortController | null = null;
 
+/**
+ * The bus message as the canonical lifecycle event, or null when it is not one this observer acts on. ONE EVENT PER
+ * EXECUTION ACROSS THE VERDICT RE-EMIT: activity-api re-emits execution_completed (carrying `reached` and
+ * `verdict: true`) when POST /reach persists an execution's first verdict, so the ribosome can extract after a late
+ * verdict. This observer acts on the completion (probe dispatch, re-score), not on a verdict, so the re-emit is a second
+ * copy of an event already handled and is dropped here. Every other form normalises exactly as before. Exported for tests.
+ */
+export function normalizeLifecycleMessage(parsed: Record<string, unknown>): LifecycleEvent | null {
+  let event: LifecycleEvent;
+  if (parsed["type"] === "execution_completed" && (((parsed["data"] ?? {}) as Record<string, unknown>)["verdict"] === true || parsed["verdict"] === true)) return null;
+  // Normalize bus events to canonical lifecycle shape.
+  // Two sources carry execution-succeeded signal:
+  //   1. activity-api trace-writer emits "execution_completed" (legacy path)
+  //   2. BusForwardingEventSink emits "lifecycle.execution.succeeded" (bus path,
+  //      dot-notation per bus-forwarder colon→dot mapping). This is the path
+  //      that makes the bus "draw current" — without this arm, lifecycle.*
+  //      events from the bus were silently discarded (audit inv-077 finding).
+  if (parsed["type"] === "execution_completed") {
+    const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+    event = {
+      type: "lifecycle:execution:succeeded",
+      activity_template_id: (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
+      execution_id: d["execution_id"] as string | undefined,
+      output_shapes: d["output_shapes"] as string[] | undefined,
+    };
+  } else if (parsed["type"] === "lifecycle.execution.succeeded") {
+    // Bus-emitted form from BusForwardingEventSink (dot-notation, inverted from colon).
+    const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+    event = {
+      type: "lifecycle:execution:succeeded",
+      activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
+      execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
+      output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
+    };
+  } else if (parsed["type"] === "lifecycle:execution:refined") {
+    // Bus-emitted refinement event from refine-on-disagreement resolver.
+    const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+    event = {
+      type: "lifecycle:execution:succeeded",
+      activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
+      execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
+      output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
+    };
+  } else {
+    event = parsed as LifecycleEvent;
+  }
+  return event;
+}
+
 export function stopRegistryChangeObserver(): void {
   _stopController?.abort();
   _stopController = null;
@@ -371,48 +420,10 @@ export function startRegistryChangeObserver(
     });
 
     ws.addEventListener("message", (ev) => {
-      let event: LifecycleEvent;
-      try {
-        const parsed = JSON.parse(String(ev.data)) as Record<string, unknown>;
-        // Normalize bus events to canonical lifecycle shape.
-        // Two sources carry execution-succeeded signal:
-        //   1. activity-api trace-writer emits "execution_completed" (legacy path)
-        //   2. BusForwardingEventSink emits "lifecycle.execution.succeeded" (bus path,
-        //      dot-notation per bus-forwarder colon→dot mapping). This is the path
-        //      that makes the bus "draw current" — without this arm, lifecycle.*
-        //      events from the bus were silently discarded (audit inv-077 finding).
-        if (parsed["type"] === "execution_completed") {
-          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
-          event = {
-            type: "lifecycle:execution:succeeded",
-            activity_template_id: (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
-            execution_id: d["execution_id"] as string | undefined,
-            output_shapes: d["output_shapes"] as string[] | undefined,
-          };
-        } else if (parsed["type"] === "lifecycle.execution.succeeded") {
-          // Bus-emitted form from BusForwardingEventSink (dot-notation, inverted from colon).
-          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
-          event = {
-            type: "lifecycle:execution:succeeded",
-            activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
-            execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
-            output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
-          };
-        } else if (parsed["type"] === "lifecycle:execution:refined") {
-          // Bus-emitted refinement event from refine-on-disagreement resolver.
-          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
-          event = {
-            type: "lifecycle:execution:succeeded",
-            activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
-            execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
-            output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
-          };
-        } else {
-          event = parsed as LifecycleEvent;
-        }
-      } catch {
-        return;
-      }
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(String(ev.data)) as Record<string, unknown>; } catch { return; }
+      const event = normalizeLifecycleMessage(parsed);
+      if (!event) return;
       if (event.type !== "lifecycle:execution:succeeded") return;
 
       // Recommend → execute dispatch (topology-discovery probes).

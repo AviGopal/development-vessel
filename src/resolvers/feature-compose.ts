@@ -859,11 +859,15 @@ function vesselDirOf(repoRelPath: string): string | null {
  * The repair round's target (fc-repair's `fix.file` / `fix.path`, model output) as a repos/<vessel>/ path, or null. A
  * vessel-relative target (the error window labels files src/...) resolves against the failing vessel, as before; the
  * result must then pass the plan-path rule (planPathProblem), because it is joined onto a root and written like an op.
+ * A TEST-WRITING COMPOSE'S REPAIR STAYS IN ITS WRITE SCOPE: given `writeScope` (testWritingWriteScope's targets, set only
+ * in test_writing mode), a target that is not one of them is refused too, as the landing floor would refuse it later
+ * (testWritingDiffOutsideTests). An empty scope refuses every target (fail closed, as that floor does). Absent: as before.
  */
-export function repairTargetPath(ef: string, vessel: string): string | null {
+export function repairTargetPath(ef: string, vessel: string, writeScope?: readonly string[] | null): string | null {
   if (!ef) return null;
   const norm = !ef.startsWith("repos/") && !ef.startsWith("/") ? `repos/${vessel.replace(/^repos\//, "")}/${ef}` : ef;
-  return planPathProblem(norm) ? null : norm;
+  if (planPathProblem(norm)) return null;
+  return writeScope && !writeScope.includes(norm) ? null : norm;
 }
 
 /** Why a planner's touched_vessels entry is not a plain vessel name, or null. These names reach shell commands too. */
@@ -5958,7 +5962,9 @@ export const REPAIR_OUTPUT_SLICE = 4000;
 /** The repair prompt, journalling the rounds R1 CHANGED (form=evidence: the gate's structured evidence led the prompt), so
  *  they can be read by effect. A round whose prompt is today's (nothing hidden) adds no line: its console stays as it was,
  *  so the floor-path golden is unchanged, and such a round is a repair round without this line. */
-export function repairPromptLogged(fv: VerifyResult, errorSiteWindow: string, editSite: string | null, gapId: string | null): string {
+export function repairPromptLogged(fv: VerifyResult, errorSiteWindow: string, editSite: string | null, gapId: string | null, writeScope?: readonly string[] | null): string {
+  // A test-writing compose's repair edits its check (testWritingWriteScope's target), never the gap's src edit site.
+  if (writeScope) editSite = writeScope[0] ?? null;
   const p = buildRepairPrompt(fv, errorSiteWindow, editSite);
   if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", own_failing: (fv.own?.failing ?? []).length, edit_site: editSite })}`);
   return p;
@@ -9858,7 +9864,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const fix = parseJsonObject(await llmCallWithFailover(
           // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.
           llmEndpoints,
-          repairPromptLogged(fv, errorSiteWindow, gapEditSiteOf(pointer), pointer.gap?.id ?? null),
+          repairPromptLogged(fv, errorSiteWindow, gapEditSiteOf(pointer), pointer.gap?.id ?? null, testWritingScope?.targets ?? null),
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file)
@@ -9866,8 +9872,12 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // The window labels files vessel-relative (src/...); resolve such a path against the failing
         // vessel, or opAbs treats its first segment as a vessel name and the write goes nowhere.
         // Through the plan-path rule (repairTargetPath): a target that fails it is not written, and is not echoed.
-        const efNorm = repairTargetPath(ef, fv.vessel) ?? "";
-        if (ef && !efNorm) console.warn(`[fc-repair] repair target refused: it does not pass the plan-path rule (planPathProblem)`);
+        const efNorm = repairTargetPath(ef, fv.vessel, testWritingScope?.targets ?? null) ?? "";
+        if (ef && !efNorm) {
+          console.warn(repairTargetPath(ef, fv.vessel) && testWritingScope
+            ? `[fc-repair] repair target refused: outside the test-writing write scope [${testWritingScope.targets.join(", ")}]`
+            : `[fc-repair] repair target refused: it does not pass the plan-path rule (planPathProblem)`);
+        }
         const efAbs = efNorm ? opAbs(efNorm) : "";
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.

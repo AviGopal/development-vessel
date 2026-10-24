@@ -172,9 +172,9 @@ async function seed(id: string): Promise<void> {
   await asHolder(() => sg.__settleBirthEvaluationsForTests());
 }
 /** One check-supply tick on the FORWARDING node: its gap reads and writes go to HOLDER. */
-async function forwardingTick(now: number): Promise<Row> {
+async function forwardingTick(now: number, node: string = FORWARDING_NODE): Promise<Row> {
   process.env["GAP_STORE_ENDPOINT"] = HOLDER;
-  process.env["SUBSTRATE_NAME"] = FORWARDING_NODE;
+  process.env["SUBSTRATE_NAME"] = node;
   try {
     const r = await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: now } as never);
     return r.body as Row;
@@ -243,5 +243,35 @@ describe("a forwarding node's arm is attributed to it and to its hand-off", () =
     expect(led["state"]).toBe("armed");
     expect(led["armed_by_node"]).toBe(HOLDER_NODE);
     expect(led["handed_off_from"]).toBe(FORWARDING_NODE);
+  });
+});
+
+describe("the arm entry is a copy taken at arm time", () => {
+  it("[MUST-FAIL] hand-off by A, armed on B, then a re-attempt handed off by C: the arm entry still says A and B", async () => {
+    const A = FORWARDING_NODE;
+    const C = `third-node-${RUN}`;
+    const id = T("attr-copy");
+    await seed(id);
+    await forwardingTick(later(), A); // dispatch
+    const first = `attr copy first ${RUN}`;
+    writeCheck(id, first, 2);
+    await forwardingTick(later(), A); // A hands the check off; the holder measures it
+    await holderTick(later()); // B (the holder) arms it
+    const armedRow = await stored(id);
+    expect(ledgerOf(armedRow)["state"]).toBe("armed");
+    expect(ledgerOf(armedRow)["handed_off_from"]).toBe(A);
+    // A re-attempt: the row goes back to a dispatched goal and its check gains a title, so a new check is handed off.
+    const reopened = structuredClone(armedRow!);
+    const meta = metaOf(reopened);
+    meta["check_supply"] = { ...ledgerOf(reopened), state: "goal_dispatched" };
+    reopened["classification_metadata"] = meta;
+    const w = await asHolder(() => sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: reopened } as never));
+    expect(w.shape).not.toBe("structuredError");
+    await asHolder(() => sg.__settleBirthEvaluationsForTests());
+    writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${first}", () => { expect(mod.widget).toBe(2); });\ntest("attr copy second ${RUN}", () => { expect(mod.widget).toBe(2); });\n`);
+    await forwardingTick(later(), C); // C hands the new check off: the row's handed_off_from is now C's
+    const led = ledgerOf(await stored(id));
+    expect(led["handed_off_from"]).toBe(C);
+    expect(led["arm"]).toMatchObject({ armed_by_node: HOLDER_NODE, handed_off_from: A });
   });
 });

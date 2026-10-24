@@ -131,6 +131,8 @@ type Ledger = {
    *  birth verdict, the node that handed it off: stamped by the hand-off write, carried to the arm. */
   armed_by_node?: string;
   handed_off_from?: string;
+  /** The arm's own entry, copied when it was written: a later hand-off rewrites handed_off_from above, never this. */
+  arm?: { armed_at: string; armed_by_node: string; handed_off_from?: string };
   /** The outcome read back for the last dispatch (status, reached, why it was lost, where and when it was read). */
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
@@ -1267,12 +1269,15 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // A hand-off with no node recorded (written before the stamp) is this node's only when it forwards its store.
     const handOff = !viaHandOff ? null : nonEmpty(handOffNode) ? String(handOffNode) : gapStoreIsLocal() ? null : localNode;
     const attribution = { armed_by_node: localNode, ...(handOff ? { handed_off_from: handOff } : {}) };
+    // The row's handed_off_from is the LATEST hand-off's: a re-attempt handed off by another node rewrites it. The arm
+    // entry keeps the copy taken here, so who armed what, from whose hand-off, survives the next hand-off.
+    const armEntry = { armed_at: nowIso, ...attribution };
     const w = await writeMeta(row, {
       evidence_resolve,
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
+      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, arm: armEntry, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

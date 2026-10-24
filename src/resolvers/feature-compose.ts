@@ -2331,7 +2331,17 @@ export function inertRegexEditRefusal(diff: string): string | null {
     let differs = false;
     for (const c of cands) if (p.o.test(c) !== p.n.test(c)) { differs = true; break; }
     if (!differs) {
-      return `[fc-inert-regex] The only change in this patch is to a regex literal that behaves identically (matches ${cands.size} candidate strings equally) to its old version. Old source: '${p.oSrc}', new source: '${p.nSrc}'. Change the behavior of the regex or make no edit.`;
+      // The refusal's wording is its contract: feature-compose-inert-literal-gate.test.ts pins `[fc-inert-literal]` and
+      // "behaves IDENTICALLY", feature-compose-semantic-gate-unconditional.test.ts pins `fc-inert-regex`. An autonomous
+      // landing (550f2f75) once replaced this return with `return null`, switching the gate off with every test green but
+      // its own; the next (f47db2b3) put back a reworded refusal that dropped both the tag and the 5cd4e72 citation.
+      return (
+        `[fc-inert-literal] [fc-inert-regex] the patch's ONLY change is a regex literal that behaves IDENTICALLY. ` +
+        `old=/${p.oSrc}/ new=/${p.nSrc}/ agreed on all ${cands.size} probe strings, so the edit ` +
+        `cannot change any decision the regex drives. It typechecks and passes tests because ` +
+        `nothing EXECUTES it. This exact class landed inert on this substrate (5cd4e72). ` +
+        `Either change the behaviour or make no edit.`
+      );
     }
   }
   return null;

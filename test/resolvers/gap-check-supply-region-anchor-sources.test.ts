@@ -41,15 +41,13 @@ describe("the region gate's anchor sources", () => {
     expect(supply.falsifiableAnchors(ROW.summary, SITE, ROW.falsifier_spec, null, { ...more, site_tokens: true }).some((a) => a.kind === "token" && a.value === "red_independent_of_edit_site")).toBe(true);
   });
 
-  it("[CONTROL] a token is counted in code and strings, never comments; over 5 occurrences it is no anchor", () => {
+  it("[CONTROL] a token is counted in code and strings, never comments", () => {
     const src = "// only_in_comment is named here\n/* and only_in_comment here */\nexport function f(x: number): string {\n  if (x > 1) return \"seen_twice\";\n  return \"seen_twice again\";\n}\n";
     const a = supply.falsifiableAnchors("gap: only_in_comment and seen_twice", src, "", null, { site_tokens: true }).filter((x) => x.kind === "token").map((x) => x.value);
     expect(a).toEqual(["seen_twice"]);
     const r = supply.derivedTextRegion(src, "src/f.ts", "gap: only_in_comment and seen_twice");
     expect(r).toMatchObject({ anchor: "seen_twice", occurrences: 2 });
     expect(r!.mutant.replacement).toBe("return undefined as any;\n  return undefined as any;");
-    // arm_refused occurs six times in the site's code: past the bound, it is not an anchor.
-    expect(supply.falsifiableAnchors("the arm_refused branch", SITE, "", null, { site_tokens: true }).some((x) => x.value === "arm_refused")).toBe(false);
   });
 
   it("[CONTROL] a quoted observed output in the row's must_fail is an anchor (read like the falsifier_spec)", () => {
@@ -59,9 +57,9 @@ describe("the region gate's anchor sources", () => {
     expect(r!.mutant.replacement).toBe("void 0;");
   });
 
-  it("[CONTROL] an occurrence whose statement is a declaration makes the anchor no region", () => {
-    const src = "export const some_flag = 1;\nexport function h(): number {\n  return some_flag;\n}\n";
-    expect(supply.derivedTextRegion(src, "src/h.ts", "h reads some_flag")).toBeNull();
+  it("[CONTROL] a TEXT anchor with an occurrence in a declaration is no region (tokens skip declarations: see the declaration-skip test)", () => {
+    const src = "export const MESSAGE = \"the widget is not configured\";\nexport function h(): string {\n  throw new Error(\"the widget is not configured\");\n}\n";
+    expect(supply.derivedTextRegion(src, "src/h.ts", "h throws \"the widget is not configured\"")).toBeNull();
   });
 });
 
@@ -72,12 +70,9 @@ describe("[REPLAY] 40d50487 and 84460a91 under the broadened anchor sources", ()
     const free = supply.commentFreeSource(site);
     return supply.falsifiableAnchors(e.summary, site, e.falsifier_spec ?? "", null, { site_tokens: true }).filter((a) => a.kind === "token").map((a) => [a.value, supply.anchorOccurrences(free, a).length]);
   };
-  it("development-vessel 40d50487: a literal region (no gate); its tokens all reach a declaration, so no region either", () => {
+  it("development-vessel 40d50487: a literal region in its own site (no gate)", () => {
     const e = ev("40d50487-row-evidence.json");
-    expect(supply.regionGateApplies({ region: e.region })).toBe(false);
-    // dispatchVerdict and declaredTestTitles occur at their declarations; title_grace_ms at its type and default too.
-    expect(tokens(SITE, e)).toEqual([["dispatchVerdict", 2], ["title_grace_ms", 4], ["declaredTestTitles", 3]]);
-    expect(supply.derivedTextRegion(SITE, SITE_REL, e.summary, e.falsifier_spec ?? "")).toBeNull();
+    expect(supply.regionGateApplies({ region: e.region }, SITE)).toBe(false);
   });
   it("libp2p-federation-transport 84460a91: a literal region in another repo (no gate); its tokens occur only at their declarations", () => {
     const e = ev("84460a91-row-evidence.json");

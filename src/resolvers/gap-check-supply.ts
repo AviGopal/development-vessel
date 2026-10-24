@@ -307,8 +307,8 @@ export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token"; val
 /**
  * MORE ANCHOR SOURCES, FOR THE REGION GATE (qa anchor-source ruling, 2026-10-24). The row's must_fail and control text
  * are read like the falsifier_spec (a quoted span there is an observed output), and with `site_tokens` a snake_case
- * or camelCase identifier the evidence names that occurs 1 to 5 times in the edit site's code or strings (never its
- * comments) is a `token` anchor (concept: `arm_refused`, which the gap names and the site writes as a string). The
+ * or camelCase identifier the evidence names that occurs in the edit site's code or strings (never its comments) is a
+ * `token` anchor; the region gate takes it when 1 to 5 of those occurrences are outside declarations (concept: `arm_refused`, which the gap names and the site writes as a string). The
  * check goal does not pass these: what the drafter is told is unchanged.
  */
 export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean };
@@ -392,7 +392,7 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
       const t: CheckAnchor = { kind: "token", value: m[1]! };
       if (t.value.length < 5 || out.some((x) => x.kind === "token" && x.value === t.value)) continue;
       const n = anchorOccurrences(free, t).length;
-      if (n >= 1 && n <= TOKEN_ANCHOR_MAX) add(t);
+      if (n >= 1) add(t); // the 1-5 bound is on its non-declaration occurrences (derivedTextRegion)
     }
   }
   return out;
@@ -1161,15 +1161,30 @@ export const regionGateApplies = (meta: Row, siteSrc: string | null = null): boo
   return literal === "" || (siteSrc !== null && countLiteral(siteSrc, literal) === 0);
 };
 export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null {
+  return explainedTextRegion(siteSrc, siteRel, evidence, spec, more).region;
+}
+/**
+ * The derived region and, when there is none, why (recorded on region_gate.why). A text anchor needs 1 to 5
+ * occurrences, none of them in a declaration. A TOKEN anchor's declaration occurrences are SKIPPED, not disqualifying
+ * (qa, 2026-10-24): a name's own declaration is not the code that uses it, so only its other occurrences count toward
+ * 1 to 5 and are replaced.
+ */
+export function explainedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { region: { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null; why: string } {
   const anchors = falsifiableAnchors(evidence, siteSrc, spec, null, { ...more, site_tokens: true });
   const free = commentFreeSource(siteSrc);
+  const notes: string[] = [];
   for (const a of [...anchors.filter((x) => x.kind === "text"), ...anchors.filter((x) => x.kind === "token")]) {
-    const at = anchorOccurrences(free, a);
-    if (at.length < 1 || at.length > TOKEN_ANCHOR_MAX) continue;
-    const mutant = allOccurrencesMutant(siteSrc, siteRel, at.map((i) => [i, i + a.value.length] as [number, number]));
-    if (mutant) return { anchor: a.value, kind: a.kind as "text" | "token", occurrences: at.length, mutant };
+    const all = anchorOccurrences(free, a).map((i) => [i, i + a.value.length] as [number, number]);
+    const spans = a.kind === "token" ? all.filter(([s0, e0]) => regionStatementMutant(siteSrc, s0, e0, siteRel) !== null) : all;
+    if (spans.length < 1 || spans.length > TOKEN_ANCHOR_MAX) {
+      notes.push(a.kind === "token" ? `token ${a.value}: ${spans.length} non-declaration occurrence(s) of ${all.length}` : `text ${JSON.stringify(a.value.slice(0, 60))}: ${all.length} occurrence(s)`);
+      continue;
+    }
+    const mutant = allOccurrencesMutant(siteSrc, siteRel, spans);
+    if (mutant) return { region: { anchor: a.value, kind: a.kind as "text" | "token", occurrences: spans.length, mutant }, why: "" };
+    notes.push(`text ${JSON.stringify(a.value.slice(0, 60))}: an occurrence is in a declaration`);
   }
-  return null;
+  return { region: null, why: notes.length ? notes.join("; ").slice(0, 400) : "the evidence names no text anchor or site identifier" };
 }
 /**
  * ONE MUTANT FOR EVERY OCCURRENCE (qa ruling): each occurrence's smallest enclosing statement (scope-earn-in
@@ -1196,8 +1211,9 @@ export function allOccurrencesMutant(src: string, siteRel: string, spans: Array<
 async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string; more?: AnchorSources }): Promise<MutationGateOutcome> {
   let src: string | null = null;
   try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
-  const region = src === null ? null : derivedTextRegion(src, a.siteRel, a.evidence, a.spec, a.more ?? {});
-  if (!region) return { kind: "pass", record: { decided: "unmeasured: no region" } };
+  const explained = src === null ? { region: null, why: `the edit site ${a.siteRel} is not readable here` } : explainedTextRegion(src, a.siteRel, a.evidence, a.spec, a.more ?? {});
+  const region = explained.region;
+  if (!region) return { kind: "pass", record: { decided: "unmeasured: no region", why: explained.why } };
   const m = region.mutant;
   const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
   const record: Row = { region: region.kind === "text" ? "derived_from_text_anchor" : "derived_from_token_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement.slice(0, 200), ...(region.occurrences > 1 ? { occurrences: region.occurrences } : {}) };

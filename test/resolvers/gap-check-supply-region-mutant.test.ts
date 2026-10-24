@@ -210,7 +210,7 @@ describe("the arm step refuses a check whose red survives replacing the gap's de
     expect(r?.mutant.original).toBe("throw new Error(`'${pointer.shape}' is not yet implemented.`);");
     expect(src.slice(r!.mutant.start, r!.mutant.end)).toBe(r!.mutant.original);
     // No text anchor in the evidence: no derived region. An occurrence in a comment is not counted (anchor-source ruling).
-    expect(supply.derivedTextRegion(src, CDB.siteRel, "concept-db `resolveImpulse` misbehaves")).toBeNull();
+    expect(supply.derivedTextRegion(src, CDB.siteRel, "concept-db misbehaves on delete")).toBeNull();
     expect(supply.derivedTextRegion(`${src}\n// is not yet implemented.\n`, CDB.siteRel, CDB_SUMMARY)).toMatchObject({ anchor: "not yet implemented", occurrences: 1 });
   });
 });
@@ -253,7 +253,7 @@ describe("the arm step logs one region_gate line per arm, naming its outcome", (
     // anchor-source ruling), with the one backticked symbol the check goal needs.
     const { id, row } = await landAndArm("rl-noregion", RIBO, "the replay judge scores almost every successful trace it re-judges below one half (`buildRelevancePayload`)", null, fixture("44abf5e-replay-judge.check.ts.txt"));
     expect(ledgerOf(row)["state"]).toBe("armed");
-    expect(gateOf(row)["region_gate"]).toEqual({ decided: "unmeasured: no region" });
+    expect(gateOf(row)["region_gate"]).toMatchObject({ decided: "unmeasured: no region" });
     expect(line(id)).toEqual([`[gap-check-supply] ${id}: region_gate=unmeasured: no region`]);
   });
   it("unmeasured: no measurement: the check throws under the region mutant instead of asserting", async () => {

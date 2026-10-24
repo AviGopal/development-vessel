@@ -19,14 +19,23 @@ import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const ROOT = join(tmpdir(), `sg-expect-cs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const HOLDER = "http://holder.expect-cs.test/v2/impulses/resolve";
-const ENV_KEYS = ["WORKSPACE_ROOT", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT"] as const;
+const ENV_KEYS = ["WORKSPACE_ROOT", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "METABOB_API_KEY", "API_KEY"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+// ISOLATED IN ONE PROCESS (a whole-suite run): this file's store, endpoint and module state are its own, whatever ran
+// before it. Its own temp root, always (not only when no earlier file set one: the plain module instance would keep
+// that file's root, which may not be a scratch root, so the gap-write forward queue is on and holds that file's queued
+// writes, and the forward below is queued behind them instead of reaching the holder). No endpoint and no node key at
+// load (the forward case sets the endpoint itself, and a key would be withheld from the http holder, turning the
+// holder's refusal into a cleartext refusal). And a FRESH module instance (query specifier), so no read snapshot, queue
+// or root an earlier file left in the shared instance is used here. All restored in afterAll.
+process.env["WORKSPACE_ROOT"] = ROOT;
 isolateLearnedStateInProcess(ROOT);
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 delete process.env["GAP_STORE_ENDPOINT"];
+delete process.env["METABOB_API_KEY"];
+delete process.env["API_KEY"];
 
-const sg = await import("../../src/resolvers/substrate-gap.js");
+const sg = await import(`../../src/resolvers/substrate-gap.js?${"expect-check-supply-isolated"}`);
 type Row = Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
 const originalFetch = globalThis.fetch;
@@ -40,6 +49,7 @@ async function asHolder<T>(fn: () => Promise<T>): Promise<T> {
 }
 beforeAll(() => {
   gapStore = snapshotGapStore(sg.gapStoreRootForTest(), sg.__settleBirthEvaluationsForTests);
+  if (sg.gapStoreRootForTest() !== ROOT) throw new Error(`substrate-gap-expect-check-supply.test.ts is not isolated: its store root is ${sg.gapStoreRootForTest()}, not ${ROOT}`);
   mkdirSync(join(sg.gapStoreRootForTest(), "gaps"), { recursive: true });
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);

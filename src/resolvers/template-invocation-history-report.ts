@@ -28,9 +28,11 @@ export interface TemplateInvocationHistoryReportPointer {
   reportLimit?: number;
   /**
    * A LEARNED-TRACK FRESHNESS CHECK (the ribosome-extraction joint). Only when given, the answer also carries top-level
-   * `stale_count`: 1 when the newest learned template (see isLearnedTemplate) was created more than max_lag_sec ago, or
-   * there is none, else 0, with `newest_learned_template_id` / `newest_learned_age_sec`. Absent, the response is exactly
-   * what it was.
+   * `stale_count`: 1 when the newest learned template (see isLearnedTemplate) was created more than max_lag_sec before
+   * the newest execution, or there is none, else 0, with `newest_learned_template_id` / `newest_learned_age_sec` (the
+   * lag behind that execution) and `newest_execution_at`. Measured against the newest execution, not the clock, so an
+   * idle node is never read stale; with no execution time read there is no stale_count (unmeasured). Absent, the
+   * response is exactly what it was.
    */
   max_lag_sec?: number;
 }
@@ -46,6 +48,8 @@ interface TemplateRow {
 }
 
 interface TraceRow {
+  executed_at?: unknown;
+  created_at?: unknown;
   activity_id?: unknown;
   variant_id?: unknown;
   metadata?: unknown;
@@ -89,13 +93,14 @@ export function isLearnedTemplate(t: { id?: unknown; tags?: unknown }): boolean 
  * ORDER BY created_at DESC) pulled up to `capped` (true when the pull stopped at its cap, not at the list's end). The
  * first learned row is the newest. With none pulled, the answer is exact only when the pull reached a row older than
  * the horizon or the list's end; a capped pull whose rows are all newer than the horizon cannot tell, and returns
- * null (no stale_count: unmeasured, never "fresh"). Pure.
+ * null (no stale_count: unmeasured, never "fresh"). Ages are measured back from `refMs`, the newest execution's time.
+ * Pure.
  */
 export function learnedFreshness(
   templates: ReadonlyArray<{ id?: unknown; tags?: unknown; created_at?: unknown }>,
   maxLagSec: number,
   capped: boolean,
-  nowMs: number,
+  refMs: number,
 ): { stale_count: number; newest_learned_template_id: string | null; newest_learned_age_sec: number | null } | null {
   let newest: { id: string; ms: number } | null = null;
   let oldestMs = Infinity;
@@ -106,10 +111,10 @@ export function learnedFreshness(
     if (isLearnedTemplate(t) && (!newest || ms > newest.ms)) newest = { id: typeof t.id === "string" ? normalizeId(t.id) : "unknown_template", ms };
   }
   if (newest) {
-    const age = Math.max(0, Math.round((nowMs - newest.ms) / 1000));
+    const age = Math.max(0, Math.round((refMs - newest.ms) / 1000));
     return { stale_count: age > maxLagSec ? 1 : 0, newest_learned_template_id: newest.id, newest_learned_age_sec: age };
   }
-  if (capped && !((nowMs - oldestMs) / 1000 > maxLagSec)) return null;
+  if (capped && !((refMs - oldestMs) / 1000 > maxLagSec)) return null;
   return { stale_count: 1, newest_learned_template_id: null, newest_learned_age_sec: null };
 }
 
@@ -176,6 +181,7 @@ export async function resolveTemplateInvocationHistoryReport(
 
   // 2. Pull traces (count by template_id).
   const traceCount = new Map<string, number>();
+  let newestExecMs: number | null = null;
   try {
     const resp = await fetch(`${tracesUrlBase}?limit=${traceFetchCap}`, {
       headers: { ...selfAuthHeaders(pointer.tracesUrl ?? DEFAULT_TRACES_URL, DEFAULT_TRACES_URL) },
@@ -189,6 +195,8 @@ export async function resolveTemplateInvocationHistoryReport(
           ? (json.traces as TraceRow[])
           : [];
       for (const t of traces) {
+        const at = typeof t.executed_at === "string" ? Date.parse(t.executed_at) : typeof t.created_at === "string" ? Date.parse(t.created_at) : NaN;
+        if (Number.isFinite(at) && (newestExecMs === null || at > newestExecMs)) newestExecMs = at;
         const tid = traceTemplateId(t);
         if (!tid) continue;
         traceCount.set(tid, (traceCount.get(tid) ?? 0) + 1);
@@ -236,7 +244,7 @@ export async function resolveTemplateInvocationHistoryReport(
   else healthVerdict = "BLOCKED";
 
   const maxLagSec = typeof pointer.max_lag_sec === "number" && Number.isFinite(pointer.max_lag_sec) && pointer.max_lag_sec >= 0 ? pointer.max_lag_sec : null;
-  const freshness = maxLagSec === null ? null : learnedFreshness(templates, maxLagSec, !listEnded, Date.now());
+  const freshness = maxLagSec === null || newestExecMs === null ? null : learnedFreshness(templates, maxLagSec, !listEnded, newestExecMs);
 
   return {
     shape: "templateInvocationHistoryReport",
@@ -248,7 +256,7 @@ export async function resolveTemplateInvocationHistoryReport(
       unfired_capabilities: unfired.slice(0, reportLimit),
       health_verdict: healthVerdict,
       completed_at: new Date().toISOString(),
-      ...(freshness ? { ...freshness, max_lag_sec: maxLagSec } : {}),
+      ...(freshness && newestExecMs !== null ? { ...freshness, max_lag_sec: maxLagSec, newest_execution_at: new Date(newestExecMs).toISOString() } : {}),
     },
   };
 }

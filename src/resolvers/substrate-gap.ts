@@ -1467,14 +1467,19 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
   ] },
   // discovery-vessel-registry-observer.ts: the discoveryRegistryState body (error/http_status/roundtrip_ms only on some
   // answers); missing_count and missing_vessels only on a successful read with vessel_ids given (the local-registration
-  // check the unregistered-vessel and joint detectors arm with); unanswered_count and unanswered only on a successful
-  // read with probe_health true (the discovery-endpoints-healthy joint's arming).
+  // check the unregistered-vessel and joint detectors arm with); unanswered_count and unanswered (local rows) and
+  // unreachable_peer_count and unreachable_peers (federated rows) only on a successful read with probe_health true (the
+  // discovery-endpoints-healthy joint's arming).
   discovery_vessel_registry_observer: {
     fields: [
       "endpoint", "reachable", "error", "http_status", "roundtrip_ms", "total_vessels", "healthy_count", "stale_count",
       "stale_threshold_ms", "per_vessel", "generated_at", "missing_count", "missing_vessels", "unanswered_count", "unanswered",
+      "unreachable_peer_count", "unreachable_peers",
     ],
-    needs_input: { missing_count: "vessel_ids", missing_vessels: "vessel_ids", unanswered_count: "probe_health", unanswered: "probe_health" },
+    needs_input: {
+      missing_count: "vessel_ids", missing_vessels: "vessel_ids", unanswered_count: "probe_health", unanswered: "probe_health",
+      unreachable_peer_count: "probe_health", unreachable_peers: "probe_health",
+    },
     // probe_health is a boolean: only true probes, so an arming that names unanswered_count with it false never measures.
     inputProblem: (input) => ("probe_health" in input && input["probe_health"] !== true ? { field: "probe_health", reason: "probe_health must be true for unanswered_count to be measured" } : null),
   },
@@ -1486,12 +1491,12 @@ const RESPONSE_CONTRACTS: Record<string, ResponseContract> = {
     needs_input: { match_count: "where" },
   },
   // template-invocation-history-report.ts: the templateInvocationHistoryReport body. stale_count, the newest learned
-  // template's id and age, and max_lag_sec only with max_lag_sec given, and stale_count only when the pull could tell
-  // (learnedFreshness): the ribosome-extraction joint's arming.
+  // template's id and age, max_lag_sec and newest_execution_at only with max_lag_sec given, and only when the pull could
+  // tell and an execution time was read (learnedFreshness): the ribosome-extraction joint's arming.
   template_invocation_history_report: {
     fields: [
       "total_templates", "fired_count", "unfired_count", "unfired_ratio", "unfired_capabilities", "health_verdict", "completed_at",
-      "stale_count", "newest_learned_template_id", "newest_learned_age_sec", "max_lag_sec",
+      "stale_count", "newest_learned_template_id", "newest_learned_age_sec", "max_lag_sec", "newest_execution_at",
     ],
     needs_input: { stale_count: "max_lag_sec" },
   },

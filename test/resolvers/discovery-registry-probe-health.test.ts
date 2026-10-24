@@ -64,6 +64,17 @@ describe("discovery_vessel_registry_observer probe_health (the discovery-endpoin
     expect(await read({ probe_health: true })).toMatchObject({ unanswered_count: 0, unanswered: [] });
   });
 
+  it("must-fail: a federated @peer row with an unreachable endpoint does not raise unanswered_count; it is an unreachable peer", async () => {
+    serve([...ROWS, { vesselId: "d-vessel@peer-x", endpoint: "http://d.test" }, { vesselId: "e-vessel@peer-y", endpoint: "http://e.test" }], { "d.test": "throw", "e.test": 502 });
+    expect(await read({ probe_health: true })).toMatchObject({
+      unanswered_count: 0, unanswered: [],
+      unreachable_peer_count: 2, unreachable_peers: ["d-vessel@peer-x@http://d.test (no answer)", "e-vessel@peer-y@http://e.test (http 502)"],
+    });
+    // A local row that does not answer still counts beside it.
+    serve([...ROWS, { vesselId: "d-vessel@peer-x", endpoint: "http://d.test" }], { "d.test": "throw", "a.test": "throw" });
+    expect(await read({ probe_health: true })).toMatchObject({ unanswered_count: 1, unreachable_peer_count: 1 });
+  });
+
   it("probes at most 4 at a time, with no credential", async () => {
     const seen = { inFlight: 0, max: 0, auth: 0 };
     serve(Array.from({ length: 12 }, (_, i) => ({ vesselId: `v${i}`, endpoint: `http://v${i}.test` })), {}, seen);
@@ -74,7 +85,7 @@ describe("discovery_vessel_registry_observer probe_health (the discovery-endpoin
   });
 
   it("must-fail: the response contract declares unanswered_count and needs probe_health: true for it", async () => {
-    serve(ROWS, { "b.test": 500 });
+    serve([...ROWS, { vesselId: "d-vessel@peer-x", endpoint: "http://d.test" }], { "b.test": 500, "d.test": 500 });
     for (const k of Object.keys(await read({ probe_health: true }))) expect(responseFields("discovery_vessel_registry_observer") ?? []).toContain(k);
     const er = (input: Record<string, unknown>) => ({ shape: "discovery_vessel_registry_observer", input, zero_field: "unanswered_count" });
     expect(checkArmingProblem(er({ probe_health: true }))).toBeNull();

@@ -31,9 +31,11 @@ export interface DiscoveryVesselRegistryObserverPointer {
   vessel_ids?: string[];
   /**
    * AN ENDPOINT-HEALTH CHECK (the discovery-endpoints-healthy joint). Only when true, the answer also carries top-level
-   * `unanswered_count` and `unanswered`: the registered endpoints whose GET /health did not answer 2xx within
-   * HEALTH_PROBE_TIMEOUT_MS, probed HEALTH_PROBE_CONCURRENCY at a time, with no credential. Absent, the response is
-   * exactly what it was.
+   * `unanswered_count` and `unanswered`: the LOCAL registered endpoints (see registryRowMatch: no "@<peer>" suffix)
+   * whose GET /health did not answer 2xx within HEALTH_PROBE_TIMEOUT_MS, probed HEALTH_PROBE_CONCURRENCY at a time, with
+   * no credential. A federated "@<peer>" row's endpoint may simply be unreachable from this node, which says nothing of
+   * its health here, so those go to `unreachable_peer_count` / `unreachable_peers`, never into unanswered_count.
+   * Absent, the response is exactly what it was.
    */
   probe_health?: boolean;
 }
@@ -42,8 +44,11 @@ export interface DiscoveryVesselRegistryObserverPointer {
 export const HEALTH_PROBE_TIMEOUT_MS = 2_000;
 export const HEALTH_PROBE_CONCURRENCY = 4;
 
-/** The rows whose endpoint did not answer GET /health with a 2xx, as "<vesselId>@<endpoint> (<why>)", in row order. */
-export async function unansweredEndpoints(rows: ReadonlyArray<{ vesselId?: unknown; endpoint?: unknown }>): Promise<string[]> {
+/**
+ * The rows whose endpoint did not answer GET /health with a 2xx, as "<vesselId>@<endpoint> (<why>)", in row order,
+ * split by whether the row is a local registration or a federated "@<peer>" copy.
+ */
+export async function unansweredEndpoints(rows: ReadonlyArray<{ vesselId?: unknown; endpoint?: unknown }>): Promise<{ local: string[]; peer: string[] }> {
   const targets = rows.filter((r) => typeof r.endpoint === "string" && r.endpoint.trim() !== "");
   const out: Array<string | null> = new Array(targets.length).fill(null);
   let next = 0;
@@ -62,7 +67,9 @@ export async function unansweredEndpoints(rows: ReadonlyArray<{ vesselId?: unkno
     }
   };
   await Promise.all(Array.from({ length: Math.min(HEALTH_PROBE_CONCURRENCY, targets.length) }, worker));
-  return out.filter((x): x is string => x !== null);
+  const local: string[] = [], peer: string[] = [];
+  out.forEach((x, i) => { if (x !== null) (String(targets[i]!.vesselId ?? "").includes("@") ? peer : local).push(x); });
+  return { local, peer };
 }
 
 /**
@@ -256,7 +263,7 @@ export async function resolveDiscoveryVesselRegistryObserver(
       per_vessel: perVessel,
       generated_at: new Date().toISOString(),
       ...(missing ? { missing_count: missing.length, missing_vessels: missing } : {}),
-      ...(unanswered ? { unanswered_count: unanswered.length, unanswered } : {}),
+      ...(unanswered ? { unanswered_count: unanswered.local.length, unanswered: unanswered.local, unreachable_peer_count: unanswered.peer.length, unreachable_peers: unanswered.peer } : {}),
     },
   };
 }

@@ -7,23 +7,30 @@
 //   - FLOOR: a candidate with landability < 0.15 is dropped before the class rerank, even when its class samples
 //     theta ~ 1; a pool entirely below the floor picks nothing.
 //   - PICK-SKIP: walking the ranked list, a candidate is skipped when it carries regressed_by with no revert_sha,
-//     a landing stamp (pending_outcome_verification) without a measurable predicate, a parent whose landing is
-//     unjudged, or a pick-time check that reads 'pending'. When every candidate is skipped the top one is returned
-//     (fail open).
+//     a parent whose landing is unjudged, or a pick-time check that reads 'pending'. When every candidate is skipped
+//     the top one is returned (fail open).
+//   - LANDING STAMP (the land-verification hold's parity contract): a row carrying an unreleased landing stamp
+//     (pending_outcome_verification, length >= 7, not pending_released_sha) is HELD for its verdict whether or not it
+//     has a measurable predicate, so admission excludes it (gap-admission.ts isAwaitingLandVerification) before the
+//     pick. The reason is the frozen fixture set test/fixtures/land-verification-hold-fixtures.json (sha256
+//     f4dc15fb9a9854cf5750e8663a27f84714cc7505a677934ebd36d288df3b4c2a, shared byte for byte with boredom-vessel's
+//     mirror): its cutover_stamp_with_derived_predicate case, a stamp with a measurable hardcoded_url, is HELD. A
+//     landing known not to have fixed the gap (regressed_by, or a BEHAVIORAL VERIFICATION FAILED summary) is not held,
+//     so with a measurable predicate it is pickable again.
 // Each gate has a CONTROL: the same pool with the gate's condition removed returns the excluded gap.
 // Driven through auto-pick ticks of resolveGapToFeature over stored pools; the calibration is the store holder's
 // (include_calibration), the class posteriors are served at their load-time path. Written against the tree before
 // the extraction; it must hold after it.
 //
 // NOT REACHABLE through the entry point, stated: pick-skip's operator_hold branch (an open read drops held rows and
-// admission excludes operator_hold before the pick), and its landed-awaiting-verification branch for a row whose
-// disposition is pending_verification (admission excludes those too). The landing-stamp case below uses a stamp
-// with no pending_verification disposition, which admission lets through.
+// admission excludes operator_hold before the pick), and its landed-awaiting-verification branch (admission's land-
+// verification hold excludes every unreleased stamp first, with or without a pending_verification disposition).
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { beginPin, endPin, restoreHarness, store, calls, metaOf, stored } from "./harness.js";
 import { candidate, classPosteriors, posteriorsWereRead, autoPick, pickSite, PICK_LITERAL, PICK_LOG } from "./pick-fixture.js";
 
 const { gapClassOf } = await import("../../src/judge/gap-attempt-credit.js");
+const { admitActionableGaps } = await import("../../src/judge/gap-admission.js");
 const cls = (id: string) => gapClassOf(stored(id)!);
 
 beforeEach(() => beginPin());
@@ -130,10 +137,34 @@ describe("pick-skip: a candidate that cannot be composed does not consume the pi
   it("[PIN] regressed_by with no revert_sha is skipped", () => expectSkipped({ regressed_by: { sha: "abcdef1234567" } }, "reg"));
   it("[CONTROL] regressed_by with its revert recorded is picked", () => expectPicked({ regressed_by: { sha: "abcdef1234567", revert_sha: "fedcba7654321" } }, "reg"));
 
-  it("[PIN] a landing stamp with no measurable predicate is skipped", () =>
-    expectSkipped({ falsifier: "class2", hardcoded_url: undefined, evidence_resolve: { shape: "pin_shape", zero_field: "n" }, pending_outcome_verification: "abcdef1234567" }, "stamp"));
-  it("[CONTROL] the same stamp on a gap with a measurable predicate (class-1 literal) is picked", () =>
-    expectPicked({ pending_outcome_verification: "abcdef1234567" }, "stamp"));
+  // LANDING STAMP: held at admission (the land-verification hold), so it never reaches the pick-skip walk.
+  async function expectHeld(heldMeta: Record<string, unknown>, tag: string): Promise<void> {
+    const h = candidate(`pks-held-${tag}`, heldMeta, { source: "human_reported" });
+    const next = candidate(`pks-nxh-${tag}`);
+    classPosteriors({ [cls(h)]: "favour", [cls(next)]: "disfavour" });
+    const { picked, lines } = await autoPick();
+    expect(picked).toBe(next);
+    expect(lines).toContain('[gap-to-feature] auto-pick admission: 2 candidates → 1 admitted, 1 excluded {"disposition":1}');
+    const pick = lines.find((l) => l.startsWith("[gap-to-feature] pick "));
+    expect(pick).toContain('"pool":1');
+    expect(pick).toContain('"skipped_pending":0');
+    const adm = await admitActionableGaps([stored(h)!, stored(next)!], { typecheckRunner: () => ({ ran: false, clean: true }) });
+    expect(adm.excluded).toEqual([{ id: h, reason: "disposition(pending_verification)" }]);
+  }
+  it("[PIN] a landing stamp with no measurable predicate is excluded at admission, not picked", () =>
+    expectHeld({ falsifier: "class2", hardcoded_url: undefined, evidence_resolve: { shape: "pin_shape", zero_field: "n" }, pending_outcome_verification: "abcdef1234567" }, "stamp"));
+  it("[CONTROL] the same stamp with a measurable predicate (class-1 literal) is HELD too (cutover_stamp_with_derived_predicate)", () =>
+    expectHeld({ pending_outcome_verification: "abcdef1234567" }, "stmc"));
+  it("[PIN] a falsified landing (regressed_by, its revert recorded) with a measurable predicate is pickable again", () =>
+    expectPicked({ pending_outcome_verification: "abcdef1234567", regressed_by: { sha: "abcdef1234567", revert_sha: "fedcba7654321" } }, "fals"));
+  it("[PIN] a falsified landing (BEHAVIORAL VERIFICATION FAILED) with a measurable predicate is pickable again", async () => {
+    const s = candidate("pks-ctl-bvf", { pending_outcome_verification: "abcdef1234567" }, { source: "human_reported", summary: "pin row. BEHAVIORAL VERIFICATION FAILED: the landing did not fix it" });
+    const next = candidate("pks-nxc-bvf");
+    classPosteriors({ [cls(s)]: "favour", [cls(next)]: "disfavour" });
+    const { picked, lines } = await autoPick();
+    expect(picked).toBe(s);
+    expect(lines.find((l) => l.startsWith("[gap-to-feature] pick "))).toContain('"skipped_pending":0');
+  });
 
   it("[PIN] a pick-time check that reads 'pending' (a landing-derived sentinel, literal gone) is skipped", async () => {
     await expectSkipped({ edit_site: pickSite(false), predicate_source: "removed_line_of_landing_commit" }, "pend");

@@ -1,0 +1,26 @@
+// FIXTURE ONLY: the part of Hono and of the JWT reader the concept-db extract uses (a route table, fetch, c.req, c.json).
+export type Context = {
+  req: { json(): Promise<any>; header(name: string): string | undefined; method: string; path: string };
+  json(body: unknown, status?: number): Response;
+};
+export class Hono {
+  private routes = new Map<string, (c: Context) => Promise<Response> | Response>();
+  post(path: string, handler: (c: Context) => Promise<Response> | Response): this {
+    this.routes.set(`POST ${path}`, handler);
+    return this;
+  }
+  async fetch(req: Request): Promise<Response> {
+    const path = new URL(req.url).pathname;
+    const handler = this.routes.get(`${req.method} ${path}`);
+    if (!handler) return new Response('404 Not Found', { status: 404 });
+    const c: Context = {
+      req: { json: () => req.json(), header: (name) => req.headers.get(name) ?? undefined, method: req.method, path },
+      json: (body, status = 200) => Response.json(body, { status }),
+    };
+    return handler(c);
+  }
+}
+export function getJwtAuthFromContext(c: Context): { orgId: string; jwtToken: string } | null {
+  const h = c.req.header('authorization');
+  return h ? { orgId: 'org-fixture', jwtToken: h } : null;
+}

@@ -90,7 +90,7 @@ import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeR
 import { codeContract, type CodeContract } from "./code-introspect.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
-import { coverageKnobs, RAN_PACING, redForTheRightReason, selectMutants, type Mutant } from "./scope-earn-in.js";
+import { coverageKnobs, RAN_PACING, redForTheRightReason, regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { dispatchGoalOnPeer, placeCompose, placementArmKnobs, readPlacedDispatch } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
@@ -98,7 +98,7 @@ import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY } from "../config.js";
 import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
-import { regionOf } from "../lib/region-literal.js";
+import { countLiteral, regionOf } from "../lib/region-literal.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
 /** The predicate_source a system-authored check carries: the discriminator the measures count. */
@@ -965,6 +965,17 @@ export function checkMissesRegionRefusal(siteSrc: string, siteRel: string, check
   const shown = r.replace(/\s+/g, " ").slice(0, 160);
   return { reason: `${CHECK_MISSES_REGION_STAGE}: what the check calls in ${siteRel} (${reached.slice(0, 8).join(", ")}${reached.length > 8 ? ", …" : ""}, with the same-file declarations it reaches) never reaches the gap's region (\`${shown}\`, in ${enclosing}), so its red is not the defect's: call an export that reaches the region` };
 }
+/** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
+async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[] }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
+  const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
+  if (gapStoreIsLocal()) {
+    const r = await resolveTestSuite(input).catch(() => null);
+    return { report: r && r.shape === "test_suite" ? (r.body as Row) : null };
+  }
+  const held = await holderCheckReport({ shape: "test_suite", input });
+  if (!held.report && /unreachable|HTTP/.test(held.detail)) return { wait: `the mutant runs could not be read at the holder (${held.detail})` };
+  return { report: held.report };
+}
 async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number }): Promise<MutationGateOutcome> {
   let src: string | null = null;
   try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
@@ -975,16 +986,9 @@ async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFi
   if (mutants.length === 0) return { kind: "pass", record: { ...record, decided: "nothing: the edit site has no mutable construct" } };
   const runs: Array<{ mutant: Mutant; report: Row | null }> = [];
   for (const m of mutants) {
-    const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
-    let report: Row | null;
-    if (gapStoreIsLocal()) {
-      const r = await resolveTestSuite(input).catch(() => null);
-      report = r && r.shape === "test_suite" ? (r.body as Row) : null;
-    } else {
-      const held = await holderCheckReport({ shape: "test_suite", input });
-      if (!held.report && /unreachable|HTTP/.test(held.detail)) return { kind: "wait", detail: `the mutant runs could not be read at the holder (${held.detail})` };
-      report = held.report;
-    }
+    const run = await mutantRun(a, m);
+    if ("wait" in run) return { kind: "wait", detail: run.wait };
+    const report = run.report;
     runs.push({ mutant: m, report });
     const v = mutationGateVerdict(a.baseline, runs, a.titles);
     if (v.changed > 0) return { kind: "pass", record: { ...record, ran: runs.length, ...v, changed_by: { operator: m.operator, line: m.line } } };
@@ -993,6 +997,51 @@ async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFi
   const out = { ...record, ran: runs.length, ...v };
   if (v.measured === 0) return { kind: "pass", record: { ...out, decided: "nothing: no mutant run measured the check" } };
   return { kind: "refuse", reason: `red_independent_of_edit_site: the named test(s) fail the same way under all ${v.measured} measured mutant(s) of ${a.siteRel} (${mutants.map((m) => `${m.operator}@${m.line}`).join(", ")}), so no change to the site moves the check`, record: out };
+}
+
+/**
+ * THE CHECK'S RED MUST DEPEND ON THE GAP'S REGION (arm step, 2026-10-24). concept-db 23f78717's check posted a pointer
+ * with no `type`, so its red was the 400 "Missing or invalid pointer.type" from the request validation, wherever the
+ * defect is (the `throw new Error(\`'${pointer.shape}' is not yet implemented.\`)` stub further down the same
+ * function). It armed: its row has no literal region, and the operator gate above found nothing mutable in what the
+ * check names (the Hono app constant), so it decided nothing. The gap's region is DERIVED here from the evidence's own
+ * observed output: a TEXT anchor of falsifiableAnchors (the anchor the check goal hands the drafter) that occurs exactly
+ * once in the edit site; its smallest enclosing statement, not a declaration, is the region. The check runs once more
+ * with that statement replaced by an inert one (scope-earn-in regionStatementMutant, through test_suite's mutate_edit):
+ * code that emits the observed output is on the symptom's path, so a check that reaches the defect moves (green, or a
+ * different failing assertion). Unchanged: refused, REGION_RED_UNCHANGED_STAGE, the reason being the drafter's lesson.
+ * A run that did not measure decides nothing. Only DERIVED regions: a literal classification_metadata.region is where
+ * grounding centres the edit, often the line a missing fix goes next to, so replacing it need not move a correct check
+ * (that row kind keeps checkMissesRegionRefusal). No text anchor occurring once: no region, recorded so.
+ */
+export const REGION_RED_UNCHANGED_STAGE = "region_red_unchanged";
+/** The region gate applies to a row with no literal region (the region is then derived, derivedTextRegion). */
+export const regionGateApplies = (meta: Row): boolean => regionOf(meta) === "";
+export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = ""): { anchor: string; mutant: Mutant } | null {
+  for (const a of falsifiableAnchors(evidence, siteSrc, spec)) {
+    if (a.kind !== "text" || countLiteral(siteSrc, a.value) !== 1) continue;
+    const at = siteSrc.indexOf(a.value);
+    const mutant = regionStatementMutant(siteSrc, at, at + a.value.length, siteRel);
+    if (mutant) return { anchor: a.value, mutant };
+  }
+  return null;
+}
+async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string }): Promise<MutationGateOutcome> {
+  let src: string | null = null;
+  try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  const region = src === null ? null : derivedTextRegion(src, a.siteRel, a.evidence, a.spec);
+  if (!region) return { kind: "pass", record: { decided: "unmeasured: no region" } };
+  const m = region.mutant;
+  const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
+  const record: Row = { region: "derived_from_text_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement };
+  const run = await mutantRun(a, m);
+  if ("wait" in run) return { kind: "wait", detail: run.wait };
+  const v = mutationGateVerdict(a.baseline, [{ mutant: m, report: run.report }], a.titles);
+  if (v.measured === 0) return { kind: "pass", record: { ...record, ...v, decided: "unmeasured: the region mutant run measured nothing" } };
+  if (v.changed > 0) return { kind: "pass", record: { ...record, ...v } };
+  const ff = firstFailureOf((a.baseline as Row | null)?.["red_reason"]);
+  const failure = ff ? [ff["error"] != null ? String(ff["error"]) : "", ff["expected"] != null ? `Expected ${String(ff["expected"])}` : "", ff["received"] != null ? `Received ${String(ff["received"])}` : ""].filter(Boolean).join(", ").slice(0, 240) || "the same failing assertion" : "the same failing assertion";
+  return { kind: "refuse", reason: `${REGION_RED_UNCHANGED_STAGE}: the check's red survives replacing the gap's region (\`${shown}\`, ${a.siteRel}:${m.line}); its failure comes from elsewhere (${failure}), so it does not measure the gap`, record: { ...record, ...v } };
 }
 
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
@@ -1303,13 +1352,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const mutation = verdict === "present" && !gateReason && site.ok
       ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles, baseline: report, k: coverageKnobs(rhythm.body).k })
       : null;
-    if (mutation?.kind === "wait") {
-      notArmed.push({ id, reason: `awaiting_mutation_runs: ${mutation.detail}` });
-      console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${mutation.detail})`);
+    // Then, on a row with no literal region, the region derived from the evidence's observed output (regionMutantGate).
+    const regionGate = mutation?.kind === "pass" && regionGateApplies(meta) && site.ok
+      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "" })
+      : null;
+    const waiting = mutation?.kind === "wait" ? mutation : regionGate?.kind === "wait" ? regionGate : null;
+    if (waiting) {
+      notArmed.push({ id, reason: `awaiting_mutation_runs: ${waiting.detail}` });
+      console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${waiting.detail})`);
       continue;
     }
-    const wrongReason = gateReason ?? (mutation?.kind === "refuse" ? mutation.reason : null);
-    const mutationRecord = mutation ? { mutation_gate: mutation.record } : {};
+    const wrongReason = gateReason ?? (mutation?.kind === "refuse" ? mutation.reason : null) ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
+    const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}) } } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
     if (verdict !== "present" || wrongReason) {

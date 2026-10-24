@@ -1,0 +1,64 @@
+// EXTRACT of concept-db src/routes/impulses.ts at 78b70967 (the parent of 23f78717), for the region-mutant arm gate.
+// The app constant (:50), its /resolve registration (:524), resolveImpulse's request validation (:534-557, the
+// "Missing or invalid pointer.type" 400 verbatim), the three unimplemented write cases (:824-828 verbatim), the case
+// after them (:829, reduced), the default (:1276) and the catch (:1288) are kept; the shape guard (:563) is reduced to
+// "no caller, no write". Hono and the JWT reader come from ./hono-standin (fixture only), as they come from other
+// modules in the original, so the same-file declarations the check reaches are the original's.
+import type { Context } from './hono-standin';
+import { Hono, getJwtAuthFromContext } from './hono-standin';
+
+const impulses = new Hono();
+
+impulses.post('/resolve', (c) => resolveImpulse(c));
+
+async function resolveImpulse(c: Context): Promise<Response> {
+  const jwtAuth = getJwtAuthFromContext(c);
+
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const pointer = body?.impulse?.pointer ?? body?.pointer;
+  if (!pointer || typeof pointer !== 'object') {
+    return c.json({ error: 'Missing required field: pointer' }, 400);
+  }
+
+  const shape = pointer.type;
+  if (typeof shape !== 'string') {
+    return c.json({ error: 'Missing or invalid pointer.type' }, 400);
+  }
+
+  if (!jwtAuth && shape.endsWith('_write')) {
+    return c.json({ success: false, error: 'Authentication required', code: 'AUTH_REQUIRED', shape }, 401);
+  }
+
+  try {
+    let result: { content: unknown; metadata: Record<string, unknown> };
+
+    switch (shape) {
+      case 'concept_delete_write':
+      case 'concept_retire_write':
+      case 'concept_supersede_write':
+        // Stub to satisfy advertised shape contract. Implementation is pending.
+        throw new Error(`'${pointer.shape}' is not yet implemented.`);
+
+      case 'impulseCooccurrenceEdges': {
+        result = { content: { edges: [] }, metadata: { shape: 'impulseCooccurrenceEdges', count: 0 } };
+        break;
+      }
+
+      default:
+        return c.json({ error: `Unknown impulse shape: "${shape}"` }, 400);
+    }
+
+    return c.json(result);
+  } catch (error) {
+    const err = error as Error;
+    return c.json({ error: 'Resolution failed', shape, message: err.message }, 500);
+  }
+}
+
+export { impulses };

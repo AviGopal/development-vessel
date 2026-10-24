@@ -1502,6 +1502,60 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     }
   }
 
+  // 2a. THE REGION GATE, CAUGHT UP (qa re-arm ruling, 2026-10-24). Rows armed before the region gate existed carry no
+  // mutation_gate.region_gate, so nothing measured that their check depends on the gap's region, and their
+  // fixed_elsewhere close now holds (gap-landing-verdict regionGateAtClose). Each pass re-runs the gate on at most
+  // `region_regate_per_tick` (shaped, default 2) ARMED check-supply rows with no literal region and no region_gate: the
+  // check once more as it stands (the baseline the gate compares), then once under the region mutant (regionMutantGate).
+  // Refused: un-armed (arm_refused, evidence_resolve cleared), the reason the next goal's lesson, as at arm. Otherwise
+  // the reading is recorded and the row stays armed. A check no longer red at HEAD is recorded unmeasured, so it is not
+  // re-run every pass. A row a gate run cannot be read for waits for the next pass.
+  const regateMax = Math.floor(posNum(rhythm.body["region_regate_per_tick"], 2));
+  const regated: Array<{ id: string; outcome: string }> = [];
+  for (const row of open) {
+    if (regated.length >= regateMax) break;
+    const id = String(row["id"]);
+    if (touched.has(id)) continue;
+    const meta = metaOf(row);
+    const ledger = ledgerOf(meta);
+    const prior = (ledger.mutation_gate ?? null) as Row | null;
+    if (ledger.state !== "armed" || !ledger.test_file || !ledger.vessel || String(meta["predicate_source"] ?? "") !== CHECK_SUPPLY_SOURCE) continue;
+    if (!regionGateApplies(meta) || (prior && typeof prior === "object" && prior["region_gate"])) continue;
+    const siteRel = vesselRelativeEditSite(meta["edit_site"] ?? ledger.edit_site ?? null);
+    const er = (meta["evidence_resolve"] ?? null) as { shape?: unknown; input?: Row } | null;
+    const titles = Array.isArray(er?.input?.["only_tests"]) ? (er!.input!["only_tests"] as unknown[]).filter((t): t is string => typeof t === "string") : [];
+    if (!siteRel || er?.shape !== "test_suite" || titles.length === 0) continue;
+    touched.add(id);
+    const input: Row = { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles };
+    let baseline: Row | null;
+    if (gapStoreIsLocal()) {
+      const r = await resolveTestSuite(input as never).catch(() => null);
+      baseline = r && r.shape === "test_suite" ? (r.body as Row) : null;
+    } else {
+      const held = await holderCheckReport({ shape: "test_suite", input });
+      if (!held.report && /unreachable|HTTP/.test(held.detail)) continue;
+      baseline = held.report;
+    }
+    if (!baseline || baseline["ran"] !== true) continue;
+    const red = Number(baseline["requested_not_passing"] ?? 0) > 0;
+    const g: MutationGateOutcome = red
+      ? await regionMutantGate({ vessel: ledger.vessel, siteRel, testFile: ledger.test_file, titles, baseline, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
+      : { kind: "pass", record: { decided: "unmeasured: the check is not red at HEAD" } };
+    if (g.kind === "wait") continue;
+    const outcome = regionGateOutcome(g);
+    regated.push({ id, outcome });
+    console.log(`[gap-check-supply] ${id}: region_gate=${outcome} (re-gated: armed before the region gate)`);
+    if (pointer.dry_run) continue;
+    const mutation_gate = { ...(prior && typeof prior === "object" ? prior : {}), region_gate: g.record };
+    if (g.kind === "refuse") {
+      refused += 1;
+      notArmed.push({ id, reason: g.reason });
+      await writeMeta(row, { evidence_resolve: null, check_supply: { ...ledger, state: "arm_refused", reason: g.reason, judged_titles: titles, mutation_gate } });
+    } else {
+      await writeMeta(row, { check_supply: { ...ledger, mutation_gate } });
+    }
+  }
+
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
   let outcomeReads = 0;
   // THIS NODE'S GOALS STILL IN FLIGHT after the read-back (the DEMAND gate below): sent or placed by this node, with a
@@ -1677,6 +1731,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
         armed,
         not_armed: notArmed,
         refused,
+        ...(regated.length ? { region_regated: regated } : {}),
         ...(resettled.length ? { resettled } : {}),
         ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
         ...(clearedInherited.length ? { cleared_inherited: clearedInherited } : {}),
@@ -1966,6 +2021,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       armed,
       not_armed: notArmed,
       refused,
+      ...(regated.length ? { region_regated: regated } : {}),
       ...(resettled.length ? { resettled } : {}),
       exhausted,
       control_marked: controlMarked,

@@ -1,0 +1,75 @@
+// A CORRECT CHECK (hand-written) for the-check-supply-mutation-gate-refuses-to-arm-a-check-without-logging-so-its-
+// refusals-are-visible-only-in-store-rows. It drives the arm step to the edit-site mutation gate's refusal and asserts
+// both the arm_refused write and the one journal line naming the gap and the reason (the row's must_fail). Red today:
+// the write happens and no line names it. Every test_suite run is answered by one canned bun report (the same red for
+// the birth run and every mutant run), so the gate measures its mutants and refuses: no nested bun runs here.
+import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { CLONES } from "./mg-log-env";
+import * as sg from "../../src/resolvers/substrate-gap.js";
+import * as supply from "../../src/resolvers/gap-check-supply.js";
+import * as csa from "../../src/resolvers/check-supply-admission.js";
+import { resolveTestSuite } from "../../src/resolvers/test-suite.js";
+
+type Row = Record<string, unknown>;
+const V = "w";
+const SITE = `repos/${V}/src/widget.ts`;
+const TITLE = "score of three is seven";
+const RED = ["bun test v1.4.2", "", "test/checks/w.check.ts:", "error: expect(received).toBe(expected)", "", "Expected: 7", "Received: 6", "",
+  "      at <anonymous> (/w/test/checks/w.check.ts:4:44)", `(fail) widget > ${TITLE} [1.00ms]`, "", " 0 pass", " 1 fail", "Ran 1 test across 1 file."].join("\n");
+const OPEN = [
+  { shape: "autonomyScope", updated_at: "2026-01-01T00:00:00Z", body: { unrestricted: true, reason: "fixture" } },
+  { shape: "spendEnvelope", updated_at: "2026-01-01T00:00:00Z", body: { uncapped: true, paused: false, reason: "fixture" } },
+];
+const rhythm = { id: "rhythm-gap-check-supply-w", shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5, mutants_per_file: 2 } };
+
+test("an edit-site mutation gate refusal writes arm_refused AND logs one line naming the gap and the reason", async () => {
+  mkdirSync(join(sg.gapStoreRootForTest(), "gaps"), { recursive: true });
+  mkdirSync(join(CLONES, V, "src"), { recursive: true });
+  mkdirSync(join(CLONES, V, "test/checks"), { recursive: true });
+  writeFileSync(join(CLONES, V, "src/widget.ts"), "export function score(n: number): number {\n  if (n > 2) return n * 2;\n  return 0;\n}\n");
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
+    if (/\/executions\/[^/?#]+$/.test(url)) return new Response("not found", { status: 404 });
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const imp = body?.impulse ?? {};
+    const p = body?.pointer ?? imp?.pointer;
+    if (url.endsWith("/run-goal")) return Response.json({ dispatchId: `d-${Math.random().toString(36).slice(2, 8)}` }, { status: 202 });
+    if (url === "http://self.test/v2/impulses/resolve" && p?.type === "test_suite") { const r = await resolveTestSuite(p); return Response.json({ shape: r.shape, body: r.body }); }
+    if (p?.type === "vesselCapability" && p?.shape === "shellResult") return Response.json({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/resolve", health_score: 1 }] } });
+    if (url.startsWith("http://shell.test")) {
+      const cmd = String(p?.command ?? "");
+      return Response.json({ stdout: `VERIFIED_ROOT=${join(CLONES, V)}\nVERIFIED_HEAD=abc1234\n${cmd.includes("MUTATION_APPLIED=1") ? "MUTATION_APPLIED=1\n" : ""}${RED}\n` });
+    }
+    if (imp?.type === "poolImpulse" && imp?.shape === "timeShapedRhythm") return Response.json({ body: { impulses: [rhythm], count: 1 } });
+    if (imp?.type === "poolImpulse" && imp?.shape === "rhythmFamilyGoal") return Response.json({ body: { impulses: [], count: 0 } });
+    if (imp?.type === "poolImpulse_write") return Response.json({ body: { ok: true } });
+    if (imp?.type === "poolImpulse") return Response.json({ body: { impulses: OPEN.filter((r) => r.shape === imp.shape) } });
+    if (p?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
+    return Response.json({ body: { impulses: [] } });
+  }) as unknown as typeof fetch;
+  const lines: string[] = [];
+  const keep = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+  console.log = keep; console.warn = keep;
+  let id = "";
+  for (let i = 0; i < 1000 && !id; i++) { const c = `mg-log-${i}`; if (supply.checkSupplyArm(c) === "treatment") id = c; }
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary: `fixture ${id}: ${SITE} \`score\` computes the wrong value`, classification_metadata: { edit_site: SITE } } } as never);
+  expect(w.shape).not.toBe("structuredError");
+  await sg.__settleBirthEvaluationsForTests();
+  let now = Date.now() + 5000 * 3600_000;
+  await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: (now += 30 * 3600_000) } as never);
+  await sg.__settleBirthEvaluationsForTests();
+  const testFile = `test/checks/${csa.checkSupplyCheckFile(id)}`;
+  // The fixture check's test call is assembled, so this file declares only its own title to a title reader.
+  const declare = "test";
+  writeFileSync(join(CLONES, V, testFile), `import { describe, expect, test } from "bun:test";\nimport * as mod from "../../src/widget";\ndescribe("widget", () => {\n  ${declare}("${TITLE}", () => { expect(mod.score(3)).toBe(7); });\n});\n`);
+  lines.length = 0;
+  await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: (now += 30 * 3600_000) } as never);
+  await sg.__settleBirthEvaluationsForTests();
+  const row = (((await sg.resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never)).body as { gaps?: Row[] }).gaps ?? [])[0];
+  const cs = ((row?.["classification_metadata"] as Row | undefined)?.["check_supply"] ?? {}) as Row;
+  expect(cs["state"]).toBe("arm_refused");
+  expect(String(cs["reason"])).toStartWith("red_independent_of_edit_site");
+  expect(lines.filter((l) => l.includes(id) && l.includes("red_independent_of_edit_site")).length).toBe(1);
+}, 60_000);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "../../src/seed/draft-spec-from-gap.js";
+import { DRAFT_SPEC_FROM_GAP_TEMPLATE, EXEMPLAR_CHANGE_DIR, EXEMPLAR_PROPOSAL_HEADINGS } from "../../src/seed/draft-spec-from-gap.js";
 
 describe("DRAFT_SPEC_FROM_GAP_TEMPLATE", () => {
   it("has required top-level fields", () => {
@@ -44,10 +44,29 @@ describe("DRAFT_SPEC_FROM_GAP_TEMPLATE", () => {
     expect(config).toContain("{{gap_class}}");
   });
 
-  it("read_exemplar_proposal reads the failure-mode-autonomous-loop proposal.md", () => {
-    const task = DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks.find((t) => t.id === "read_exemplar_proposal")!;
-    expect(task.resolver).toBe("fs_read");
-    expect(JSON.stringify(task.config)).toContain("2026-05-22-failure-mode-autonomous-loop/proposal.md");
+  it("read_exemplar_proposal / read_exemplar_tasks read the in-place-image-convergence change", () => {
+    const proposal = DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks.find((t) => t.id === "read_exemplar_proposal")!;
+    const tasks = DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks.find((t) => t.id === "read_exemplar_tasks")!;
+    expect(proposal.resolver).toBe("fs_read");
+    expect(tasks.resolver).toBe("fs_read");
+    expect(EXEMPLAR_CHANGE_DIR).toBe("/workspace/git/super-repo/openspec/changes/in-place-image-convergence");
+    expect((proposal.config as { path: string }).path).toBe(`${EXEMPLAR_CHANGE_DIR}/proposal.md`);
+    expect((tasks.config as { path: string }).path).toBe(`${EXEMPLAR_CHANGE_DIR}/tasks.md`);
+  });
+
+  it("the described proposal skeleton is the exemplar's headings, and the old one is gone", () => {
+    // The exemplar proposal.md's headings, in order (openspec/changes/in-place-image-convergence/proposal.md).
+    expect([...EXEMPLAR_PROPOSAL_HEADINGS]).toEqual(["Why", "What Changes", "What This Does Not Change", "Impact"]);
+    const read = DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks.find((t) => t.id === "read_exemplar_proposal")!;
+    expect(read.description).toContain("Why / What Changes / What This Does Not Change / Impact");
+    const prompt = (DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks.find((t) => t.id === "draft_via_llm")!.config as { prompt: string }).prompt;
+    const proposalReq = prompt.slice(prompt.indexOf('3. The "proposal_md"'), prompt.indexOf('4. The "tasks_md"'));
+    const required = [...proposalReq.matchAll(/^ {3}## (.+)$/gm)].map((m) => m[1]);
+    expect(required).toEqual([...EXEMPLAR_PROPOSAL_HEADINGS]);
+    const described = JSON.stringify(DRAFT_SPEC_FROM_GAP_TEMPLATE);
+    for (const old of ["Motivation", "Out of Scope", "Success Criteria", "References", "failure-mode-autonomous-loop"]) {
+      expect(described).not.toContain(old);
+    }
   });
 
   it("draft_via_llm prompt demands a JSON bundle with slug + proposal_md + tasks_md", () => {

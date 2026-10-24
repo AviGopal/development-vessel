@@ -1,5 +1,13 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 
+/**
+ * The in-tree openspec change the drafter copies its skeleton from. One place: a rename of the
+ * change folder updates this constant and both exemplar reads follow.
+ */
+export const EXEMPLAR_CHANGE_DIR = "/workspace/git/super-repo/openspec/changes/in-place-image-convergence";
+/** The exemplar proposal.md's headings, in order: the skeleton the prompt and the read describe. */
+export const EXEMPLAR_PROPOSAL_HEADINGS = ["Why", "What Changes", "What This Does Not Change", "Impact"] as const;
+
 const PROMPT_TEMPLATE = `You are authoring a new openspec change for a self-improving activity system.
 
 Your input has three parts: (1) a batch of substrateGap impulses sharing a gap_class,
@@ -9,14 +17,14 @@ markdown exemplars showing the in-tree skeleton of an openspec change.
 ## Gap batch — substrateGap impulses
 
 These are real drift signals the substrate has minted. Cite at least two of them by
-concept id in the proposal's References section. Treat them as the EVIDENCE the
+concept id in the proposal's Why section. Treat them as the EVIDENCE the
 proposal addresses.
 
 {{read_gaps_content}}
 
 ## Prior concepts — parent rules + downstream patterns
 
-Cite the most relevant prior concepts inline in the Motivation so the reader can
+Cite the most relevant prior concepts inline in the Why so the reader can
 trace the conceptual lineage of the proposed fix.
 
 {{read_priors_content}}
@@ -38,21 +46,19 @@ trace the conceptual lineage of the proposed fix.
 2. The "slug" must be kebab-case, 4-6 words, descriptive of the fix
    (e.g. "concept-db-impulse-wrapper-parse" or "llm-resolver-normalize-handler").
 
-3. The "proposal_md" must include these headings in order:
-   # <date> — <Human Title>
-   ## Motivation
-   ## Proposal
-   ## Out of Scope
-   ## Success Criteria
-   ## References
-   - Motivation: 2-4 paragraphs naming the gap_class and citing at least
+3. The "proposal_md" must include these headings in order, matching the exemplar:
+   ## Why
+   ## What Changes
+   ## What This Does Not Change
+   ## Impact
+   - Why: 2-4 paragraphs naming the gap_class and citing at least
      two substrateGap concept ids from the input.
-   - Proposal: concrete, minimal, single-vessel-or-fewer scope. Name the
+   - What Changes: concrete, minimal, single-vessel-or-fewer scope. Name the
      files to edit and the rough shape of the patch.
-   - Out of Scope: enumerate adjacent work this proposal does NOT do.
-   - Success Criteria: 3-5 numbered, verifiable bullets.
-   - References: at least the cited concept ids and the relevant openspec
-     change path that produced the substrateGap impulses.
+   - What This Does Not Change: enumerate adjacent work this proposal does NOT do.
+   - Impact: the affected files and surfaces, 3-5 verifiable outcomes, the
+     cited concept ids and the relevant openspec change path that produced
+     the substrateGap impulses.
 
 4. The "tasks_md" must include sections like:
    # Tasks — <slug>
@@ -137,12 +143,11 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       id: "read_exemplar_proposal",
       description:
         "Load a real openspec proposal.md as a structural exemplar so the " +
-        "drafter matches the in-tree skeleton (Motivation / Proposal / Out of " +
-        "Scope / Success Criteria / References).",
+        `drafter matches the in-tree skeleton (${EXEMPLAR_PROPOSAL_HEADINGS.join(" / ")}).`,
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "/workspace/git/super-repo/openspec/changes/2026-05-22-failure-mode-autonomous-loop/proposal.md",
+        path: `${EXEMPLAR_CHANGE_DIR}/proposal.md`,
       },
       outputShapes: ["openspecProposalExemplar"],
     },
@@ -152,7 +157,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "/workspace/git/super-repo/openspec/changes/2026-05-22-failure-mode-autonomous-loop/tasks.md",
+        path: `${EXEMPLAR_CHANGE_DIR}/tasks.md`,
       },
       outputShapes: ["openspecTasksExemplar"],
     },

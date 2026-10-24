@@ -902,7 +902,10 @@ export type MutationGateOutcome =
   | { kind: "pass"; record: Row }
   | { kind: "refuse"; reason: string; record: Row }
   | { kind: "wait"; detail: string };
-/** How a run's named tests fail: per title, pass, or the failing assertion's error line, Expected and Received. null
+/** THE FAILURE SIGNATURE (qa ruling 2026-10-24: "changed" is the signature, not pass/fail). How a run's named tests fail:
+ *  per title, pass, or the failing assertion's error line (the matcher and its message), Expected and Received, and
+ *  where it failed: the first stack frame's file name, line and column, when that frame is in the check itself (a
+ *  frame in the mutated site moves with the mutant's line count, which says nothing about the check). null
  *  when the run did not measure that: it did not run, the file did not load, or a named test failed on something other
  *  than an assertion (a mutant that makes the check throw shows the check reaches the site, not that it tests it). */
 function redSignature(report: Row | null, titles: string[]): string | null {
@@ -915,7 +918,8 @@ function redSignature(report: Row | null, titles: string[]): string | null {
     if (!f) { sig.push([t, "pass"]); continue; }
     if (f.cls !== "assertion") return null;
     const v = compared.find((x) => x?.name === f.name);
-    sig.push([t, f.error ?? null, v?.expected ?? null, v?.received ?? null]);
+    const frame = v?.file && /\.(?:check|test|spec)\.[cm]?[jt]sx?$/.test(v.file) ? `${v.file.split("/").pop()}:${v.line ?? "?"}:${v.col ?? "?"}` : null;
+    sig.push([t, f.error ?? null, v?.expected ?? null, v?.received ?? null, frame]);
   }
   return JSON.stringify(sig);
 }

@@ -19,7 +19,9 @@
 // verbatim. The development-vessel recommit-draft check imports this vessel's whole gap-check-supply module, which the
 // temp clone cannot host, so that row is asserted at the decision (regionGateApplies) on its real metadata; so is
 // development-vessel 40d50487's check (the second replay asked for), whose row carries a literal region, so no region
-// is derived for it and it gets no region mutant.
+// is derived for it and it gets no region mutant. libp2p-federation-transport 84460a91's check (research
+// agf_20rkrutm2x6o) is replayed at the decision too: no region is derivable for it. Each arm logs one region_gate line
+// naming its outcome, so the unmeasured share is countable.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,6 +70,14 @@ const RIBO_REGION = "if (needed.length === 0) return true";
 // that reaches the region; replacing the stub's throw moves it (500 to 200).
 const CHECK_REACHES = `import { describe, it, expect } from "bun:test";\nimport * as mod from "../../src/routes/impulses";\n\ndescribe("impulse shape: concept_delete_write", () => {\n  it("an authenticated delete for the caller's org succeeds", async () => {\n    const req = new Request("http://localhost/resolve", {\n      method: "POST",\n      headers: { "Content-Type": "application/json", Authorization: "Bearer fixture" },\n      body: JSON.stringify({ pointer: { type: "concept_delete_write", concept_id: "concept_any_id" } }),\n    });\n    const res = await mod.impulses.fetch(req);\n    expect(res.status).toBe(200);\n  });\n});\n`;
 
+// THROWS UNDER THE MUTANT: red on the stub's message (an assertion), but with the throw replaced the body has no
+// message and the check throws instead of asserting, so the region mutant run measures nothing.
+const CHECK_THROWS_UNDER_MUTANT = CHECK_REACHES.replace("an authenticated delete for the caller's org succeeds", "an authenticated delete answers with no error message").replace("expect(res.status).toBe(200);", "const body: any = await res.json();\n    expect(body.message.length).toBe(0);");
+// libp2p-federation-transport 84460a91's row (the-federation-egress-hop-has-no-deadline-…), its evidence as the live row carries it.
+const FED_SUMMARY = "From code: an egress resolve over the overlay has no deadline of its own. scripts/substrate/federation-relay/federation-transport-server.ts resolveOverLibp2p (~753-758) calls resolveViaLibp2p and falls back to resolveViaHttp with no timeout or abort signal, and the library's dial and stream path sets none either (repos/libp2p-federation-transport/src/index.ts ~144-150). The effective bound is whatever each caller happens to set: 240 s for the goal-host proxy, 60 s for the floor tool, 30 s for replication, 20 s for the surface, and none at all for the human-surface passthrough (repos/human-surface-vessel/src/routes/proxy.ts ~646). The transport's own inbound limit (FTS ~504, 120 s) is not coupled to the walk budget either. Effect: a blackholed peer or a stalled stream holds a caller for its own arbitrary bound; on the passthrough it can hang indefinitely; and the time cost of a dead route differs by caller, so it cannot be learned. This is a law-1 constant-by-omission. Expected: one shaped egress deadline, read at use time (for example a field on the existing fedIngressAuthPolicy record or a tuning parameter), applied to the libp2p and HTTP fallback paths, with the inbound limit derived from walkBudget.iter_timeout_ms rather than a literal. A timed-out egress returns a named timeout class, not a generic failure. Fix kind: code, because this is transport plumbing; the deadline value itself becomes a shape. Falsifier: must-fail: an egress resolve to a stub peer that accepts the stream and never answers returns a named egress_timeout within the shaped deadline plus a small slack. Today it waits for the caller's abort, or forever on the passthrough. Control: a peer that answers within the deadline returns its answer unchanged.";
+const FED_SPEC = "must-fail: egress to a stub peer that never answers returns a named egress_timeout within the shaped deadline (today waits for caller abort or forever); control: an answering peer is unchanged";
+const FED_REGION = "resolveOverLibp2p";
+const logs: string[] = [];
 const originalFetch = globalThis.fetch;
 const origLog = console.log;
 const origWarn = console.warn;
@@ -118,7 +128,7 @@ beforeAll(() => {
     if ((body?.pointer ?? imp?.pointer)?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
     return Response.json({ body: { impulses: [] } });
   }) as unknown as typeof fetch;
-  console.log = () => {};
+  console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   console.warn = () => {};
 });
 afterAll(async () => {
@@ -224,5 +234,47 @@ describe("a row with a literal region gets no region mutant (regression controls
     expect(fixture("40d50487-no-new-title-age.check.ts.txt")).toContain('import * as mod from "../../src/resolvers/gap-check-supply.js"');
     const meta = { edit_site: "repos/development-vessel/src/resolvers/gap-check-supply.ts", region: "        ? { kind: \"failed\", reason: `the goal ended ${status} and reached, but no new test title appeared in ${ledger.test_file ?? \"the check file\"} within ${hours(bounds.title_grace_ms)}` }" };
     expect(supply.regionGateApplies(meta)).toBe(false);
+  });
+});
+
+describe("the arm step logs one region_gate line per arm, naming its outcome", () => {
+  const line = (id: string): string[] => logs.filter((l) => l.startsWith(`[gap-check-supply] ${id}: region_gate=`));
+  it("refused: 23f78717's check", async () => {
+    const { id } = await landAndArm("rl-refused", CDB, CDB_SUMMARY, null, fixture("23f78717-concept-delete-write.check.ts.txt"));
+    expect(line(id)).toEqual([`[gap-check-supply] ${id}: region_gate=refused`]);
+  });
+  it("measured-passed: a check that reaches the region", async () => {
+    const { id, row } = await landAndArm("rl-passed", CDB, CDB_SUMMARY, null, CHECK_REACHES);
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(line(id)).toEqual([`[gap-check-supply] ${id}: region_gate=measured-passed`]);
+  });
+  it("unmeasured: no region: no text anchor of the evidence occurs once in the site", async () => {
+    const { id, row } = await landAndArm("rl-noregion", RIBO, RIBO_SUMMARY, null, fixture("44abf5e-replay-judge.check.ts.txt"));
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(gateOf(row)["region_gate"]).toEqual({ decided: "unmeasured: no region" });
+    expect(line(id)).toEqual([`[gap-check-supply] ${id}: region_gate=unmeasured: no region`]);
+  });
+  it("unmeasured: no measurement: the check throws under the region mutant instead of asserting", async () => {
+    const { id, row } = await landAndArm("rl-nomeasure", CDB, CDB_SUMMARY, null, CHECK_THROWS_UNDER_MUTANT);
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(gateOf(row)["region_gate"]).toMatchObject({ measured: 0, decided: "unmeasured: the region mutant run measured nothing" });
+    expect(line(id)).toEqual([`[gap-check-supply] ${id}: region_gate=unmeasured: no measurement`]);
+  });
+  it("a literal-region row logs no region_gate line", async () => {
+    const { id } = await landAndArm("rl-literal", RIBO, RIBO_SUMMARY, RIBO_REGION, fixture("44abf5e-replay-judge.check.ts.txt"));
+    expect(line(id)).toEqual([]);
+  });
+});
+
+describe("[REPLAY] libp2p-federation-transport 84460a91's check (research agf_20rkrutm2x6o)", () => {
+  it("its row carries a literal region, and its evidence has no text anchor occurring once in the site: no region is derived (unmeasured: no region), so B1 cannot refuse it", () => {
+    // The check (verbatim) mocks services.http.fetch while resolveViaHttp calls httpSvc.fetchProtocol: its HTTP half
+    // throws before the signal assertion. The site is src/index.ts at 84460a91, verbatim.
+    const check = fixture("84460a91-federation-egress-deadline.check.ts.txt");
+    const site = fixture("libp2p-federation-transport-index.84460a91.ts.txt");
+    expect(check).toContain("fetch: (_peer: any, options: any) =>");
+    expect(site).toContain("await httpSvc.fetchProtocol(dialTarget, RESOLVE_HTTP_PROTO, {");
+    expect(supply.regionGateApplies({ edit_site: "scripts/substrate/federation-relay/federation-transport-server.ts", region: FED_REGION })).toBe(false);
+    expect(supply.derivedTextRegion(site, "src/index.ts", FED_SUMMARY, FED_SPEC)).toBeNull();
   });
 });

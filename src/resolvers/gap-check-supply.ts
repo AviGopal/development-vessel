@@ -1015,6 +1015,14 @@ async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFi
  * (that row kind keeps checkMissesRegionRefusal). No text anchor occurring once: no region, recorded so.
  */
 export const REGION_RED_UNCHANGED_STAGE = "region_red_unchanged";
+/** The region gate's outcome as its one arm log line names it (`[gap-check-supply] <id>: region_gate=<outcome>`), so the
+ *  unmeasured share is countable from the journal: measured-passed, refused, unmeasured: no region, unmeasured: no measurement. */
+export function regionGateOutcome(g: MutationGateOutcome): string {
+  if (g.kind === "refuse") return "refused";
+  if (g.kind === "wait") return "waiting";
+  const decided = String(g.record["decided"] ?? "");
+  return decided === "unmeasured: no region" ? decided : decided.startsWith("unmeasured") ? "unmeasured: no measurement" : "measured-passed";
+}
 /** The region gate applies to a row with no literal region (the region is then derived, derivedTextRegion). */
 export const regionGateApplies = (meta: Row): boolean => regionOf(meta) === "";
 export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = ""): { anchor: string; mutant: Mutant } | null {
@@ -1356,6 +1364,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const regionGate = mutation?.kind === "pass" && regionGateApplies(meta) && site.ok
       ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "" })
       : null;
+    if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
     const waiting = mutation?.kind === "wait" ? mutation : regionGate?.kind === "wait" ? regionGate : null;
     if (waiting) {
       notArmed.push({ id, reason: `awaiting_mutation_runs: ${waiting.detail}` });

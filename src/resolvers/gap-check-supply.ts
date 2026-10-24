@@ -426,10 +426,43 @@ export function quoteUnrenderedTokens(s: string): string {
   }
   return out;
 }
-export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = []): string {
-  return quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior));
+export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = [], meta: Row | null = null): string {
+  return quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior, meta));
 }
-function checkSupplyGoalText(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = []): string {
+/**
+ * THE DRAFTER IS TOLD THE REGION THE GATE WILL REPLACE (law 8). The arm step's region gate (regionMutantGate) replaces
+ * the statement the row's evidence derives (explainedTextRegion) and refuses a check whose red survives it, but the
+ * goal never named that statement: the drafter learned the region only from a refusal. Given the row's metadata, the
+ * goal now carries the same derivation, over the same inputs (the summary, falsifier_spec, must_fail and control) and
+ * under the same rule (regionGateApplies), so the drafter's anchor and the gate's cannot diverge: the anchor, the
+ * statement at path:line, and what that statement produces. No derivable region: nothing is added.
+ */
+export function regionInputsOf(meta: Row): { spec: string; more: AnchorSources } {
+  return { spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } };
+}
+/** What a region statement produces, read off its text: a return value, a throw, a log line or a state write. */
+export function regionObservable(statement: string): string {
+  const s = statement.trim();
+  if (/^return\b/.test(s)) return "the value it returns";
+  if (/^throw\b/.test(s)) return "the error it throws";
+  if (/\bconsole\.(?:log|warn|error|info|debug)\s*\(|\b(?:log|logger\.\w+)\s*\(/.test(s)) return "the line it logs";
+  if (/^(?:await\s+)?[\w$.[\]"'`]+\s*(?:[-+*/%&|?]{0,2}=)(?!=)|\.(?:set|push|add|delete|unshift|splice)\s*\(|\b(?:writeMeta|write\w*|persist\w*)\s*\(/.test(s)) return "the state it writes";
+  return "what that statement does";
+}
+export function regionGoalSentence(siteRel: string, siteSrc: string | null, summary: string, meta: Row): string {
+  if (siteSrc === null || !regionGateApplies(meta, siteSrc)) return "";
+  const { spec, more } = regionInputsOf(meta);
+  const region = explainedTextRegion(siteSrc, siteRel, summary, spec, more).region;
+  if (!region) return "";
+  const m = region.mutant;
+  const first = regionStatementMutant(siteSrc, m.start, m.start + 1, siteRel)?.original ?? m.original;
+  const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
+  const at = `${siteRel}:${m.line}`;
+  const more1 = region.occurrences > 1 ? ` (with its ${region.occurrences - 1} other occurrence(s) there)` : "";
+  return `The gap's region, derived from its evidence: ${region.kind} anchor ${JSON.stringify(region.anchor.slice(0, 120))} at ${at}${more1}, the statement \`${shown}\`. ` +
+    `Assert on THIS: ${regionObservable(first)} at ${at}. The arm step replaces that statement, and a check whose red survives the replacement is refused. `;
+}
+function checkSupplyGoalText(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = [], meta: Row | null = null): string {
   const siteRel = vesselRelativeEditSite(site);
   // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
   // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.
@@ -448,8 +481,9 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
     ? `Build it on what the evidence names (${anchorText(anchors, exported)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
     : "";
   const exportsList = codeSite ? (reader ? exportListSentence(codeSite, reader, summary, contract ?? undefined) : unreadSiteSentence(codeSite)) : "";
+  const regionLine = codeSite && reader && meta ? regionGoalSentence(codeSite, reader.read(codeSite), summary, meta) : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
-    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named +
+    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named + regionLine +
     priorAttemptSentence(prior) +
     "No network, no services, no timers. Do not change src/ or any other file.";
 }
@@ -2064,7 +2098,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       }
       anchorsOf.set(id, anchors);
     }
-    const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? [], settledHistory(ledger));
+    const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? [], settledHistory(ledger), meta);
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
     // RECORD BEFORE SEND (CHANGE-30): the in-flight record is written FIRST, without the goal text, so no send is ever
     // unrecorded. If even that write is refused, nothing is sent: a send this tick cannot record is a send the next

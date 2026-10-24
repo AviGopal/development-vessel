@@ -1191,10 +1191,10 @@ export function withArmRefusalLesson(meta: Row, a: { reason: string; testFile: s
   const cls = /^([a-z_]+):/.exec(a.reason)?.[1] ?? "";
   if (!ARM_LESSON_CLASSES.has(cls)) return null;
   const lessons = (Array.isArray(meta["failure_lessons"]) ? [...(meta["failure_lessons"] as Row[])] : []);
-  const ff = a.firstFailure ?? null;
+  const ff = (a.firstFailure ?? null) as { name?: unknown; error?: unknown; expected?: unknown; received?: unknown } | null;
   lessons.push({
     class: cls, stage: "arm", at: a.at, reason: a.reason,
-    own_check: { test_file: a.testFile, ...(ff ? { failing: [{ name: String(ff["name"] ?? ""), ...(ff["error"] != null ? { error: String(ff["error"]) } : {}), ...(ff["expected"] != null ? { expected: `Expected: ${String(ff["expected"])}` } : {}), ...(ff["received"] != null ? { received: `Received: ${String(ff["received"])}` } : {}) }] } : {}) },
+    own_check: { test_file: a.testFile, ...(ff ? { failing: [{ name: String(ff.name ?? ""), ...(ff.error != null ? { error: String(ff.error) } : {}), ...(ff.expected != null ? { expected: `Expected: ${String(ff.expected)}` } : {}), ...(ff.received != null ? { received: `Received: ${String(ff.received)}` } : {}) }] } : {}) },
     check_excerpt: a.checkSrc.slice(0, ARM_LESSON_EXCERPT_MAX),
   });
   while (lessons.length > FAILURE_LESSONS_MAX) {

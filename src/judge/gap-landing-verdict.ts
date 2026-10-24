@@ -2671,6 +2671,29 @@ async function recordOrphanSiblingRefusal(g: Record<string, unknown>, sha: strin
   await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "open", classification_metadata: { ...fm, orphan_sibling_refusal: { sha, measured: o.measured, ...(o.measured ? {} : { reason: "the armed file's whole run could not be read" }), orphans, red: o.red.slice(0, 10), at: new Date().toISOString(), rule: "every red check in the armed file must be armed by another open row" } } } } as never);
 }
 
+/**
+ * THE REGION GATE AT CLOSE (2026-10-24). A fixed_elsewhere close trusts the row's own check going green. concept-db's
+ * concept-delete row closed so on a check (23f78717) whose red was a request-validation 400 that never depended on
+ * the gap's region, so its green after 7e897a99 measured nothing about the fix. A check-supply check on a row with no
+ * literal region is judged at arm by the region gate (gap-check-supply.ts regionMutantGate, recorded as
+ * check_supply.mutation_gate.region_gate): a close on its green now requires that gate measured and passed. An
+ * "unmeasured" reading (no derivable region, or a run that measured nothing) closes on today's rules and says so in
+ * the close record. A check armed without the gate, or refused by it, does not close the row. Rows whose check is not
+ * check supply's, or that carry a literal region (no region gate, by design), close as before. The source label is the
+ * check supply's CHECK_SUPPLY_SOURCE, written here as its value: this evaluator file does not import the supply.
+ */
+export function regionGateAtClose(meta: Record<string, unknown>): { allow: true; record: string | null } | { allow: false; reason: string } {
+  if (String(meta.predicate_source ?? "") !== "gap_check_supply") return { allow: true, record: null };
+  if (String(meta.region ?? "").trim() !== "") return { allow: true, record: null };
+  const cs = (meta.check_supply ?? null) as { mutation_gate?: { region_gate?: Record<string, unknown> } } | null;
+  const rg = cs && typeof cs === "object" ? cs.mutation_gate?.region_gate : undefined;
+  if (rg && typeof rg.decided === "string" && rg.decided.startsWith("unmeasured")) return { allow: true, record: rg.decided };
+  if (rg && Number(rg.measured) > 0 && Number(rg.changed) > 0) return { allow: true, record: "passed" };
+  return { allow: false, reason: rg
+    ? "own_green_region_gate_refused: the row's own check was refused by the region gate at arm, so its green does not measure the gap"
+    : "own_green_region_gate_not_run: the row's own check was armed without the region gate, so its green on the parent does not show the gap's region was fixed" };
+}
+
 /** Exported for tests. A green-on-parent refusal with a commit that fixed the check's subject since the gap's
  *  birth CLOSES the gap fixed_elsewhere (a measurement, naming that commit), instead of re-picking it after
  *  every exclusion. With no such commit the green is unexplained (flaky, environmental): exclusion only. */
@@ -2689,20 +2712,26 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     // A reopened gap is not fixed_elsewhere by a commit that landed before its re-detection.
     const staleFix = fix0 ? staleCloseEvidence(fresh, fix0.sha) : null;
     if (staleFix) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${staleFix.reason} (${fix0!.sha.slice(0, 12)} landed ${staleFix.committed_at ?? "unknown"}, re-detected ${staleFix.redetected_at})`);
-    const fix = staleFix ? null : fix0;
+    const fix1 = staleFix ? null : fix0;
+    const region = fix1 ? regionGateAtClose(m0) : null;
+    const regionHeld = region && !region.allow ? region.reason : null;
+    if (regionHeld) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${regionHeld}`);
+    const fix = regionHeld ? null : fix1;
+    const regionRecord = region && region.allow && region.record ? { region_gate: region.record } : {};
     if (fix) {
       const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "closed", classification_metadata: { ...m0,
         closed_reason: "fixed_elsewhere", close_basis: "absent", resolution: `fixed elsewhere by ${fix.sha.slice(0, 12)}: own check green on parent ${fix.head.slice(0, 12)}`, closed_at: new Date().toISOString(),
-        falsifier_exercise: { detector: "gap-to-feature:terminal_refusal", verdict: "absent", passed: true, ran_at: new Date().toISOString(), commit: fix.head, fixed_by: fix.sha } } } } as never);
+        falsifier_exercise: { detector: "gap-to-feature:terminal_refusal", verdict: "absent", passed: true, ran_at: new Date().toISOString(), commit: fix.head, fixed_by: fix.sha, ...regionRecord } } } } as never);
       if (w?.shape !== "structuredError" && (w?.body as { action?: unknown } | undefined)?.action !== "skipped") {
         console.log(`[gap-to-feature] ${String(fresh.id)}: closed fixed_elsewhere by ${fix.sha.slice(0, 12)} (own check green on parent ${fix.head.slice(0, 12)})`);
         return;
       }
-    } else if (!held) {
+    } else if (!held && !regionHeld) {
       console.log(`[gap-to-feature] ${String(fresh.id)}: green on parent but no fixing commit found — not closing`);
     }
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300),
-      ...(held ? { stage: held.stage, instrument_commit: held.instrument_commit, instrument_files: held.files.slice(0, 10) } : {}) } } } } as never);
+      ...(held ? { stage: held.stage, instrument_commit: held.instrument_commit, instrument_files: held.files.slice(0, 10) } : {}),
+      ...(regionHeld ? { stage: regionHeld.slice(0, regionHeld.indexOf(":")), detail: regionHeld, fixed_by: fix1!.sha } : {}) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
 }
 

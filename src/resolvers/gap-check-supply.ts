@@ -303,7 +303,50 @@ function importSpecifier(testFile: string, siteRel: string): string {
  *    context word, or written in the falsifier_spec). A quoted goal or question is not an observed output;
  *  - behaviour: a stated actual-vs-expected pair ("returns 1; it must return 2").
  */
-export type CheckAnchor = { kind: "symbol" | "text" | "behaviour"; value: string };
+export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token"; value: string };
+/**
+ * MORE ANCHOR SOURCES, FOR THE REGION GATE (qa anchor-source ruling, 2026-10-24). The row's must_fail and control text
+ * are read like the falsifier_spec (a quoted span there is an observed output), and with `site_tokens` a snake_case
+ * or camelCase identifier the evidence names that occurs 1 to 5 times in the edit site's code or strings (never its
+ * comments) is a `token` anchor (concept: `arm_refused`, which the gap names and the site writes as a string). The
+ * check goal does not pass these: what the drafter is told is unchanged.
+ */
+export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean };
+/** The site with its comments blanked to spaces (offsets kept): an anchor named only in a comment is no region. */
+export function commentFreeSource(src: string): string {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return src; }
+  const sf = ts.createSourceFile("c.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const chars = src.split("");
+  const seen = new Set<number>();
+  const blank = (ranges: readonly import("typescript").CommentRange[] | undefined) => {
+    for (const r of ranges ?? []) {
+      if (seen.has(r.pos)) continue;
+      seen.add(r.pos);
+      for (let i = r.pos; i < r.end; i += 1) if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = " ";
+    }
+  };
+  const visit = (n: import("typescript").Node): void => {
+    blank(ts.getLeadingCommentRanges(src, n.getFullStart()));
+    blank(ts.getTrailingCommentRanges(src, n.getEnd()));
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  blank(ts.getLeadingCommentRanges(src, sf.getEnd()));
+  return chars.join("");
+}
+/** Where a token anchor occurs as a whole identifier (or inside a string) in comment-free text; a text anchor, as a literal. */
+export function anchorOccurrences(text: string, a: CheckAnchor): number[] {
+  const out: number[] = [];
+  if (a.kind === "token") {
+    const rx = new RegExp(`(?<![\\w$])${a.value.replace(/\$/g, "\\$")}(?![\\w$])`, "g");
+    for (const m of text.matchAll(rx)) out.push(m.index!);
+    return out;
+  }
+  for (let i = text.indexOf(a.value); i !== -1; i = text.indexOf(a.value, i + a.value.length)) out.push(i);
+  return out;
+}
+export const TOKEN_ANCHOR_MAX = 5;
 export const NO_ANCHOR_REASON = "evidence names no falsifiable anchor";
 /** Code with comments and string literals blanked, so a name only quoted or commented does not resolve. */
 const codeOnly = (src: string): string => src
@@ -316,7 +359,7 @@ export function declaredNames(src: string): Set<string> {
   return new Set([...codeOnly(src).matchAll(DECLARATION)].map((m) => m[1]!));
 }
 const OUTPUT_CONTEXT = /\b(error|errors|throws?|thrown|logs?|logged|message|prints?|printed|returns?|returned|outputs?|says|reports?|responds?|answers?)\b[^."'`]{0,40}$/i;
-export function falsifiableAnchors(evidence: string, siteSrc: string | null, spec = "", vesselDeclared: ReadonlySet<string> | null = null): CheckAnchor[] {
+export function falsifiableAnchors(evidence: string, siteSrc: string | null, spec = "", vesselDeclared: ReadonlySet<string> | null = null, more: AnchorSources = {}): CheckAnchor[] {
   const out: CheckAnchor[] = [];
   const add = (a: CheckAnchor) => { if (!out.some((x) => x.kind === a.kind && x.value === a.value)) out.push(a); };
   const ident = /^[A-Za-z_$][\w$]*$/;
@@ -325,7 +368,8 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
     ? new RegExp(`(?<![\\w$])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(siteCode)
     : !!vesselDeclared?.has(name);
   const candidates = new Set<string>();
-  const all = `${evidence}\n${spec}`;
+  const rowSpec = [more.must_fail, more.control].filter((x): x is string => typeof x === "string" && x.trim().length > 0).join("\n");
+  const all = `${evidence}\n${spec}${rowSpec ? `\n${rowSpec}` : ""}`;
   for (const m of all.matchAll(/`([A-Za-z_$][\w$]*)`/g)) candidates.add(m[1]!);
   for (const m of all.matchAll(/\b([A-Za-z_$][\w$]{2,})\(/g)) candidates.add(m[1]!);
   for (const m of all.matchAll(/\b([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)\b/g)) if (m[1]!.length >= 5) candidates.add(m[1]!);
@@ -339,8 +383,18 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
   };
   quoted(evidence, false);
   if (spec) quoted(spec, true);
+  if (rowSpec) quoted(rowSpec, true);
   const b = /\b(returns?|yields?|produces?|gives?|is)\s+([^\s,;]+)[^.;]*[;,]?\s*(?:it\s+|but\s+)?(?:must|should)\s+(?:return|yield|produce|give|be)\s+([^\s,;.]+)/i.exec(all);
   if (b) add({ kind: "behaviour", value: b[0].trim() });
+  if (more.site_tokens && siteSrc !== null) {
+    const free = commentFreeSource(siteSrc);
+    for (const m of all.matchAll(/(?<![\w$.\/-])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)(?![\w$\/-])/g)) {
+      const t: CheckAnchor = { kind: "token", value: m[1]! };
+      if (t.value.length < 5 || out.some((x) => x.kind === "token" && x.value === t.value)) continue;
+      const n = anchorOccurrences(free, t).length;
+      if (n >= 1 && n <= TOKEN_ANCHOR_MAX) add(t);
+    }
+  }
   return out;
 }
 /**
@@ -351,7 +405,7 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
  * (its codeContract, the list the goal shows), a symbol anchor it does not export is said to be internal and reached
  * through an export on the list. No names (no reader, an unreadable site, an open list) labels nothing.
  */
-const anchorText = (anchors: readonly CheckAnchor[], site?: { rel: string; exported: ReadonlySet<string> }): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`${site && !site.exported.has(a.value) ? ` (internal to ${site.rel}, not exported: the test cannot call it, so reach it through an export on the list that does)` : ""}` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
+const anchorText = (anchors: readonly CheckAnchor[], site?: { rel: string; exported: ReadonlySet<string> }): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`${site && !site.exported.has(a.value) ? ` (internal to ${site.rel}, not exported: the test cannot call it, so reach it through an export on the list that does)` : ""}` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : a.kind === "token" ? `token \`${a.value}\`` : `behaviour "${a.value}"`).join("; ");
 
 /**
  * QUOTE WHAT THE GATE WOULD READ AS AN UNRENDERED BINDING (CHANGE-32a). A check goal is built from a gap's own prose,
@@ -1025,23 +1079,47 @@ export function regionGateOutcome(g: MutationGateOutcome): string {
 }
 /** The region gate applies to a row with no literal region (the region is then derived, derivedTextRegion). */
 export const regionGateApplies = (meta: Row): boolean => regionOf(meta) === "";
-export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = ""): { anchor: string; mutant: Mutant } | null {
-  for (const a of falsifiableAnchors(evidence, siteSrc, spec)) {
-    if (a.kind !== "text" || countLiteral(siteSrc, a.value) !== 1) continue;
-    const at = siteSrc.indexOf(a.value);
-    const mutant = regionStatementMutant(siteSrc, at, at + a.value.length, siteRel);
-    if (mutant) return { anchor: a.value, mutant };
+export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null {
+  const anchors = falsifiableAnchors(evidence, siteSrc, spec, null, { ...more, site_tokens: true });
+  const free = commentFreeSource(siteSrc);
+  for (const a of [...anchors.filter((x) => x.kind === "text"), ...anchors.filter((x) => x.kind === "token")]) {
+    const at = anchorOccurrences(free, a);
+    if (at.length < 1 || at.length > TOKEN_ANCHOR_MAX) continue;
+    const mutant = allOccurrencesMutant(siteSrc, siteRel, at.map((i) => [i, i + a.value.length] as [number, number]));
+    if (mutant) return { anchor: a.value, kind: a.kind as "text" | "token", occurrences: at.length, mutant };
   }
   return null;
 }
-async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string }): Promise<MutationGateOutcome> {
+/**
+ * ONE MUTANT FOR EVERY OCCURRENCE (qa ruling): each occurrence's smallest enclosing statement (scope-earn-in
+ * regionStatementMutant), replaced together in one edit over the span from the first to the last, so the existing
+ * mutate_edit path applies it as one mutant. A statement inside another occurrence's is covered by the outer one. null
+ * when any occurrence's statement is a declaration: the region would be only part of the anchor's code.
+ */
+export function allOccurrencesMutant(src: string, siteRel: string, spans: Array<[number, number]>): Mutant | null {
+  const stmts: Mutant[] = [];
+  for (const [s0, e0] of spans) {
+    const m = regionStatementMutant(src, s0, e0, siteRel);
+    if (!m) return null;
+    stmts.push(m);
+  }
+  const outer = stmts.filter((m, i) => !stmts.some((o, j) => j !== i && o.start <= m.start && o.end >= m.end && (o.start !== m.start || o.end !== m.end || j < i)));
+  outer.sort((x, y) => x.start - y.start);
+  if (outer.length === 1) return outer[0]!;
+  const start = outer[0]!.start, end = outer[outer.length - 1]!.end;
+  let replacement = "", at = start;
+  for (const m of outer) { replacement += src.slice(at, m.start) + m.replacement; at = m.end; }
+  replacement += src.slice(at, end);
+  return { operator: "replace_statement", start, end, original: src.slice(start, end), replacement, line: outer[0]!.line };
+}
+async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string; more?: AnchorSources }): Promise<MutationGateOutcome> {
   let src: string | null = null;
   try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
-  const region = src === null ? null : derivedTextRegion(src, a.siteRel, a.evidence, a.spec);
+  const region = src === null ? null : derivedTextRegion(src, a.siteRel, a.evidence, a.spec, a.more ?? {});
   if (!region) return { kind: "pass", record: { decided: "unmeasured: no region" } };
   const m = region.mutant;
   const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
-  const record: Row = { region: "derived_from_text_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement };
+  const record: Row = { region: region.kind === "text" ? "derived_from_text_anchor" : "derived_from_token_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement.slice(0, 200), ...(region.occurrences > 1 ? { occurrences: region.occurrences } : {}) };
   const run = await mutantRun(a, m);
   if ("wait" in run) return { kind: "wait", detail: run.wait };
   const v = mutationGateVerdict(a.baseline, [{ mutant: m, report: run.report }], a.titles);
@@ -1362,7 +1440,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       : null;
     // Then, on a row with no literal region, the region derived from the evidence's observed output (regionMutantGate).
     const regionGate = mutation?.kind === "pass" && regionGateApplies(meta) && site.ok
-      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "" })
+      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
       : null;
     if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
     const waiting = mutation?.kind === "wait" ? mutation : regionGate?.kind === "wait" ? regionGate : null;

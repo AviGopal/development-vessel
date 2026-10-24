@@ -60,7 +60,11 @@ const originalFetch = globalThis.fetch;
 // (The landing verdict is imported in the hooks, not statically: a static import is evaluated before this file sets
 // WORKSPACE_ROOT, and the gap store captures its root at module load.)
 let execGuard: ExecGuard;
+// The store this file seeds is the local file under ROOT: a forwarding endpoint (the gate's scrubbed env points
+// GAP_STORE_ENDPOINT at the discard address) would send every read elsewhere, and the sweep would check nothing.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
 beforeAll(async () => {
+  delete process.env["GAP_STORE_ENDPOINT"];
   (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests({ unitLoadState: () => "loaded", unitActive: () => "active", unitStartedAt: () => Math.floor(Date.now() / 1000) + 3600 });
   execGuard = installCutoverExecGuard();
   execGuard.route({ name: "self-restart-owed", match: (c) => /systemctl list-units .*mitosis-self-restart/.test(c), respond: () => ({ exitCode: 0, stdout: "" }) });
@@ -126,6 +130,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   globalThis.fetch = originalFetch;
+  if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint;
   (await import("../../src/judge/gap-landing-verdict.js")).__setAutoRevertDepsForTests(null);
   const unrouted = execGuard.restore();
   restoreCutoverExecModules();

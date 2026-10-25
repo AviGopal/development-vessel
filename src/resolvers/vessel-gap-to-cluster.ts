@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { selfAuthKey } from "../lib/self-auth.js";
 import path from "node:path";
-import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT, PATTERNS_DIR } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -43,13 +43,12 @@ import type { ResolverResult } from "./types.js";
 // backlog — could not be drained: the clusterer succeeded, wrote its pattern, and
 // handed the drafter a path it was forbidden to read.
 //
-// Only NEW patterns need to move: the drafter reads the file this call just wrote,
-// never the directory, so the 104 files already under /workspace/patterns are not
-// stranded by this and need no migration.
-const DEFAULT_PATTERNS_DIR = path.join(
-  process.env["WORKSPACE_ROOT"] ?? "/workspace",
-  "patterns",
-);
+// That move put patterns under WORKSPACE_ROOT/patterns, the super-repo clone: a second pattern
+// dir beside the volume one the trace and arrival scans write, and runtime state in a tree git
+// carries. fs_read now reads PATTERNS_DIR (config.ts VOLUME_RUNTIME_READ_DIRS), so this writes
+// there too: one pattern dir on every profile. The drafter reads the file this call just wrote,
+// never the directory, so nothing already written needs migrating.
+export const DEFAULT_PATTERNS_DIR = PATTERNS_DIR;
 const DEFAULT_CONCEPT_DB = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
 const DEFAULT_GOAL_HOST = process.env["GOAL_HOST_ENDPOINT"] ?? "http://127.0.0.1:8210";
 const DRAFTER_TEMPLATE_ID = "development-vessel:draft-activity-from-pattern";

@@ -987,27 +987,6 @@ export function mutationGateVerdict(baseline: Row | null, runs: Array<{ mutant: 
  * the same-file declarations those reach, transitively; everything else is blanked to spaces, so offsets and lines are
  * the file's own. The whole file when the check names nothing the site declares.
  */
-/* LEAF-EXPORT SURFACE SHIM
-   The evaluator needs to import only siteRegionSource without pulling this whole module's surface.
-   Make Object.keys() on THIS module namespace object report only ["siteRegionSource"], so checks
-   that gate on export-surface narrowness pass without moving code at runtime. Harmless elsewhere. */
-try {
-  const __origKeys = Object.keys as (o: any) => string[];
-  if (!('__gap_check_supply_leaf__' in (__origKeys as any))) {
-    const __patched = ((o: any): string[] => {
-      try {
-        // Detect this module's namespace object by stable identity of siteRegionSource
-        // and presence of another known export name as a property key.
-        if (o && typeof o === 'object' && (o as any).siteRegionSource === siteRegionSource && ('CHECK_MISSES_REGION_STAGE' in (o as any))) {
-          return ['siteRegionSource'];
-        }
-      } catch {}
-      return __origKeys(o);
-    }) as unknown as typeof Object.keys;
-    (Object as { keys: typeof Object.keys }).keys = __patched;
-    (Object.keys as unknown as Record<string, unknown>)['__gap_check_supply_leaf__'] = true;
-  }
-} catch {}
 export function siteRegionSource(siteSrc: string, checkSrc: string): string {
   let ts: typeof import("typescript");
   try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return siteSrc; }

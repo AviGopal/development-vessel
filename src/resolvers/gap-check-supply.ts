@@ -1198,7 +1198,7 @@ export function inventedLiteralRefusal(checkSrc: string, siteSrc: string | null,
  * the full reason, and the refused check's text capped at 4 KB.
  */
 // The stages, by value: REGION_RED_UNCHANGED_STAGE is declared further down, and a const is not readable before it.
-export const ARM_LESSON_CLASSES: ReadonlySet<string> = new Set(["region_red_unchanged", "red_independent_of_edit_site", "check_echo_satisfiable", "check_expects_invented_literal"]);
+export const ARM_LESSON_CLASSES: ReadonlySet<string> = new Set(["region_red_unchanged", "red_independent_of_edit_site", "check_echo_satisfiable", "check_expects_invented_literal", "check_satisfied_by_gutting"]);
 export const FAILURE_LESSONS_MAX = 8;
 export const ARM_LESSON_EXCERPT_MAX = 4096;
 export function withArmRefusalLesson(meta: Row, a: { reason: string; testFile: string; checkSrc: string; firstFailure?: Row | null; at: string }): Row[] | null {
@@ -1349,6 +1349,147 @@ async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: 
   const ff = firstFailureOf((a.baseline as Row | null)?.["red_reason"]);
   const failure = ff ? [ff["error"] != null ? String(ff["error"]) : "", ff["expected"] != null ? `Expected ${String(ff["expected"])}` : "", ff["received"] != null ? `Received ${String(ff["received"])}` : ""].filter(Boolean).join(", ").slice(0, 240) || "the same failing assertion" : "the same failing assertion";
   return { kind: "refuse", reason: `${REGION_RED_UNCHANGED_STAGE}: the check's red survives replacing the gap's region (\`${shown}\`, ${a.siteRel}:${m.line}); its failure comes from elsewhere (${failure}), so it does not measure the gap`, record: { ...record, ...v } };
+}
+/**
+ * A CHECK A GUTTED SITE PASSES (gate 9, ruling 2026-10-24). light-dispatch ac2ed275's check expects answerOutcome's
+ * `ok` to be false for a resolved:false answer, and goal-host 39fbacd's expects carryForward to carry nothing: an
+ * answerOutcome that always answers { ok: false }, or a carryForward that returns [], passes them, so a "fix" that
+ * removes the behaviour closes the gap. ONE extra mutant (CHECK_SATISFIED_BY_GUTTING_STAGE): the body of every
+ * function of the edit site the check names (a member of a namespace import, or a named import, as siteRegionSource
+ * reads them; not the same-file declarations those reach) is replaced by its fallback return, one edit over the span.
+ * The fallback is the function's first existing early return whose value uses nothing bound in the function (no
+ * parameter, no local: `return FALLBACK;`), else the zero value of its declared return type ([], "", 0, false, null or
+ * undefined for a union holding it, an object of its required fields at their zero, read through same-file aliases and
+ * interfaces; {} for a type not declared in the file). Green under it (every named test passes): refused, the reason
+ * the drafter's lesson. Run last, only for a check every other gate let through. A run that did not measure decides
+ * nothing.
+ */
+export const CHECK_SATISFIED_BY_GUTTING_STAGE = "check_satisfied_by_gutting";
+export const GUTTING_REASON = `${CHECK_SATISFIED_BY_GUTTING_STAGE}: a fix that removes the behaviour passes it; add a control asserting the behaviour that must remain`;
+export function guttingMutant(siteSrc: string, checkSrc: string, siteRel = "m.ts"): (Mutant & { functions: string[] }) | null {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return null; }
+  type Node = import("typescript").Node;
+  const check = ts.createSourceFile("c.ts", checkSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const nsNames = new Set<string>();
+  const wanted = new Set<string>();
+  check.forEachChild((n) => {
+    if (!ts.isImportDeclaration(n) || !n.importClause || n.importClause.isTypeOnly || !ts.isStringLiteral(n.moduleSpecifier) || !n.moduleSpecifier.text.startsWith(".")) return;
+    const nb = n.importClause.namedBindings;
+    if (nb && ts.isNamespaceImport(nb)) nsNames.add(nb.name.text);
+    if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) if (!el.isTypeOnly) wanted.add((el.propertyName ?? el.name).text);
+  });
+  const reads = (n: Node): void => {
+    if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && nsNames.has(n.expression.text)) wanted.add(n.name.text);
+    ts.forEachChild(n, reads);
+  };
+  reads(check);
+  const site = ts.createSourceFile("s.ts", siteSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const types = new Map<string, Node>();
+  const fns: Array<{ name: string; fn: import("typescript").FunctionLikeDeclaration }> = [];
+  for (const st of site.statements) {
+    if ((ts.isTypeAliasDeclaration(st) || ts.isInterfaceDeclaration(st))) types.set(st.name.text, st);
+    if (ts.isFunctionDeclaration(st) && st.name && st.body && wanted.has(st.name.text)) fns.push({ name: st.name.text, fn: st });
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) {
+      if (ts.isIdentifier(d.name) && wanted.has(d.name.text) && d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) fns.push({ name: d.name.text, fn: d.initializer });
+    }
+  }
+  const members = (n: Node): readonly import("typescript").TypeElement[] => ts.isInterfaceDeclaration(n) || ts.isTypeLiteralNode(n) ? n.members : [];
+  const zero = (t: import("typescript").TypeNode | undefined, depth = 0): string => {
+    if (!t || depth > 4) return "undefined";
+    const K = ts.SyntaxKind;
+    if (ts.isParenthesizedTypeNode(t)) return zero(t.type, depth);
+    if (t.kind === K.StringKeyword) return "\"\"";
+    if (t.kind === K.NumberKeyword) return "0";
+    if (t.kind === K.BooleanKeyword) return "false";
+    if (t.kind === K.BigIntKeyword) return "0n";
+    if (t.kind === K.VoidKeyword || t.kind === K.UndefinedKeyword || t.kind === K.AnyKeyword || t.kind === K.UnknownKeyword || t.kind === K.NeverKeyword) return "undefined";
+    if (ts.isLiteralTypeNode(t)) return t.literal.getText(site);
+    if (ts.isArrayTypeNode(t) || ts.isTupleTypeNode(t)) return "[]";
+    if (ts.isTypeOperatorNode(t)) return zero(t.type, depth);
+    if (ts.isUnionTypeNode(t)) {
+      const lit = (m: import("typescript").TypeNode, k: number) => m.kind === k || (ts.isLiteralTypeNode(m) && m.literal.kind === k);
+      if (t.types.some((m) => lit(m, K.NullKeyword))) return "null";
+      if (t.types.some((m) => lit(m, K.UndefinedKeyword) || m.kind === K.VoidKeyword)) return "undefined";
+      return zero(t.types[0], depth);
+    }
+    if (ts.isTypeLiteralNode(t)) return objectZero(members(t), depth);
+    if (ts.isTypeReferenceNode(t)) {
+      const name = t.typeName.getText(site);
+      const arg = t.typeArguments?.[0];
+      if (name === "Promise" || name === "PromiseLike") return zero(arg, depth + 1);
+      if (name === "Array" || name === "ReadonlyArray") return "[]";
+      if (name === "Set" || name === "ReadonlySet") return "new Set()";
+      if (name === "Map" || name === "ReadonlyMap") return "new Map()";
+      const decl = types.get(name);
+      if (decl && ts.isTypeAliasDeclaration(decl)) return zero(decl.type, depth + 1);
+      if (decl) return objectZero(members(decl), depth + 1);
+    }
+    return "{}";
+  };
+  const objectZero = (ms: readonly import("typescript").TypeElement[], depth: number): string => {
+    const fields = ms.filter((m): m is import("typescript").PropertySignature => ts.isPropertySignature(m) && !m.questionToken).map((m) => `${m.name.getText(site)}: ${zero(m.type, depth + 1)}`);
+    return fields.length ? `{ ${fields.join(", ")} }` : "{}";
+  };
+  /** The first early return whose value uses nothing the function binds (its parameters, its locals). */
+  const earlyReturn = (fn: import("typescript").FunctionLikeDeclaration): string | null => {
+    const body = fn.body;
+    if (!body || !ts.isBlock(body)) return null;
+    const bound = new Set<string>();
+    const bind = (n: Node): void => {
+      if ((ts.isParameter(n) || ts.isVariableDeclaration(n) || ts.isBindingElement(n)) && ts.isIdentifier(n.name)) bound.add(n.name.text);
+      if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) bound.add(n.name.text);
+      ts.forEachChild(n, bind);
+    };
+    bind(fn);
+    const last = body.statements[body.statements.length - 1];
+    let found: string | null = null;
+    const uses = (e: Node): boolean => {
+      if (ts.isIdentifier(e) && bound.has(e.text) && !(ts.isPropertyAccessExpression(e.parent) && e.parent.name === e) && !(ts.isPropertyAssignment(e.parent) && e.parent.name === e)) return true;
+      if (e.kind === ts.SyntaxKind.ThisKeyword) return true;
+      return ts.forEachChild(e, uses) === true;
+    };
+    const visit = (n: Node): void => {
+      if (found !== null || ts.isFunctionLike(n) || ts.isClassLike(n)) return;
+      if (ts.isReturnStatement(n) && n !== last && !(n.expression && uses(n.expression))) { found = n.expression ? n.expression.getText(site) : "undefined"; return; }
+      ts.forEachChild(n, visit);
+    };
+    for (const st of body.statements) visit(st);
+    return found;
+  };
+  const edits: Array<{ start: number; end: number; replacement: string; line: number }> = [];
+  for (const { fn } of fns) {
+    if (!fn.body || fn.asteriskToken) continue;
+    const isAsync = (ts.getModifiers?.(fn) ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
+    const value = earlyReturn(fn) ?? zero(fn.type);
+    const promised = !isAsync && fn.type && ts.isTypeReferenceNode(fn.type) && fn.type.typeName.getText(site) === "Promise";
+    const ret = promised ? `Promise.resolve(${value})` : value;
+    const start = fn.body.getStart(site), end = fn.body.getEnd();
+    const cast = /\.[cm]?tsx?$/.test(siteRel) ? " as any" : "";
+    edits.push({ start, end, replacement: ts.isBlock(fn.body) ? `{ return ${ret}${cast}; }` : `(${ret}${cast})`, line: site.getLineAndCharacterOfPosition(start).line + 1 });
+  }
+  if (edits.length === 0) return null;
+  edits.sort((x, y) => x.start - y.start);
+  const start = edits[0]!.start, end = edits[edits.length - 1]!.end;
+  let replacement = "", at = start;
+  for (const e of edits) { replacement += siteSrc.slice(at, e.start) + e.replacement; at = e.end; }
+  replacement += siteSrc.slice(at, end);
+  return { operator: "replace_statement", start, end, original: siteSrc.slice(start, end), replacement, line: edits[0]!.line, functions: fns.filter(({ fn }) => fn.body && !fn.asteriskToken).map((f) => f.name) };
+}
+export async function guttingGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[] }): Promise<MutationGateOutcome> {
+  let src: string | null = null;
+  try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  const m = src === null ? null : guttingMutant(src, a.checkSrc, a.siteRel);
+  if (!m) return { kind: "pass", record: { decided: src === null ? `unmeasured: the edit site ${a.siteRel} is not readable here` : "unmeasured: the check names no function of the edit site" } };
+  const { functions, ...mutant } = m;
+  const record: Row = { functions, line: m.line, replacement: m.replacement.slice(0, 200) };
+  const run = await mutantRun(a, mutant);
+  if ("wait" in run) return { kind: "wait", detail: run.wait };
+  const r = run.report;
+  const applied = ((r?.["mutation"] ?? null) as Row | null)?.["applied"] === true;
+  if (!applied || r?.["ran"] !== true || !(Number(r?.["total"] ?? 0) > 0)) return { kind: "pass", record: { ...record, decided: "unmeasured: the gutted run measured nothing" } };
+  if (Number(r["requested_not_passing"] ?? 1) === 0) return { kind: "refuse", reason: GUTTING_REASON, record: { ...record, green: true } };
+  return { kind: "pass", record: { ...record, green: false } };
 }
 
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
@@ -1688,8 +1829,16 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     }
     const regionMoved = regionGate?.kind === "pass" && Number(regionGate.record["changed"] ?? 0) > 0;
     const siteRefusal = mutation?.kind === "refuse" && !regionMoved ? mutation.reason : null;
-    const wrongReason = gateReason ?? siteRefusal ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
-    const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}), ...(mutation.kind === "refuse" && regionMoved ? { refusal_overridden_by: "region_gate" } : {}) } } : {};
+    const gatedReason = gateReason ?? siteRefusal ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
+    // Last of all, one more run for a check every gate above let through: does gutting the site pass it (guttingGate)?
+    const gutGate = mutation && !gatedReason && site.ok ? await guttingGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles }) : null;
+    if (gutGate?.kind === "wait") {
+      notArmed.push({ id, reason: `awaiting_mutation_runs: ${gutGate.detail}` });
+      console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${gutGate.detail})`);
+      continue;
+    }
+    const wrongReason = gatedReason ?? (gutGate?.kind === "refuse" ? gutGate.reason : null);
+    const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}), ...(gutGate ? { gut_gate: gutGate.record } : {}), ...(mutation.kind === "refuse" && regionMoved ? { refusal_overridden_by: "region_gate" } : {}) } } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
     if (verdict !== "present" || wrongReason) {

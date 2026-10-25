@@ -1,0 +1,7 @@
+{
+  "summary": "carryFrom carries earlier steps into a retry and drops stubs (goal-host src/walk-pool.ts:216 at e07f883), but it can still carry a non-stub error body, so the retry starts from content that already failed and does not walk the true difference. Ideal (design 05 §10 RC4): carryForward / carryForTarget (walk-pool.ts:201-245) carry a step's impulses only when they passed their edge checks (checkEdgeContract), so a retry re-walks exactly the steps whose content was hollow.",
+  "falsifier_spec": "must-fail (design 05 R-4): carryFrom never carries an impulse that failed its edge check (an error-body impulse from step 1 is not in the retry's pool); red today (an error body is carried). control: a step whose content passed its edge check is carried as today.",
+  "must_fail": null,
+  "control": null,
+  "region": null
+}

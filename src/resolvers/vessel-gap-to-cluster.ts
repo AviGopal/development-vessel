@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { selfAuthKey } from "../lib/self-auth.js";
+import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
 import path from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT, PATTERNS_DIR } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -189,21 +190,25 @@ async function dispatchAuthor(
   patternId: string,
   patternsDir: string,
   timeoutMs: number,
+  metabob: string,
 ): Promise<{ ok: boolean; detail: string }> {
   try {
+    // The drafter's prime_vocabulary / prime_concepts fetch activity-api and concept-db at loopback
+    // defaults, dead on a node that runs neither; pass the bases discovery names (as the trace and
+    // arrival scans do). activity-api falls back to the configured metabob endpoint.
+    const activityApi = await discoverActivityApiEndpoint(metabob);
+    const conceptDb = await discoverConceptDbEndpoint();
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         goal: `author a vessel-shape bridge consumer from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
-        // activity_api_endpoint: the drafter's prime_vocabulary task fetches
-        // activity-api. Its default is loopback, which is dead on a spoke (role "api"
-        // is hub-only), so pass the configured endpoint or the drafter dies at task 2.
         variables: {
           pattern_id: patternId,
           patterns_dir: patternsDir,
-          activity_api_endpoint: process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080",
+          activity_api_endpoint: activityApi,
+          concept_db_endpoint: conceptDb,
           source: "vessel_gap_to_cluster",
         },
       }),
@@ -257,7 +262,7 @@ export async function resolveVesselGapToCluster(
 
   let dispatched: { ok: boolean; detail: string } | null = null;
   if (pointer.dispatch && !writeError) {
-    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs);
+    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs, metabob);
   }
 
   return {

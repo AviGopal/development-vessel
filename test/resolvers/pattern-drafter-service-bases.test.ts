@@ -8,6 +8,8 @@
  *     convergent_validity_check resolves it through discovery when its pointer does not carry one.
  * (2) vessel_arrival_scan dispatched the drafter with no activity_api_endpoint; it now passes the
  *     discovered one, as the trace scan does.
+ * (3) vessel_gap_to_cluster passed an env/loopback activity_api_endpoint and no concept_db_endpoint;
+ *     it now passes both discovered bases.
  *
  * Discovery is replaced through config's __setDiscoveryForTests (no module mock); fetch is stubbed.
  */
@@ -19,6 +21,7 @@ import * as config from "../../src/config.js";
 import { resolveTraceRecurringPatternScan } from "../../src/resolvers/trace-recurring-pattern-scan.js";
 import { resolveVesselArrivalScan } from "../../src/resolvers/vessel-arrival-scan.js";
 import { resolveConvergentValidityCheck } from "../../src/resolvers/convergent-validity-check.js";
+import { resolveVesselGapToCluster } from "../../src/resolvers/vessel-gap-to-cluster.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE as TPL } from "../../src/seed/draft-activity-from-pattern.js";
 
 const realFetch = globalThis.fetch;
@@ -147,5 +150,39 @@ describe("(2) vessel_arrival_scan's drafter dispatch carries the discovered acti
     const vars = await arrivalScanVars();
     expect(vars["activity_api_endpoint"]).toBe("http://127.0.0.1:8080");
     expect(vars["patterns_dir"]).toBe(path.join(tmp, "patterns"));
+  });
+});
+
+async function gapToClusterVars(): Promise<Record<string, string>> {
+  let runGoal: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
+    const u = String(url);
+    const body = JSON.parse(init?.body ?? "{}");
+    if (u.includes("/run-goal")) { runGoal = body; return new Response("{}", { status: 202 }); }
+    if (u.endsWith("/resolve") && body?.pointer?.type === "vesselRegistry") {
+      return new Response(JSON.stringify({ content: { vessels: [{ vesselId: "v", shapes: ["x:shape"], endpoint: "http://v.test" }] } }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+  // patternsDir is a tmp dir: the test never writes the live volume.
+  await resolveVesselGapToCluster({ type: "vessel_gap_to_cluster", shape: "x:shape", apiKey: "k", patternsDir: path.join(tmp, "patterns"), metabobEndpoint: "http://trace-source.test", goalHostEndpoint: "http://goalhost.test", dispatch: true } as never);
+  return (runGoal?.["variables"] ?? {}) as Record<string, string>;
+}
+
+describe("(3) vessel_gap_to_cluster's drafter dispatch carries both discovered bases", () => {
+  test("MUST-FAIL: with only peer producers, the dispatch carries the peer activity-api and concept-db", async () => {
+    hubOnly();
+    const vars = await gapToClusterVars();
+    expect(vars["patterns_dir"]).toBe(path.join(tmp, "patterns"));
+    expect(vars["activity_api_endpoint"]).toBe("http://hub-host.test:18080");
+    expect(vars["concept_db_endpoint"]).toBe("http://hub-host.test:18260");
+    expect(taskUrl("prime_concepts", vars)).toBe("http://hub-host.test:18260/concepts/search?min_relevance=0.3&limit=15");
+  });
+
+  test("CONTROL: local producers are preferred", async () => {
+    allLocal();
+    const vars = await gapToClusterVars();
+    expect(vars["activity_api_endpoint"]).toBe("http://127.0.0.1:8080");
+    expect(vars["concept_db_endpoint"]).toBe("http://127.0.0.1:8260");
   });
 });

@@ -54,7 +54,7 @@ export interface ComprehensibilityCheckPointer {
   /** Test hook: replace the similarity function. */
   _similarityFn?: (a: string, b: string) => number;
   /** Test hook: replace the LLM dispatch. */
-  _llmFn?: (prompt: string, model: string) => Promise<string>;
+  _llmFn?: (prompt: string, model: string) => Promise<unknown>;
 }
 
 interface ComprehensibilityScoreBody {
@@ -73,7 +73,7 @@ interface ComprehensibilityScoreBody {
 interface FailureModeBody {
 
   shape: "structuredError";
-  failure_mode: "comprehensibility_below_floor" | "input_error" | "cascading";
+  failure_mode: "comprehensibility_below_floor" | "input_error" | "cascading" | "non_string_reply";
   detail: string;
   /** The activity that produced this failure */
   activity?: string;
@@ -184,7 +184,7 @@ async function fetchTemplate(templateId: string): Promise<Record<string, unknown
   }
 }
 
-async function defaultLlmDispatch(prompt: string, model: string): Promise<string> {
+async function defaultLlmDispatch(prompt: string, model: string): Promise<unknown> {
   // Mirror llm-completion-dispatch's discovery path. Kept inline rather than
   // importing the other resolver so this stays a pure leaf module.
   let vessels: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number; confidence?: number }> = [];
@@ -211,7 +211,7 @@ async function defaultLlmDispatch(prompt: string, model: string): Promise<string
     body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 800 }),
   });
   if (!llmRes.ok) throw new Error(`llm vessel ${llmRes.status}: ${await llmRes.text().catch(() => "")}`);
-  const result = (await llmRes.json()) as { content?: string; data?: string; error?: string };
+  const result = (await llmRes.json()) as { content?: unknown; data?: unknown; error?: string };
   if (result.error) throw new Error(result.error);
   return result.content ?? result.data ?? "";
 }
@@ -233,6 +233,20 @@ function coerceTemplateString(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** The evaluator's reply as text: a string as is, else the string in a structured reply's `text`, `content` or
+ *  `output` field. null when the reply carries no string (a parsed object, a number): the cleaner below calls
+ *  .replace on it, so an object reached it as "text.replace is not a function" and the gate threw. */
+export function replyText(reply: unknown): string | null {
+  if (typeof reply === "string") return reply;
+  if (reply && typeof reply === "object") {
+    for (const k of ["text", "content", "output"]) {
+      const v = (reply as Record<string, unknown>)[k];
+      if (typeof v === "string") return v;
+    }
+  }
+  return null;
 }
 
 function tryParseJson(text: string): { what?: string; why?: string; when_useful?: string } {
@@ -305,14 +319,26 @@ export async function resolveComprehensibilityCheck(
 
   const prompt = `${COMPREHENSIBILITY_PROMPT_PREFIX}\n\nTemplate:\n${stripped}`;
 
-  let rawAnswer: string;
+  let reply: unknown;
   try {
-    rawAnswer = await llmFn(prompt, model);
+    reply = await llmFn(prompt, model);
   } catch (err) {
     const body: FailureModeBody = {
       shape: "structuredError",
       failure_mode: "cascading",
       detail: err instanceof Error ? err.message : String(err),
+      evaluator_model_id: model,
+    };
+    return { shape: body.shape, body };
+  }
+
+  const rawAnswer = replyText(reply);
+  if (rawAnswer === null) {
+    // A typed refusal, not a throw: the reply had no string to score.
+    const body: FailureModeBody = {
+      shape: "structuredError",
+      failure_mode: "non_string_reply",
+      detail: `evaluator reply is ${reply === null ? "null" : Array.isArray(reply) ? "an array" : typeof reply} with no string text, content or output field`,
       evaluator_model_id: model,
     };
     return { shape: body.shape, body };

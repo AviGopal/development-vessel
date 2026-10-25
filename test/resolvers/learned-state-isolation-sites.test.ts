@@ -130,7 +130,13 @@ describe("[WIRING] every fixed site uses the isolation", () => {
 
 // The class detector (G1): a test file that sets WORKSPACE_ROOT in-process and imports a learned-state writer must call
 // the in-process helper. `.cases.ts` files run only under runCasesIsolated (isolatedChildEnv), so they are exempt.
-const WRITER = /src\/(resolvers\/(substrate-gap|gap-to-feature|feature-compose|auto-revert)|judge\/(gap-attempt-credit|learning-credit|gap-landing-verdict|gap-admission|gap-policy))|close-oracle|expectation-calib|detector-closure/;
+// The src/ branch requires the match to sit at the start of a relative import specifier (optionally after an
+// opening quote/paren, or one or more "../"/"./" hops), not anywhere a fixture or assertion string happens to
+// spell the same path: gap-check-supply-site-edit-site-wins.test.ts writes a fixture file literally named
+// src/resolvers/substrate-gap.ts and asserts checkSupplySite()'s return value, which contains
+// "…/src/resolvers/substrate-gap.ts" — neither is an import, and the old bare-substring match falsely flagged
+// that file as an unisolated learned-state writer.
+const WRITER = /(?:^|["'`(]|\.\.\/|\.\/)(?:\.\.\/|\.\/)*src\/(?:resolvers\/(?:substrate-gap|gap-to-feature|feature-compose|auto-revert)|judge\/(?:gap-attempt-credit|learning-credit|gap-landing-verdict|gap-admission|gap-policy))|close-oracle|expectation-calib|detector-closure/;
 const SETS_WS = /process\.env(\["WORKSPACE_ROOT"\]|\.WORKSPACE_ROOT) *(=|\?\?=|\|\|=)[^=]/;
 function testFiles(d: string, out: string[] = []): string[] {
   for (const n of readdirSync(d)) {

@@ -299,8 +299,8 @@ const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.en
 // recreate (node1's did on 2026-10-04 and its pins stopped matching). The id is a digest of the PUBLIC key only.
 // The hostname is the last resort, when no key is readable yet; absence is not cached, so a key created later is used.
 // The default is written INLINE, as discovery-registration.ts writes it: the test scrub (pull-sync's scrubbed_env, and
-// test-child-env.ts learnedStateDefaults) redirects every `process.env.X ?? "/workspace/..."` it can see, and a default
-// held in a named constant is invisible to it, so a suite reaching this read resolved the live key.
+// test-child-env.ts learnedStateDefaults) redirects every env read defaulting to a /workspace path that it can see,
+// and a default held in a named constant is invisible to it, so a suite reaching this read resolved the live key.
 let volumeNodeIdCache: { path: string; id: string } | null = null;
 export function volumeNodeId(): string | null {
   const path = process.env["VESSEL_IDENTITY_KEY_PATH"] ?? "/workspace/keys/development-vessel.ed25519.pem";

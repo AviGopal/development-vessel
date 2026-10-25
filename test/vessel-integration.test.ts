@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, writeFileSync } from "fs";
+import { TEST_RUN_TMP } from "./preload.js";
 
 const testDir = join(tmpdir(), `dev-vessel-integration-${Date.now()}`);
 
@@ -14,9 +15,13 @@ const testDir = join(tmpdir(), `dev-vessel-integration-${Date.now()}`);
 // so every later suite's gap writes landed in the tracked gaps/gaps.json and
 // substrate-gap.test.ts read 50 foreign open rows instead of its own store.
 // Restore the previous value afterwards rather than deleting it.
+// When the run already has a scratch WORKSPACE_ROOT (the node gate's scrubbed env; the preload made it the run's
+// TMPDIR), keep THAT root: another file may already have frozen config.ts at it, and pointing substrate-gap.ts at
+// a second dir left the two modules disagreeing for every later file (gap-drain-backoff's scratch guard refused to
+// run). testDir sits under tmpdir(), which is that same root, so probe.txt stays inside the read guard.
 const priorWorkspaceRoot = process.env["WORKSPACE_ROOT"];
 mkdirSync(testDir, { recursive: true });
-process.env["WORKSPACE_ROOT"] = testDir;
+process.env["WORKSPACE_ROOT"] = TEST_RUN_TMP.source === "workspace_root" ? TEST_RUN_TMP.dir : testDir;
 const { impulsesRouter } = await import("../src/routes/impulses.js");
 
 beforeAll(() => {

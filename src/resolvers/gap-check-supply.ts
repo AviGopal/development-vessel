@@ -633,10 +633,19 @@ export function declaredTestTitles(src: string): string[] {
   return titles;
 }
 
-/** The gap's localized edit site in its vessel: its own edit site, else a src file its summary names that exists. */
+/**
+ * The gap's localized edit site: its own edit site WHENEVER the row sets one, else a src file its summary names that
+ * exists in the vessel clone.
+ *
+ * The row's edit_site is the spec. It used to win only when it sat under repos/<vessel>/ AND already existed in the
+ * clone; otherwise the summary's first existing src/*.ts won instead. So a row naming a file the fix creates, or a site
+ * outside the vessel tree (docs/..., scripts/...), was re-sited onto whatever file its prose mentioned first, often
+ * src/index.ts, and its check was written against the wrong code. The summary fallback now runs only when no edit_site
+ * is set.
+ */
 export function checkSupplySite(row: Row, vessel: string): string | null {
   const own = gapEditSite(row, metaOf(row))?.replace(/:\d+.*$/, "");
-  if (own && own.startsWith(`repos/${vessel}/`) && existsSync(join(clonesRoot(), own.replace(/^repos\//, "")))) return own;
+  if (own) return own;
   for (const m of String(row["summary"] ?? "").matchAll(/(?:repos\/[A-Za-z0-9_.-]+\/)?(src\/[A-Za-z0-9_./-]+\.ts)\b/g)) {
     const rel = normalize(m[1] ?? "");
     if (!rel.startsWith("src/") || rel.includes("..")) continue;

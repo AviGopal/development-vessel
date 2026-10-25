@@ -4,6 +4,7 @@ import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/d
 import path from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT, PATTERNS_DIR } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { DRAFTER_DECLARED_WRITES } from "../seed/draft-activity-from-pattern.js";
 
 /**
  * vessel_gap_to_cluster (2026-06-14) — the PRODUCER adapter that lets the
@@ -204,6 +205,7 @@ async function dispatchAuthor(
       body: JSON.stringify({
         goal: `author a vessel-shape bridge consumer from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
+        expected_output_shapes: DRAFTER_DECLARED_WRITES,
         variables: {
           pattern_id: patternId,
           patterns_dir: patternsDir,

@@ -149,6 +149,13 @@ markdown fences, no surrounding prose. The id MUST begin with
 match the cluster's id verbatim. Every compose-dispatch task MUST have an
 entry in composition_rationales.`;
 
+/** The write a drafter dispatch declares (its /run-goal expected_output_shapes): register_variant's
+ *  activity_create_variant. goal-host's write door skips every task that writes on a dispatch not admitted
+ *  as a change, and a dispatch is admitted only by declaring its write, so every feeder that dispatches
+ *  this drafter declares it; undeclared, register_variant was skipped on every run and no variant was
+ *  ever registered. */
+export const DRAFTER_DECLARED_WRITES: readonly string[] = ["activity_create_variant"];
+
 export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:draft-activity-from-pattern",
   name: "draft-activity-from-pattern",

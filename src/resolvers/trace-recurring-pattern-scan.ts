@@ -4,6 +4,7 @@ import path from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
 import type { ResolverResult } from "./types.js";
+import { DRAFTER_DECLARED_WRITES } from "../seed/draft-activity-from-pattern.js";
 
 /**
  * trace_recurring_pattern_scan (2026-06-14) — the NON-OBSIDIAN feeder for the
@@ -196,6 +197,7 @@ async function dispatchAuthor(
       body: JSON.stringify({
         goal: `author an activity from recurring trace pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
+        expected_output_shapes: DRAFTER_DECLARED_WRITES,
         variables: {
           pattern_id: patternId,
           patterns_dir: patternsDir,

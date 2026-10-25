@@ -1,4 +1,5 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { DRAFTER_DECLARED_WRITES } from "./draft-activity-from-pattern.js";
 
 /**
  * detect-recurring-pattern — Phase 3 closed-loop learning, task 3.1
@@ -183,6 +184,7 @@ export const DETECT_RECURRING_PATTERN_TEMPLATE: ActivityTemplate = {
         body: JSON.stringify({
           goal: "draft an activity from recurring pattern {{select_recurring_text}}",
           targetTemplateId: "{{drafter_template_id}}",
+          expected_output_shapes: DRAFTER_DECLARED_WRITES,
           variables: {
             pattern_id: "{{select_recurring_text}}",
             patterns_dir: "{{patterns_dir}}",

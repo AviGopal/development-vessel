@@ -26,6 +26,7 @@ import { superRepoCheckoutCall } from "./super-repo-checkout.js";
 import { planPathProblem, vesselRelativePath } from "./vessel-paths.js";
 import { shq } from "./shell-quote.js";
 import { testChildEnvShellPrefix } from "../test-child-env.js";
+import { testChildEnv } from "../test-child-env.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { crossNodeKeyHeaders, overlayHopReason } from "../lib/self-auth.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
@@ -389,7 +390,7 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       console.log(`[feature-compose] park_stale for ${gapId} - typecheck failed on the current base, redrafting`);
       return null;
     }
-    const headFirst = Bun.spawnSync(["git", "-C", `${cloneRoot}/${park.vessel}`, "show", `HEAD:${park.files[0]!.path}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const headFirst = Bun.spawnSync(["git", "-C", `${cloneRoot}/${park.vessel}`, "show", `HEAD:${park.files[0]!.path}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000, env: testChildEnv() });
     const devBaseSha = headFirst.exitCode === 0 ? parkHash("sha256").update(headFirst.stdout).digest("hex").slice(0, 12) : null;
     const cut = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",

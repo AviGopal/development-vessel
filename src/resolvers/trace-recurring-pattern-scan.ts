@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import { selfAuthKey, selfAuthHeaders } from "../lib/self-auth.js";
 import path from "node:path";
-import { METABOB_ENDPOINT, METABOB_API_KEY, lookupShape } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -175,35 +176,9 @@ function buildCluster(args: {
   };
 }
 
-/**
- * The activity-api base the drafter's prime_vocabulary task fetches templates from.
- *
- * The drafter defaults activity_api_endpoint to http://127.0.0.1:8080, and this dispatch passed none,
- * so on a node with no local activity-api task 2 died "Unable to connect" right after load_cluster.
- * Resolve it by shape through discovery (activity-api advertises activityTemplate): a local producer
- * first, else an http peer row (discovery re-homes a peer's loopback onto the peer's host; a libp2p
- * overlay facade is not an http base and is skipped). An unreadable or empty lookup falls back to the
- * endpoint this scan just read its traces from, which is an activity-api it has reached.
- */
-export async function discoverActivityApiEndpoint(fallback: string): Promise<string> {
-  const look = await lookupShape("activityTemplate");
-  if (look.ok) {
-    const bases = (origin: (o: string | undefined) => boolean): string[] =>
-      look.producers
-        .filter((p) => origin(p.origin))
-        .flatMap((p) => {
-          try {
-            const u = new URL(p.resolveEndpoint);
-            return u.protocol === "http:" || u.protocol === "https:" ? [u.origin] : [];
-          } catch {
-            return [];
-          }
-        });
-    const pick = bases((o) => o === "local")[0] ?? bases((o) => typeof o === "string" && o.startsWith("peer:"))[0];
-    if (pick) return pick;
-  }
-  return fallback.replace(/\/+$/, "");
-}
+// The drafter's service bases (activity-api for prime_vocabulary, concept-db for prime_concepts and
+// verify_outputs) come from discovery: src/lib/discovered-endpoint.ts.
+export { discoverActivityApiEndpoint };
 
 async function dispatchAuthor(
   goalHost: string,
@@ -212,6 +187,7 @@ async function dispatchAuthor(
   patternsDir: string,
   timeoutMs: number,
   activityApiEndpoint: string,
+  conceptDbEndpoint: string,
 ): Promise<{ ok: boolean; detail: string }> {
   try {
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
@@ -224,6 +200,7 @@ async function dispatchAuthor(
           pattern_id: patternId,
           patterns_dir: patternsDir,
           activity_api_endpoint: activityApiEndpoint,
+          concept_db_endpoint: conceptDbEndpoint,
           source: "trace_recurring_pattern_scan",
         },
       }),
@@ -358,7 +335,8 @@ export async function resolveTraceRecurringPatternScan(
   let dispatched: { ok: boolean; detail: string } | null = null;
   if (pointer.dispatch && !writeError) {
     const activityApi = await discoverActivityApiEndpoint(metabob);
-    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs, activityApi);
+    const conceptDb = await discoverConceptDbEndpoint();
+    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs, activityApi, conceptDb);
   }
 
   return {

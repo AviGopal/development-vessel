@@ -1,6 +1,9 @@
 import type { ResolverResult } from "./types.js";
+import { discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
 
 export interface ConvergentValidityCheckPointer {
+  /** concept-db base; unset or a "{{...}}" placeholder resolves it through discovery. */
+  concept_db_endpoint?: string;
   type: "convergent_validity_check";
   /** Shapes the preceding task(s) claimed to produce. */
   produced_shapes: string[];
@@ -41,8 +44,18 @@ interface ConceptEdge {
   weight: number;
 }
 
-const CONCEPT_DB_ENDPOINT =
+const CONCEPT_DB_FALLBACK =
   process.env.CONCEPT_DB_ENDPOINT ?? "http://127.0.0.1:8260";
+
+/**
+ * The concept-db base: the pointer's concept_db_endpoint when a caller filled it (an uninterpolated
+ * "{{...}}" placeholder counts as unset), else the one discovery names, else the configured fallback.
+ * The fixed loopback default is dead on a node that does not run concept-db.
+ */
+export async function convergentConceptDbEndpoint(given: string | undefined): Promise<string> {
+  if (given && given.trim() && !given.includes("{{")) return given.trim().replace(/\/+$/, "");
+  return discoverConceptDbEndpoint(CONCEPT_DB_FALLBACK);
+}
 
 export async function resolveConvergentValidityCheck(
   pointer: ConvergentValidityCheckPointer,
@@ -76,10 +89,11 @@ export async function resolveConvergentValidityCheck(
   // and the current impulse pool, that's a divergence signal — the substrate
   // produced a shape in a context where concept-db expects a different
   // co-occurring pattern.
+  const conceptDb = await convergentConceptDbEndpoint(pointer.concept_db_endpoint);
   let cooccurrenceEdges: ConceptEdge[] = [];
   let conceptDbReachable = false;
   try {
-    const res = await fetch(`${CONCEPT_DB_ENDPOINT}/mcp/tools/call`, {
+    const res = await fetch(`${conceptDb}/mcp/tools/call`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(4000),
@@ -106,7 +120,7 @@ export async function resolveConvergentValidityCheck(
     for (const shape of produced_shapes) {
       try {
         const res = await fetch(
-          `${CONCEPT_DB_ENDPOINT}/concepts/search?q=${encodeURIComponent(shape)}&limit=1`,
+          `${conceptDb}/concepts/search?q=${encodeURIComponent(shape)}&limit=1`,
           { signal: AbortSignal.timeout(3000) },
         );
         if (res.ok) {

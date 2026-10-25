@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { selfAuthKey } from "../lib/self-auth.js";
+import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
 import path from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveCreditVesselShapes } from "./credit-vessel-shapes.js";
@@ -321,15 +322,26 @@ async function dispatchClusterAuthor(
   patternId: string,
   patternsDir: string,
   timeoutMs: number,
+  metabob: string,
 ): Promise<{ ok: boolean; detail: string }> {
   try {
+    // The drafter's prime_vocabulary / prime_concepts fetch activity-api and concept-db at loopback
+    // defaults, dead on a node that runs neither; pass the bases discovery names (as the trace scan does).
+    const activityApi = await discoverActivityApiEndpoint(metabob);
+    const conceptDb = await discoverConceptDbEndpoint();
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         goal: `author an activity that observes the arrived vessel from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
-        variables: { pattern_id: patternId, patterns_dir: patternsDir, source: "vessel_arrival_scan" },
+        variables: {
+          pattern_id: patternId,
+          patterns_dir: patternsDir,
+          activity_api_endpoint: activityApi,
+          concept_db_endpoint: conceptDb,
+          source: "vessel_arrival_scan",
+        },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -535,7 +547,7 @@ export async function resolveVesselArrivalScan(
         }
         // Dispatch the author only when this gap's cluster is NEW (anti-spam).
         if (dispatchAuthor && !existed && apiKey) {
-          const d = await dispatchClusterAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), `arrival-${slug(v.vessel_id)}`, patternsDir, timeoutMs);
+          const d = await dispatchClusterAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), `arrival-${slug(v.vessel_id)}`, patternsDir, timeoutMs, metabob);
           if (d.ok) authorsDispatched += 1;
           else clusterErrors.push(`dispatch:${v.vessel_id}:${d.detail.slice(0, 60)}`);
         }

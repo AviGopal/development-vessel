@@ -223,6 +223,14 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       description: "Base URL of activity-api. Spokes must pass their hub endpoint; activity-api does not run locally there. Default http://127.0.0.1:8080.",
       default: "http://127.0.0.1:8080",
     },
+    {
+      // Same class as activity_api_endpoint: concept-db carries role "store", so on a node without it
+      // the loopback default is dead and prime_concepts killed the drafter at task 3. The feeders pass
+      // the base discovery names (src/lib/discovered-endpoint.ts); verify_outputs reads it too.
+      name: "concept_db_endpoint",
+      description: "Base URL of concept-db. Feeders pass the discovered one; default http://127.0.0.1:8260.",
+      default: "http://127.0.0.1:8260",
+    },
   ],
   tasks: [
     {
@@ -266,7 +274,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url: "http://127.0.0.1:8260/concepts/search?min_relevance=0.3&limit=15",
+        url: "{{concept_db_endpoint}}/concepts/search?min_relevance=0.3&limit=15",
         method: "GET",
         timeoutMs: 5000,
       },
@@ -355,6 +363,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       config: {
         type: "convergent_validity_check",
         produced_shapes: ["authoredActivityCandidate"],
+        concept_db_endpoint: "{{concept_db_endpoint}}",
         strict: "auto",
         auto_strict_threshold: 10,
       },

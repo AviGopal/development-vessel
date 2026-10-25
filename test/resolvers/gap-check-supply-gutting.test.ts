@@ -196,4 +196,13 @@ describe("gate 9: a check the gutted edit-site function passes is not armed", ()
     expect(g.kind).toBe("pass");
     expect(g.record).toMatchObject({ functions: ["answerOutcome"], green: false });
   }, 240_000);
+
+  // THE EARLY-RETURN RULE, read statically: activity-api's seedPriorFromConcepts at cbbe8fa6 (the import line of its
+  // prior-seed identifier-query test) guts to its first early return that uses nothing it binds, `return FALLBACK` (a
+  // module constant), so its zero value (SeededPrior's fields at zero) is not reached.
+  it("[PIN] an early return free of the function's bindings is its fallback: seedPriorFromConcepts guts to `return FALLBACK`", () => {
+    const m = supply.guttingMutant(fixture("activity-api-prior-seed.cbbe8fa6.ts.txt"), "import { seedPriorFromConcepts } from '../src/lib/prior-seed';\n", "src/lib/prior-seed.ts");
+    expect(m?.functions).toEqual(["seedPriorFromConcepts"]);
+    expect(m?.replacement).toBe("{ return FALLBACK as any; }");
+  });
 });

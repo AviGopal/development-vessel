@@ -2990,6 +2990,18 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
     const r = await runGit(gitCmd, ["reset", "-q", "HEAD", "--", ...stagedFiles], hostRepoRoot);
     operations.push({ op: r.op, status: r.exit_code === 0 ? "ok" : "warn", detail: `unstaged after ${why}` });
+    // NOR A DIRTY WORK TREE (2026-10-26). The index reset left the copied files in the clone: a staged check (a new
+    // test/checks file) stayed UNTRACKED there after its refused landing, and the check supply's arm read it as landed,
+    // arming its gap on a check no tree holds. The staged paths are put back to HEAD: tracked ones checked out, new
+    // ones removed (checkout aborts on a path git does not know, so the two are split). Warn-only, like the reset.
+    const known = await runGit(gitCmd, ["ls-files", "--", ...stagedFiles], hostRepoRoot);
+    const tracked = known.exit_code === 0 ? known.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+    if (tracked.length > 0) {
+      const co = await runGit(gitCmd, ["checkout", "-q", "--", ...tracked], hostRepoRoot);
+      operations.push({ op: co.op, status: co.exit_code === 0 ? "ok" : "warn", detail: `work tree restored after ${why}` });
+    }
+    const cl = await runGit(gitCmd, ["clean", "-fdq", "--", ...stagedFiles], hostRepoRoot);
+    operations.push({ op: cl.op, status: cl.exit_code === 0 ? "ok" : "warn", detail: `untracked staged files dropped after ${why}` });
   };
 
   // 5b. Empty-diff guard: staged content byte-identical to HEAD after the clone

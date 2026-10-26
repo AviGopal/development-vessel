@@ -17,6 +17,7 @@
 //
 
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { PROPOSALS_DIR } from "../config.js";
 
 const PROMPT_TEMPLATE = `You are helping build a self-improving activity system.
 
@@ -93,12 +94,12 @@ MANDATORY for a concrete-defect gap: in required_code_modifications[0] include a
    ONLY read these paths — they are guaranteed to exist:
    - /workspace/validation/failure-modes/scenarios/<scenario_id>.json  (the scenario file)
    - /workspace/validation/results/latest-failure-mode-report.json     (harness results)
-   - /workspace/proposals/<any-file>.json                               (output dir)
+   - ${PROPOSALS_DIR}/<any-file>.json                               (output dir)
    DO NOT invent paths like /var/traces/ or /analytics/ — they do not exist.
    DO NOT use fs_read to read directories — only read files with known full paths.
 
-3. fs_write config: { "type": "fs_write", "path": "/workspace/proposals/<filename>.json", "content": "<content>" }
-   Only write to /workspace/proposals/ or /workspace/gaps/.
+3. fs_write config: { "type": "fs_write", "path": "${PROPOSALS_DIR}/<filename>.json", "content": "<content>" }
+   Only write to ${PROPOSALS_DIR}/. File gaps with substrateGap_write (rule 6), never fs_write.
 
 4. llm_completion_dispatch config MUST use EXACTLY these fields:
    { "type": "llm_completion_dispatch", "prompt": "<prompt text>",
@@ -166,7 +167,7 @@ TASK 3 - analyze (llm_completion_dispatch):
   The proposal's "summary" key is a FIXED literal — do NOT rename it to the scenario's output shape. The registered variant's outputShapes are set deterministically downstream to ["patch_proposal"] via output_shapes_override (its honest output); the proposal JSON does not carry them.
 
 TASK 4 - write_report (fs_write):
-  config: { "type": "fs_write", "path": "/workspace/proposals/<scenario_id>-report.json", "content": "{{analyze_text}}" }
+  config: { "type": "fs_write", "path": "${PROPOSALS_DIR}/<scenario_id>-report.json", "content": "{{analyze_text}}" }
   Replace <scenario_id> with the actual scenario id.
 
 Respond with the JSON template only.`;
@@ -576,7 +577,7 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
               budget: 2000,
               pointer: {
                 type: "memo",
-                path: "/workspace/proposals/proposal-{{scenario_id}}.json",
+                path: `${PROPOSALS_DIR}/proposal-{{scenario_id}}.json`,
                 section: "substrate_learning",
               },
             },

@@ -14,6 +14,9 @@
  * Writing anywhere else would not help: the readers do not look there, and write containment refuses
  * the live super-repo clone outright. The proposals dir is a plain data dir that containment admits.
  *
+ * The prompt's own fs_write rule also told drafted variants they could write /workspace/gaps/, which no
+ * write root admits; the dirs that rule names must all pass the guard.
+ *
  * The test never writes the volume: it checks both write guards (the root guard and containment) on
  * the exact paths the templates name, without touching disk.
  *
@@ -90,6 +93,19 @@ describe("drafted gap-closing write_report writes where its readers read", () =>
       expect(dirname(p)).toBe(PROPOSALS_DIR);
       expect(resolveInAnyWorkspace(p, root)).toBe(p);
     }
+  });
+
+  // The drafter prompt's resolver rules name the dirs a drafted variant may fs_write. A dir no write
+  // root admits there teaches every drafted variant a step that fails by construction.
+  test("MUST-FAIL: every dir the prompt's fs_write rule allows is one fs_write's guard admits", () => {
+    const draft = DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.tasks.find((t) =>
+      String((t.config as { prompt?: unknown }).prompt ?? "").includes("TASK 4 - write_report"),
+    )!;
+    const m = String((draft.config as { prompt: string }).prompt).match(/Only write to (.+?)\.(?:\s|$)/);
+    expect(m).not.toBeNull();
+    const dirs = m![1]!.split(/ or /).map((d) => d.trim().replace(/\/$/, ""));
+    expect(dirs).toContain(PROPOSALS_DIR);
+    for (const d of dirs) expect(resolveInAnyWorkspace(`${d}/x.json`, root)).toBe(`${d}/x.json`);
   });
 
   test("a relative path still resolves against WORKSPACE_ROOT, not the proposals dir", () => {

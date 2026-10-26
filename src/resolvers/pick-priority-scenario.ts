@@ -1,5 +1,6 @@
 import type { ResolverResult } from "./types.js";
 import { selfAuthKey } from "../lib/self-auth.js";
+import { PROPOSALS_DIR } from "../config.js";
 // Replaces the drafter-trigger-tick random scenario pick with a priority-weighted selection.
 import { readFile, readdir } from "node:fs/promises";
 
@@ -69,7 +70,7 @@ async function dispatchDrafter(
         variables: {
           report_path: `${scenariosDir}/${pickedId}.json`,
           scenario_id: pickedId,
-          proposals_dir: "/workspace/proposals",
+          proposals_dir: PROPOSALS_DIR,
           scenarios_dir: scenariosDir,
         },
       }),

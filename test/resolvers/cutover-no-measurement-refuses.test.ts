@@ -66,6 +66,8 @@ import {
   installCutoverFetchGuard, routeFleetUnreachable, routeShell,
   BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { appendRecord } from "../../src/resolvers/attempt-ledger.js";
+import { directedIntentStamp } from "../../src/resolvers/attempt-register.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -82,7 +84,17 @@ const ENV_KEYS = [
   "CUTOVER_PRECHECK_SUITE",
   "MAINTENANCE_LEASE_PATH",
   "GAP_STORE_ENDPOINT",
+  "ATTEMPT_LEDGER_DIR",
+  "METABOB_API_KEY",
 ] as const;
+const FIXTURE_NODE_KEY = "cutover-no-meas-fixture-node-key";
+/** A stamped, verified-directed attemptIntent (attempt-register.ts directedIntentStamp), the only
+ *  thing directedLandingOrigin honours — not a flag on the pointer or the pending file. */
+function registerDirectedIntent(attemptId: string, gapId: string, files: string[]): void {
+  const intent = { attempt_id: attemptId, route: "feature_compose", repo: `/workspace/git/vessels/${VESSEL}`, gap_id: gapId, touched_files: files, directed: true };
+  const directed_stamp = directedIntentStamp(FIXTURE_NODE_KEY, intent);
+  appendRecord("attemptIntent", attemptId, { ...intent, directed_stamp });
+}
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
@@ -137,6 +149,8 @@ beforeEach(async () => {
   process.env["WORKSPACE_ROOT"] = ws;
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
+  process.env["ATTEMPT_LEDGER_DIR"] = join(ws, "attempt-ledger");
+  process.env["METABOB_API_KEY"] = FIXTURE_NODE_KEY;
   // CUTOVER_PRECHECK_SUITE deliberately left unset: the suite step runs.
   writes.length = 0;
   precheckCalls = 0;
@@ -446,17 +460,42 @@ describe("cutover: a landing no instrument measured is refused (no_measurement_a
     expect(await archiveSnapshot(s, archived!)).toEqual(archiveBefore);
   });
 
-  it("CONTROL 1: the gap's own check ran and PASSED → lands, even though the pre-cutover suite did not run", async () => {
+  it("CONTROL (directed): an operator-DIRECTED landing with its own check passed still lands with the pre-cutover suite not run", async () => {
+    const s = await setup();
+    suite("no_tests");
+    const own = ownCheckPasses(s);
+    const attemptId = `att-directed-${Date.now().toString(36)}`;
+    registerDirectedIntent(attemptId, GAP, [TARGET]);
+    const r = await resolveVesselMitosisCutover({ ...s.pointer, attempt_id: attemptId } as never);
+    expect(String(bodyOf(r)["refusal_reason"] ?? "")).toBe("");
+    expect(r.shape).toBe("cutoverApplied");
+    expect(own.ownRuns()).toBe(1);
+    expect(headSubject(s)).not.toBe("baseline");
+    expect(git(s.hostRepoRoot, "show", `HEAD:${TARGET}`) + "\n").toBe(STAGED);
+  });
+
+  // CONTRACT CHANGE, NOT A WIDENING (2026-10-25, qa ruling, confirmed by the coordinator after
+  // 8e54fb68 — a gamed Object.keys shim landed through an own-check PASS + a precutover suite that
+  // never ran). This test used to pin "own check passed ⇒ lands even though the suite didn't run"
+  // as the correct behaviour. It no longer is: an own-check pass is itself gameable, so for an
+  // UNDIRECTED (system-authored) landing it is no longer sufficient on its own — the pre-cutover
+  // suite must also have actually run and measured something. The landing now PARKS
+  // (pre_cutover_suite_not_run, the own_check_unmeasurable shape: no preserve_pending, the gap stays
+  // open and recomposes). An OPERATOR-DIRECTED landing with the same own-check pass still lands on
+  // the suite not running — see "CONTROL (directed)" right above this one.
+  it("CONTROL 1 (updated contract): the gap's own check ran and PASSED, but the pre-cutover suite did not run and the landing is UNDIRECTED (system-authored) → parks, not lands", async () => {
     const s = await setup();
     suite("no_tests");
     const own = ownCheckPasses(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
-    expect(String(bodyOf(r)["refusal_reason"] ?? "")).toBe("");
-    expect(r.shape).toBe("cutoverApplied");
-    expect(own.ownRuns()).toBe(1);
-    expect(bodyOf(r)["own_check_verified"]).toBe(true);
-    expect(headSubject(s)).not.toBe("baseline");
-    expect(git(s.hostRepoRoot, "show", `HEAD:${TARGET}`) + "\n").toBe(STAGED);
+    expect(bodyOf(r)["refuse_class"]).toBe("pre_cutover_suite_not_run");
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(own.ownRuns()).toBe(1); // the own check still ran and passed; it just isn't enough alone
+    expect(bodyOf(r)["deferred"]).toBeUndefined();
+    expect(bodyOf(r)["preserve_pending"]).toBeUndefined();
+    expect(await exists(s.pendingPath)).toBe(false); // not retried: the lock is cleared, the gap stays open and recomposes
+    expect(headSubject(s)).toBe("baseline");
+    expect(git(s.originRoot, "rev-parse", "dev")).toBe(s.originSha);
   });
 
   it("CONTROL 2: no gap check, but the pre-cutover suite RAN (ran=true, no new failures) → lands; the suite is a measurement", async () => {

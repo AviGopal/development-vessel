@@ -3194,17 +3194,60 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // Closes cutover-suite-observes-but-does-not-gate. End-to-end gating is verified on the next
   // real cutover; the decision primitive and the fail-open paths are unit-covered now.
   if (process.env["CUTOVER_PRECHECK_SUITE"] !== "0") {
+    // UNDIRECTED LANDINGS CANNOT FAIL OPEN ON "DID NOT RUN" (2026-10-25, qa ruling agf_ytya7u5gdmqf,
+    // confirmed by the coordinator after 8e54fb68: an own-check PASS can itself be gamed, so it is not
+    // a defense against a suite that matches nothing — this gate must hold regardless of the own-check
+    // outcome above). The FAIL OPEN design below is sound only for a landing a human already looked at
+    // (directed, verified stamp — see directedLandingOrigin / the AUTONOMY-SCOPE CHOKEPOINT, the same
+    // signal, not a new one: author identity cannot separate operator from autonomous, so this reads the
+    // stamped ledger intent, not a flag on this pointer). A SYSTEM-authored landing has no such review,
+    // so a suite that did not run, or ran and measured zero tests, is not a pass — it is no verification
+    // at all, EVEN WHEN the gap's own check above passed. Refused the same shape own_check_unmeasurable
+    // uses just above: not fail-open, no preserve_pending (this tree is not retried — the gap stays open
+    // and is recomposed), and the same consecutive-unmeasurable counter/escalation
+    // (OWN_CHECK_UNMEASURABLE_ESCALATE_AT) on the landing gap's row, because "nothing verified this
+    // landing" is one concept whether it was this gap's own check or the whole-suite scan that abstained.
+    const precutoverGapId = await cutoverGapIdOf(pointer, mitosis_version_id);
+    const precutoverOrigin = await directedLandingOrigin(pointer, stagedFiles, precutoverGapId);
     try {
-      const runSuiteWith = async (extra: Record<string, unknown>): Promise<string[] | null> => {
+      const runSuiteWith = async (extra: Record<string, unknown>): Promise<{ failing: string[] | null; ran: boolean; pass: number; fail: number }> => {
         const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, ...extra });
         const sb = (res as { body?: Record<string, unknown> }).body ?? {};
-        if (sb.ran !== true) return null;   // could not measure → caller fails open
-        return Array.isArray(sb.failingTests) ? (sb.failingTests as unknown[]).map(String) : [];
+        const ran = sb.ran === true;
+        return {
+          ran,
+          pass: Number(sb.pass ?? 0),
+          fail: Number(sb.fail ?? 0),
+          failing: ran ? (Array.isArray(sb.failingTests) ? (sb.failingTests as unknown[]).map(String) : []) : null,   // null = unmeasurable → caller fails open
+        };
       };
-      const runSuite = async (): Promise<string[] | null> => runSuiteWith({});
+      const runSuite = async (): Promise<string[] | null> => (await runSuiteWith({})).failing;
       /** Re-run ONLY the named tests, so a load-correlated flake is not confirmed by its own load. */
-      const runSuiteOnly = async (names: string[]): Promise<string[] | null> => runSuiteWith({ only_tests: names });
-      const failNow = await runSuite();
+      const runSuiteOnly = async (names: string[]): Promise<string[] | null> => (await runSuiteWith({ only_tests: names })).failing;
+      const firstRun = await runSuiteWith({});
+      const failNow = firstRun.failing;
+      if (!precutoverOrigin.directed && (!firstRun.ran || (firstRun.pass === 0 && firstRun.fail === 0))) {
+        const reasonLabel = firstRun.ran ? "ran but measured 0 tests" : "did not run";
+        const kind = firstRun.ran ? "pre_cutover_suite_zero_tests" : "pre_cutover_suite_not_run";
+        const vesselBareForStamp = String(vessel_name).replace(/^repos\//, "");
+        let stampCount = 0;
+        let stampEscalated = false;
+        try {
+          const load2 = await loadOwnCheck(vesselBareForStamp, precutoverGapId, ownCheckDeps.readGap);
+          const row2 = load2.status !== "unreadable" ? load2.row : undefined;
+          if (row2) {
+            const stamp2 = await stampOwnCheckOutcome(row2, { measured: false, reason: `pre-cutover suite ${reasonLabel} (undirected landing, ${precutoverOrigin.why})` });
+            stampCount = stamp2.count;
+            stampEscalated = stamp2.escalated;
+          }
+        } catch { /* best-effort stamp; the refusal below stands on no measurement either way */ }
+        countOwnCheck("own_check_unmeasurable", `gap=${precutoverGapId} vessel=${vessel_name} mitosis=${mitosis_version_id}: precutover suite ${reasonLabel}, undirected (${precutoverOrigin.why})`);
+        await unstage(kind);
+        return softRefuse(
+          `${kind}: the pre-cutover suite ${reasonLabel} on this staged tree; a system-authored landing (${precutoverOrigin.why}) cannot be verified without it, even when its own check passed above — an own-check pass alone is gameable. Refusing like own_check_unmeasurable: unproduced evidence is not passing evidence; this tree is not retried, the gap stays open and is recomposed. ${stampEscalated ? `This is unmeasurable run ${stampCount} in a row: the check is treated as broken and demoted for re-derivation, not recompose.` : `Unmeasurable run ${stampCount} of ${OWN_CHECK_UNMEASURABLE_ESCALATE_AT} before the check is treated as broken.`}`,
+          { kind, refuse_class: kind, vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, own_check_unmeasurable_count: stampCount, own_check_escalated: stampEscalated, own_check_counters: getOwnCheckCounters(), operations },
+        );
+      }
       if (failNow !== null) {                // null = unmeasurable → fall through and commit
         const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
         let baseline: string[] | null = null;
@@ -3227,7 +3270,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         // measured once. Unreadable store, unknown landing gap or no base result: nothing subtracted.
         const trackedRedFilter = makeTrackedRedFilter(
           () => loadTrackedRedNames(String(vessel_name).replace(/^repos\//, ""), pointer.gap_id || pendingGapId),
-          (lines) => runSuiteWith({ only_tests: lines.map((l) => l.replace(/^\s*\(fail\)\s*/, "").trim()), base_ref: "HEAD" }),
+          async (lines) => (await runSuiteWith({ only_tests: lines.map((l) => l.replace(/^\s*\(fail\)\s*/, "").trim()), base_ref: "HEAD" })).failing,
         );
         const dropTrackedRed = async (names: string[]): Promise<string[]> => {
           const r = await trackedRedFilter(names);

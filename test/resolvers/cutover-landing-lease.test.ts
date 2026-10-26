@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
@@ -30,6 +30,7 @@ let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
 let store: Map<string, Record<string, any>>;
+let currentHost = "";
 afterAll(() => { restoreCutoverFsModules(); restoreCutoverFetch(); restoreCutoverExecModules(); });
 // SYSTEMD THROUGH A STUB, never the real tool (the test preload blocks systemctl in the live container). The landing's
 // attempt checks read `systemctl show <clone>/host-repo.service -p LoadState --value` for the temp host repo; this
@@ -59,8 +60,16 @@ beforeEach(async () => {
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   store = routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
-  // The pre-cutover suite answers "no tests" (ran=false); the gap's own check is the measurement.
-  routeShell(guard, () => BUN_NO_TESTS);
+  currentHost = "";
+  // The PRE-cutover suite (clone still at "baseline") answers a real PASS (ran=true). This file is
+  // about the landing LEASE, not the precutover suite: a "did not run" answer here (2026-10-25) now
+  // parks every undirected landing at the 5d gate regardless of the lease outcome (an own-check pass
+  // alone is no longer enough — qa ruling, after 8e54fb68), which would make the two "lands"
+  // CONTROLs below fail for a reason orthogonal to what they pin. A real, passing measurement keeps
+  // the lease behaviour the only variable. The POST-land call (the commit now exists) still answers
+  // "no tests" — a real pass there would write /workspace/post-land-baseline/*.json, outside this
+  // test's tmpdir, which the fs guard rightly blocks.
+  routeShell(guard, () => (!currentHost || git(currentHost, "log", "-1", "--format=%s") !== "baseline") ? BUN_NO_TESTS : BUN_PASSING);
 });
 afterEach(async () => {
   const violations = guard.restore();
@@ -99,6 +108,7 @@ async function setup() {
   git(hostRepoRoot, "config", "commit.gpgsign", "false");
   git(hostRepoRoot, "add", ".");
   git(hostRepoRoot, "commit", "-q", "-m", "baseline");
+  currentHost = hostRepoRoot;
   const originRoot = join(ws, "host-origin.git");
   git(ws, "init", "-q", "--bare", "-b", "dev", originRoot);
   git(hostRepoRoot, "remote", "add", "origin", originRoot);

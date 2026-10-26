@@ -22,7 +22,7 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { identicalRepeatedFailure, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { heldLineageAncestor, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
@@ -1022,7 +1022,7 @@ export function escalateHopelessToHuman(g: Record<string, unknown>, ask: Ask): v
   }
 }
 
-/** THE PICK-SKIP PREDICATE, extracted from pickMostLandable: a candidate is skipped when it is held, a falsified
+/** THE PICK-SKIP PREDICATE, extracted from pickMostLandable: a candidate is skipped when it or its lineage is held, a falsified
  *  landing awaits its revert, an unmeasurable landing awaits its verdict, its narrowed parent's landing is unjudged, or
  *  its condition reads pending. `lineageIndex` is the whole-store index the auto-pick passes in. */
 export function pickSkipPending(g: Record<string, unknown>, gaps: Record<string, unknown>[], lineageIndex: Map<string, Record<string, unknown>>): boolean {
@@ -1038,6 +1038,10 @@ export function pickSkipPending(g: Record<string, unknown>, gaps: Record<string,
     || presentPredicate(m.evidence_resolve) || presentPredicate(m.verify_shape) || presentPredicate(m.expected_literal);
   const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;
   if (operatorHold) return true;
+  // A HELD LINEAGE (heldLineageAncestor): a recommit, narrowed or step child of a held gap is the held work under a
+  // new id. The open-list read already drops these (substrate-gap.ts); this holds wherever the index carries the
+  // held ancestor.
+  if (heldLineageAncestor(g, (id) => { const r = lineageIndex.get(id) ?? gaps.find((p) => String(p.id ?? '') === id); return r ? [r] : []; })) return true;
   // A falsified landing still in HEAD: another compose would build on the regression. Held until
   // its revert is recorded (regressed_by.revert_sha).
   const regressedBy = m.regressed_by as { revert_sha?: unknown } | null | undefined;
@@ -1443,7 +1447,8 @@ export async function armDecomposition(
     if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
     // A step carries its OWN check (the parent's is refused above: one step will not flip it), but the
     // operator's hand-off is the parent's: a step of a directed gap is directed too, or it is withheld.
-    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(childDirected ? { directed: true } : {}), ...cleared, ...childPredicate };
+    // A step of a held gap is held too (inheritedOperatorHold): the hold is the operator's, as the direction is.
+    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(childDirected ? { directed: true } : {}), ...inheritedOperatorHold(parentId, meta), ...cleared, ...childPredicate };
     if (opts.observe) { wouldArm.set(k, childPredicate); continue; } // OBSERVE: validated and judged, never written
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", ...(childGrant ? { _directed_grant: childGrant } : {}), gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,

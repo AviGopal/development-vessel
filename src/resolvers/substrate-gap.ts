@@ -50,7 +50,7 @@ import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 import { countLiteralOnEvaluatorTree, evaluatorEditSite } from "../lib/evaluator-tree.js";
-import { EDIT_SITE_IS_OWN_CHECK, editSiteIsOwnCheck, routedOffCompose } from "../judge/gap-eligibility.js";
+import { EDIT_SITE_IS_OWN_CHECK, editSiteIsOwnCheck, heldLineageAncestor, routedOffCompose } from "../judge/gap-eligibility.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -2294,7 +2294,11 @@ export async function resolveSubstrateGap(
     results = results.filter((g) => g.status === pointer.status);
   }
   if (pointer.status === "open" && !pointer.id && pointer.include_held !== true) {
-    results = results.filter((g) => (g.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold !== true);
+    // A HOLD COVERS ITS LINEAGE (heldLineageAncestor): a recommit / narrowed / step child of a held gap, at any depth,
+    // is the held work under a new id, so the supply omits it too. Read over the whole store, any status.
+    const lookup = (id: string) => (snap.byId.get(id) ?? []) as unknown as Record<string, unknown>[];
+    results = results.filter((g) => (g.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold !== true
+      && heldLineageAncestor(g as unknown as Record<string, unknown>, lookup) === null);
   }
   if (pointer.exclude_categories && pointer.exclude_categories.length) {
     const excluded = new Set(pointer.exclude_categories);

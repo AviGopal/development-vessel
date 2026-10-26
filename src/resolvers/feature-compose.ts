@@ -54,6 +54,7 @@ import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-d
 import { acquireComposeSlot } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
+import { heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
@@ -5693,7 +5694,8 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
             status: "open",
             // The recommit is the same defect on the same edit site: it carries its source gap's trusted
             // test_suite check (inheritableParentCheck) and the operator's hand-off, or it is born unclosable.
-            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), root_gap_id: rootGapId, failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(gapDirected(meta) ? { directed: true } : {}) },
+            // It carries its source gap's operator hold too (inheritedOperatorHold), or the retry is the leak.
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), root_gap_id: rootGapId, failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(gapDirected(meta) ? { directed: true } : {}), ...inheritedOperatorHold(String(gap.id), meta) },
           },
           // An honoured direction propagates with its provenance (lib/operator-direct.ts); a legacy one does not.
           ...(gapDirected(meta) ? { _directed_grant: inheritedDirectedGrant(meta) } : {}),
@@ -6464,7 +6466,28 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
     }
     const stored = rows?.find((r) => String(r.id) === _gapIdForSlot);
     const land = admissionLand;
-    const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
+    let held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
+    // A HOLD COVERS ITS LINEAGE (heldLineageAncestor): a recommit / narrowed / step child of a held gap is refused as
+    // held. Each ancestor is read by id (by-id reads are never hold-filtered); one that cannot be read counts as held.
+    if (stored && !held) {
+      // The walk is the pure one; the ancestors it asks for are read here until it asks for none it lacks.
+      const ancestorRows = new Map<string, Array<Record<string, unknown>> | null>();
+      for (let pass = 0; pass < 32; pass++) {
+        const missing: string[] = [];
+        heldLineageAncestor(stored, (id) => { if (ancestorRows.has(id)) return ancestorRows.get(id)!; missing.push(id); return []; });
+        if (missing.length === 0) break;
+        for (const id of missing) {
+          let got: Array<Record<string, unknown>> | null = null;
+          try { got = await readComposeGapRows(id); } catch { got = null; }
+          ancestorRows.set(id, got === null ? null : got.filter((r) => String(r.id) === id));
+        }
+      }
+      const heldBy = heldLineageAncestor(stored, (id) => ancestorRows.has(id) ? ancestorRows.get(id)! : null);
+      if (heldBy) {
+        held = true;
+        console.log(`[feature-compose] gap ${_gapIdForSlot}: lineage ancestor ${heldBy.id} ${heldBy.why === "unreadable" ? "could not be read (a hold fails closed)" : "is under operator_hold"}; refused as held`);
+      }
+    }
     if (stored && (stored as { localization?: unknown }).localization !== undefined) admissionLocalization = (stored as { localization?: unknown }).localization ?? null;
     // ADMISSION ON EVERY ROUTE (2026-10-07). A compose that would land, naming a gap the
     // store holds, runs THE eligibility predicate the picker, the drain nudge and the gap-write nudge share

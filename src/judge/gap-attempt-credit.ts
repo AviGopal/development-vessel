@@ -19,7 +19,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, inheritableParentCheck } from "../resolvers/substrate-gap.js";
-import { isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
+import { inheritedOperatorHold, isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { creditLearning, isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
@@ -396,7 +396,7 @@ const NARROWED_INHERIT_NEVER = new Set([
   "pending_outcome_verification", "pending_set_at", "pending_note",
   "predicate_source", "predicate_derived_at", "predicate_commit",
   "closed_reason", "close_basis", "closed_at", "resolution", "landed_sha",
-  "operator_hold", "operator_hold_reason", "reopen_note",
+  "operator_hold", "operator_hold_reason", "operator_hold_at", "operator_hold_inherited_from", "reopen_note",
   "check_supply",
 ]);
 // checks:"drop" (a child minted from a landing's semantic dissent, feature-compose settleSemanticDissent):
@@ -438,7 +438,9 @@ export function narrowedChildRecord(
     source: parent.source,
     summary: "[narrowed from " + parentId + "] " + parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "") + opts.summaryTail,
     detected_at: parent.detected_at,
-    classification_metadata: { ...inherited, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString(), ...opts.extra },
+    // A HELD PARENT'S CHILD IS BORN HELD (inheritedOperatorHold): the hold keys are never copied raw (above), only
+    // through the one builder, which also names the row the hold was set on.
+    classification_metadata: { ...inherited, ...inheritedOperatorHold(parentId, meta), failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString(), ...opts.extra },
     status: "open",
   };
 }

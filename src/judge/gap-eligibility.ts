@@ -233,6 +233,71 @@ export function isAdmissionHeld(row: Record<string, unknown>): boolean {
   return meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION || isAwaitingLandVerification(row);
 }
 
+/**
+ * A HOLD COVERS ITS LINEAGE. A derived gap (recommit-<id>-<cls>, <id>-narrowed, <id>-dissent-narrowed, a decomposed
+ * step) carries its parent's intent and edit site, so a hold read only on its own row was defeated by the system's
+ * own retry machinery: a held gap's recommit child was picked, leased and admitted 42 min after the hold, and its
+ * failed compose minted an unheld grandchild. A row's parents are the lineage keys it records (derived_from,
+ * parent_gap_id, source_gap_id, root_gap_id) and one id layer stripped (a recommit- prefix with one trailing
+ * -<snake_class>, or a -dissent-narrowed / -narrowed suffix), walked to the root.
+ */
+export function lineageParentIds(row: Record<string, unknown>): string[] {
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  const out: string[] = [];
+  for (const k of ["derived_from", "parent_gap_id", "source_gap_id", "root_gap_id"]) {
+    const v = meta[k];
+    if (typeof v === "string" && v.trim()) out.push(v.trim());
+  }
+  out.push(...idLineageParents(String(row["id"] ?? "")));
+  return out;
+}
+function idLineageParents(id: string): string[] {
+  const out: string[] = [];
+  if (id.startsWith("recommit-")) out.push(id.slice("recommit-".length).replace(/-[a-z][a-z0-9_]*$/, ""));
+  if (id.endsWith("-dissent-narrowed")) out.push(id.slice(0, -"-dissent-narrowed".length));
+  else if (id.endsWith("-narrowed")) out.push(id.slice(0, -"-narrowed".length));
+  return out.filter((p) => p && p !== id);
+}
+/** The lineage lookup: the stored rows for an id ([] = the store holds none), or null when the store could not be
+ *  read for it. */
+export type LineageLookup = (id: string) => Record<string, unknown>[] | null;
+/**
+ * The held ancestor of a row, or null. FAIL CLOSED: an ancestor whose read fails counts as held (why "unreadable").
+ * An ancestor the store holds no row for is not held, and the walk continues past it on its id, so a pruned
+ * intermediate does not unhold a grandchild. The row's own hold is not read here (isAdmissionHeld reads it).
+ */
+export function heldLineageAncestor(row: Record<string, unknown>, lookup: LineageLookup): { id: string; why: "operator_hold" | "unreadable" } | null {
+  const seen = new Set<string>([String(row["id"] ?? "")]);
+  const queue = lineageParentIds(row);
+  for (let n = 0; queue.length > 0 && n < 32; n++) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const rows = lookup(id);
+    if (rows === null) return { id, why: "unreadable" };
+    for (const r of rows) {
+      const rawMeta = r["classification_metadata"] ?? r["metadata"];
+      if (rawMeta && typeof rawMeta === "object" && (rawMeta as Record<string, unknown>)["operator_hold"] === true) return { id, why: "operator_hold" };
+      queue.push(...lineageParentIds(r));
+    }
+    queue.push(...idLineageParents(id));
+  }
+  return null;
+}
+/** The hold fields a derived gap is born with: its parent's operator_hold, reason and stamp, and the row the hold was set
+ *  on (operator_hold_inherited_from), so a release can find every row the hold reached. Empty for an unheld parent. */
+export function inheritedOperatorHold(parentId: string, parentMeta: Record<string, unknown>): Record<string, unknown> {
+  if (parentMeta["operator_hold"] !== true) return {};
+  const from = parentMeta["operator_hold_inherited_from"];
+  return {
+    operator_hold: true,
+    ...(typeof parentMeta["operator_hold_reason"] === "string" ? { operator_hold_reason: parentMeta["operator_hold_reason"] } : {}),
+    ...(typeof parentMeta["operator_hold_at"] === "string" ? { operator_hold_at: parentMeta["operator_hold_at"] } : {}),
+    operator_hold_inherited_from: typeof from === "string" && from ? from : parentId,
+  };
+}
+
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
   if (String(row["status"] ?? "open") !== "open") return "not_open";
   const rawMeta = row["classification_metadata"] ?? row["metadata"];

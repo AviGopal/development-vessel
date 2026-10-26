@@ -213,19 +213,21 @@ export type LandedCheck = { state: "landed"; src: string } | { state: "absent" }
  * armed its gap; the mirror's next refresh removed the file and the gap stayed armed on a check no tree holds, so every
  * fix draft for it ran a missing file and was "unjudged" (81 of 99 armed own-check runs on one node, 2026-10-26). Read
  * from the blob, an untracked edit cannot add a title either. "absent": origin/dev is readable and holds no such file;
- * "unreadable": the clone has no origin/dev (neither arms nor un-arms). `refs` caches the ref read per vessel per tick.
+ * "unreadable": the clone has no origin/dev (neither arms nor un-arms). `trees` caches each vessel's origin/dev file list
+ * for the tick (one `ls-tree` per vessel), so only a check that is there costs a further read.
  * No fetch: the tick has none of its own; the mirror moves origin/dev.
  */
-export function landedCheckSource(vessel: string, testFile: string, refs?: Map<string, boolean>): LandedCheck {
+export function landedCheckSource(vessel: string, testFile: string, trees?: Map<string, Set<string> | null>): LandedCheck {
   const dir = join(clonesRoot(), vessel);
-  let ok = refs?.get(vessel);
-  if (ok === undefined) {
-    ok = sweepGitOut(dir, ["rev-parse", "--verify", "-q", "origin/dev^{commit}"]) !== null;
-    refs?.set(vessel, ok);
+  let tree = trees?.get(vessel);
+  if (tree === undefined) {
+    const out = sweepGitOut(dir, ["ls-tree", "-r", "-z", "--name-only", "origin/dev"]);
+    tree = out === null ? null : new Set(out.split("\0").filter(Boolean));
+    trees?.set(vessel, tree);
   }
-  if (!ok) return { state: "unreadable" };
+  if (tree === null) return { state: "unreadable" };
   const rel = normalize(testFile).replace(/^(?:\.\/)+/, "");
-  if (sweepGitOut(dir, ["cat-file", "-e", `origin/dev:${rel}`]) === null) return { state: "absent" };
+  if (!tree.has(rel)) return { state: "absent" };
   // Read whole (sweepGitOut trims): the source is the check as landed, byte for byte (a lesson keeps its excerpt).
   let src: string | null = null;
   try {
@@ -1752,7 +1754,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   const resettled: Array<{ id: string; dispatch_id: string | null }> = [];
 
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
-  const landedRefs = new Map<string, boolean>();
+  const landedRefs = new Map<string, Set<string> | null>();
   let armBudget = perTick;
   for (const row of open) {
     // A forwarding node reads on past a spent budget: a row waiting on, or settled by, the holder spends none.

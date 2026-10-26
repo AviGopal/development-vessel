@@ -4899,6 +4899,16 @@ export function landedCloseReason(meta: Record<string, unknown> | null | undefin
   const l = landingLabelHere({ goal_verification_label: independent }, sha);
   return l?.grounded === true && l.shadow !== true ? "landed_verified" : "awaiting_independent_verdict";
 }
+/**
+ * A SOURCE landing's semantic dissent (own check red->green, gate addresses:false) is held, not pushed,
+ * ONLY when the compose is SYSTEM-authored. `directed === true` is goal-host's operator/edit-intent
+ * signal (set on the request's `operator` field) — the same one the autonomy-scope floor reads as
+ * "directed work is never checked" — so an operator-directed landing under dissent is unaffected: it
+ * pushes and settles the dissent exactly as before. A dissent with no gap id has no row to hold against.
+ */
+export function systemAuthoredDissentHold(dissent: SemanticDissent | null | undefined, directed: unknown, gapId: unknown): boolean {
+  return !!dissent && gapId != null && String(gapId) !== "" && directed !== true;
+}
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {
   return !!oc && oc.ran && oc.tc_ok && Array.isArray(oc.base_red) && oc.base_red.length > 0 && oc.draft_red.length === 0 && !oc.contract_breach;
@@ -7293,7 +7303,13 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   if (pointer.land && pointer.gap?.id && !pointer.dry_run) {
     const park = await readParkedLanding(String(pointer.gap.id));
     if (park) {
-      if (Date.now() - Date.parse(park.parked_at) < (pointer.parked_landing_ttl_ms ?? 86_400_000)) {
+      // A dissent_held park (semantic gate addresses:false, held instead of landed — see the
+      // cutover loop below) is never auto-resumed: resumeParkedLanding skips the gate entirely
+      // ("the park already passed ... the semantic gate"), which is exactly the push this park
+      // exists to withhold. Leave it parked and redraft, which re-runs the gate fresh.
+      if (park.reason === "dissent_held") {
+        console.log(`[feature-compose] park for ${pointer.gap.id} is dissent_held (semantic gate addresses:false); not auto-resumed, redrafting`);
+      } else if (Date.now() - Date.parse(park.parked_at) < (pointer.parked_landing_ttl_ms ?? 86_400_000)) {
         const resumed = await resumeParkedLanding(pointer, park, toolsEndpoint);
         if (resumed) return resumed;
       } else {
@@ -10835,9 +10851,20 @@ const earlyAttempt = await Promise.race([
       }
       const shaRes = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vBase)} show ${shq(`HEAD:${changedRel[0]}`)} | sha256sum | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
+      // A SYSTEM-AUTHORED SOURCE landing whose semantic gate said addresses:false. Before this,
+      // semanticGateDisposition's land:true-with-dissent pushed anyway and settleSemanticDissent
+      // recorded the gate's refusal as PARTIAL only AFTER the push — so the gate's verdict was
+      // never load-bearing: measured, every one of 12 such landings since 2026-10-24 landed as
+      // landed_unverified regardless of what the gate said. Operator-directed work is unaffected
+      // (`directed === true` is goal-host's operator/edit-intent signal — the same one the
+      // autonomy-scope floor above reads as "directed work is never checked"): the push and the
+      // dissent record stay exactly as they were.
+      const systemDissentHold = systemAuthoredDissentHold(semanticDissent, (pointer as { directed?: boolean }).directed, pointer.gap?.id);
       // PARK BEFORE THE CUTOVER: everything up to here (verify + semantic gate) is the
       // expensive part; if the cutover is refused or the process is restarted, the park
-      // is what survives and the next compose for this gap resumes it.
+      // is what survives and the next compose for this gap resumes it. For a systemDissentHold
+      // the park's reason is dissent_held instead, which the resume guard above refuses to
+      // auto-land (the gate's refusal must be re-asked, not skipped).
       if (pointer.gap?.id) {
         const parkFiles: ParkedLanding["files"] = [];
         for (const rel of changedRel) {
@@ -10856,11 +10883,28 @@ const earlyAttempt = await Promise.race([
             judge: { addresses: semantic_gate?.addresses ?? null, reason: semantic_gate?.reason ?? null },
             ...(semanticDissent ? { semantic_dissent: semanticDissent } : {}),
             parked_at: new Date().toISOString(),
-            reason: "pre-cutover",
+            reason: systemDissentHold ? "dissent_held" : "pre-cutover",
             attempt_id: earlyAttempt.attempt_id ?? null,
           });
           parkedAny = true;
         }
+      }
+      // DISSENT HELD, NOT PARTIAL: no push, no cutover, no settleSemanticDissent (which records
+      // landed_partial and mints a narrowed child, both ONLY meaningful for a landing that
+      // happened — see its own "NO PHANTOM DISSENT" doc comment). The park above survives for an
+      // operator to resolve, and the reason is written to failure_lessons through the existing
+      // write-back (appendComposeLesson) so the next draft for this gap sees it, the same way any
+      // other semantic-gate rejection teaches the next attempt.
+      if (systemDissentHold) {
+        await appendComposeLesson(
+          "semantic_dissent_held",
+          `held, not landed: the semantic gate said addresses:false though the gap's own check went red->green: ${semanticDissent!.reason}`,
+          vessel,
+          pointer.gap,
+        );
+        cutovers.push({ vessel, landed: false, result: { deferred: true, kind: "semantic_dissent_held", reason: "semantic gate addresses:false on a system-authored landing; held for operator review, not pushed" } });
+        try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
+        continue;
       }
       const cut = await resolveVesselMitosisCutover({
         type: "vessel_mitosis_cutover",

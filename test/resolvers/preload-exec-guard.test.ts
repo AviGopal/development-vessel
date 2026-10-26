@@ -9,7 +9,7 @@
 //   without the preload fails at that precondition and never spawns the real tools.
 // CONTROL: a non-blocked program (sh -c echo) passes through unchanged, and a file's own opt-in guard stacks on the
 //   preload's and restores back to it, never to the unguarded spawn.
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { mkdirSync, writeFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -40,6 +40,10 @@ const throwsBlocked = (f: () => unknown): string => {
 };
 
 describe("test preload: blocked host-lifecycle spawns", () => {
+  // The preload records every blocked spawn in one process-wide array and nothing drains it between files, so each
+  // test starts by discarding what earlier files left there and counts only its own.
+  beforeEach(() => { takePreloadExecViolations(); });
+
   it("MUST-FAIL: Bun.spawnSync and Bun.spawn of systemctl/journalctl throw EPERM, nothing runs, each is recorded", () => {
     const got = {
       spawnSyncSystemctl: throwsBlocked(() => Bun.spawnSync([standIn("systemctl"), "is-active", "development-vessel"], { stdout: "pipe", stderr: "pipe" })),

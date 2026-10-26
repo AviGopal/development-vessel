@@ -8,7 +8,7 @@
 //   never touches either path (red at the parent, which has no preload).
 // CONTROL: with VESSEL_IDENTITY_KEY_PATH naming a key under the tmpdir, volumeNodeId() reads it and names the node by
 //   it; nothing is recorded. A read outside the secret roots passes.
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
@@ -26,6 +26,10 @@ afterEach(() => {
 });
 
 describe("test preload: blocked secret reads", () => {
+  // The preload records every blocked secret read in one process-wide array and nothing drains it between files, so
+  // each test starts by discarding what earlier files left there and counts only its own.
+  beforeEach(() => { take(); });
+
   it("MUST-FAIL: volumeNodeId() with the key path unset never opens the key (blocked, recorded, null)", () => {
     expect(guardInstalled()).toBe(true);
     if (!guardInstalled()) return;

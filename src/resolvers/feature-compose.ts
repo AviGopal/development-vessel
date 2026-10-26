@@ -6146,6 +6146,17 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   ].join("\n");
   return `A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\n${head}\n\nThe gate's output (its first ${REPAIR_OUTPUT_SLICE} chars; the reason above may lie past them):\n\n${slice}${errorSiteWindow}${ask}`;
 }
+/**
+ * The base re-read's journal line when it clears a PASS-COUNT drop (no test vanished: the draft executed at least as many
+ * tests as the fresh base). It speaks for the count only. Failures that are red on both draft runs and green on the fresh
+ * base are still this draft's (confirmedNewTest) and still refuse it, and so still go to repair; the line used to read
+ * "the pass drop was the environment, not this draft" in exactly those cases (both of 2026-10-26's green own-check
+ * drafts: each broke a sibling test that the fresh base passed), which read as a global verdict that the draft was clean.
+ */
+export function passCountClearedLine(v: string, draftExecuted: number, baseExecutedNow: number, curPass: number | null, basePassNow: number | null, basePass: number | undefined, introduced: number): string {
+  return `[feature-compose] base re-read for ${v}: draft executed ${draftExecuted} tests >= fresh base ${baseExecutedNow} (pass ${String(curPass)} vs ${String(basePassNow)}, cached ${String(basePass)}) — no test vanished, so the pass-count drop alone does not refuse this draft` +
+    (introduced > 0 ? `; ${introduced} failure(s) red on both draft runs and green on the fresh base remain this draft's` : "");
+}
 /** Lines of context either side of the region a draft changed, in the repair round's region window. */
 export const REPAIR_REGION_CONTEXT = 25;
 /** An unchanged file is shown whole to the repair round only up to this many lines; a larger one is not shown. */
@@ -9760,7 +9771,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const baseLoadErrorsNow = testLoadErrorCount(raw3);
         const draftLoadErrors = testLoadErrorCount(testRaw);
         if (passRegressed && draftExecuted !== null && baseExecutedNow !== null && draftExecuted >= baseExecutedNow && baseLoadErrorsNow <= draftLoadErrors) {
-          console.log(`[feature-compose] base re-read for ${v}: draft executed ${draftExecuted} tests >= fresh base ${baseExecutedNow} (pass ${String(curPass)} vs ${basePassNow}, cached ${String(basePass)}) — the pass drop was the environment, not this draft`);
+          console.log(passCountClearedLine(v, draftExecuted, baseExecutedNow, curPass, basePassNow, basePass, confirmedNewTest.length));
           passRegressed = false;
         }
       } else {

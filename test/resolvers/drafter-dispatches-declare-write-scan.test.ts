@@ -9,11 +9,12 @@
  * missed, so this test scans src instead of listing files: a new feeder that pins the drafter without declaring the
  * write fails here.
  *
- * A site is a `targetTemplateId` whose value is the DRAFTER_TEMPLATE_ID identifier, the literal template id, or the
- * `{{drafter_template_id}}` placeholder in a seed whose drafter_template_id variable names draft-activity-from-pattern
- * (a seed whose variable names another drafter, draft-gap-closing-activity, dispatches a different template and is
- * not this drafter's site). Its body is the `JSON.stringify({ ... })` object that encloses it, brace-matched, and that
- * object must carry `expected_output_shapes`.
+ * A site is a `targetTemplateId` that pins the drafter LITERALLY: the DRAFTER_TEMPLATE_ID identifier or its string
+ * value. A templated id (`{{drafter_template_id}}`) is NOT a site: it can render unbound, and then a write declaration
+ * on what is no longer a pinned dispatch would admit a free walk as a change, the opposite of the door's purpose. That
+ * exclusion is pinned below (refine-on-disagreement's templated dispatch is not required to declare). Its body is the
+ * `JSON.stringify({ ... })` object that encloses it, brace-matched, and that object must carry
+ * `expected_output_shapes`.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -32,7 +33,9 @@ function tsFiles(dir: string): string[] {
   return out;
 }
 
-const SITE = /targetTemplateId\s*:\s*(?:DRAFTER_TEMPLATE_ID\b|"\{\{drafter_template_id\}\}"|"development-vessel:draft-activity-from-pattern")/g;
+const SITE = /targetTemplateId\s*:\s*(?:DRAFTER_TEMPLATE_ID\b|"development-vessel:draft-activity-from-pattern")/g;
+/** A templated drafter id: deliberately not a site. */
+const TEMPLATED = /targetTemplateId\s*:\s*"\{\{drafter_template_id\}\}"/;
 
 /** The object literal that encloses `at`: the nearest unmatched `{` before it, matched to its `}`. */
 function enclosingObject(text: string, at: number): string | null {
@@ -59,21 +62,12 @@ function enclosingObject(text: string, at: number): string | null {
   return null;
 }
 
-/** The seed's drafter_template_id variable entry names draft-activity-from-pattern as its drafter. */
-function namesThisDrafter(text: string): boolean {
-  const i = text.search(/name:\s*"drafter_template_id"/);
-  if (i < 0) return false;
-  const entry = enclosingObject(text, i);
-  return entry !== null && entry.includes("draft-activity-from-pattern");
-}
-
 interface Site { where: string; body: string | null; stringified: boolean }
 const sites: Site[] = [];
 for (const file of tsFiles(SRC)) {
   const text = readFileSync(file, "utf8");
   for (const m of text.matchAll(SITE)) {
     const at = m.index ?? 0;
-    if (m[0].includes("{{drafter_template_id}}") && !namesThisDrafter(text)) continue;
     const line = text.slice(0, at).split("\n").length;
     const body = enclosingObject(text, at);
     const open = body ? text.lastIndexOf(body, at) : -1;
@@ -84,14 +78,12 @@ for (const file of tsFiles(SRC)) {
 
 describe("every pinned drafter dispatch in src declares expected_output_shapes", () => {
   test("the scan finds the known sites (not vacuous)", () => {
-    expect(sites.length).toBeGreaterThanOrEqual(4);
+    expect(sites.length).toBeGreaterThanOrEqual(3);
     const files = new Set(sites.map((s) => s.where.replace(/:\d+$/, "")));
     for (const f of [
       "src/resolvers/trace-recurring-pattern-scan.ts",
       "src/resolvers/vessel-gap-to-cluster.ts",
       "src/resolvers/vessel-arrival-scan.ts",
-      "src/seed/detect-recurring-pattern.ts",
-      "src/seed/refine-on-disagreement.ts",
     ]) expect(files.has(f)).toBe(true);
   });
 
@@ -108,6 +100,18 @@ describe("every pinned drafter dispatch in src declares expected_output_shapes",
       expect(s.body!).toMatch(/\bexpected_output_shapes\s*:/);
     });
   }
+});
+
+describe("CONTROL: a templated drafter id is excluded on purpose", () => {
+  test("refine-on-disagreement's {{drafter_template_id}} dispatch is not a site and is not required to declare", () => {
+    const rel = "src/seed/refine-on-disagreement.ts";
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const m = TEMPLATED.exec(text);
+    expect(m).not.toBeNull();
+    expect(sites.some((s) => s.where.startsWith(`${rel}:`))).toBe(false);
+    // And it does not declare: a write declaration there could admit an unpinned dispatch as a change.
+    expect(enclosingObject(text, m!.index)!).not.toMatch(/\bexpected_output_shapes\s*:/);
+  });
 });
 
 describe("CONTROL: the window is the body object, not the file", () => {

@@ -1,5 +1,4 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
-import { DRAFTER_DECLARED_WRITES } from "./draft-activity-from-pattern.js";
 
 /**
  * refine-on-disagreement — Phase 3 closed-loop learning, task 3.3
@@ -207,8 +206,6 @@ export const REFINE_ON_DISAGREEMENT_TEMPLATE: ActivityTemplate = {
         body: JSON.stringify({
           goal: "refine activity {{failed_activity_id}} after prediction_disagreement",
           targetTemplateId: "{{drafter_template_id}}",
-          // The drafter's write, declared so goal-host admits the pinned dispatch (see detect-recurring-pattern).
-          expected_output_shapes: DRAFTER_DECLARED_WRITES,
           parent_execution_id: "{{disagreement_execution_id}}",
           variables: {
             contrast_pair: "{{build_contrast_pair_content}}",

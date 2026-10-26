@@ -130,6 +130,13 @@ export const VOLUME_RUNTIME_READ_DIRS: readonly string[] = [
   FAILURE_MODE_VESSEL_SCENARIOS_DIR,
   PROPOSALS_DIR,
 ];
+/**
+ * The volume dirs fs_write / fs_edit may also write. Only proposals: the drafted gap-closing
+ * activities' write_report and the drafter's own write_proposal tasks write there, and every reader
+ * (apply-proposal-as-patch, gap admission, prior-attempt recall) reads it there. The other runtime
+ * dirs above stay read-only to the file tools; their writers do not go through fs_write.
+ */
+export const VOLUME_RUNTIME_WRITE_DIRS: readonly string[] = [PROPOSALS_DIR];
 
 /**
  * Full configuration block. The `discovery.shapes` array is the single source

@@ -1,5 +1,5 @@
 import { resolve, relative, isAbsolute } from "path";
-import { VOLUME_RUNTIME_READ_DIRS } from "../config.js";
+import { VOLUME_RUNTIME_READ_DIRS, VOLUME_RUNTIME_WRITE_DIRS } from "../config.js";
 
 // Multi-root workspace guard shared by the fs resolvers. WORKSPACE_ROOT is
 // always allowed; EXTRA_WORKSPACE_ROOTS (comma-separated absolute paths) opens
@@ -55,9 +55,13 @@ function resolveWithin(path: string, roots: string[]): string {
   throw new Error(`path outside workspace root: ${path}`);
 }
 
+// Writes also reach VOLUME_RUNTIME_WRITE_DIRS (the proposals dir). Every drafted gap-closing activity
+// ends with write_report to /workspace/proposals/<id>-report.json, the dir its readers scan, and this
+// guard refused it on every run, so each variant was graded failed whatever its real work did. The
+// dirs come after the workspace roots, so a relative path still resolves against WORKSPACE_ROOT.
 /** Validate a write/edit path and return its resolved absolute form. */
 export function resolveInAnyWorkspace(path: string, workspaceRoot: string): string {
-  return resolveWithin(path, allowedWorkspaceRoots(workspaceRoot));
+  return resolveWithin(path, [...allowedWorkspaceRoots(workspaceRoot), ...VOLUME_RUNTIME_WRITE_DIRS]);
 }
 
 // Reads also reach the volume dirs the substrate itself writes (VOLUME_RUNTIME_READ_DIRS: the pattern

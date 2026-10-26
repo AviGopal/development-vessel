@@ -14,8 +14,13 @@
 //   - the cutover loop in feature-compose.ts, when that predicate is true, skips
 //     resolveVesselMitosisCutover and settleSemanticDissent entirely (no push, no cutover, no
 //     landed_partial, no narrowed child) and instead parks the verified patch with reason
-//     "dissent_held" and writes the dissent's reason to failure_lessons through the existing
-//     appendComposeLesson write-back;
+//     "dissent_held";
+//   - qa RULING (supersedes an earlier BUSY/park-and-renew design): a held draft is a FAILED attempt,
+//     not a non-attempt. The held cutovers entry carries no `result` (no deferred/preserve_pending),
+//     so landingVerdictFromCutovers reads UNFAVORABLE (not BUSY), the landing lease RELEASES normally
+//     (cutoverPendingIn sees nothing pending — no renewal), and the EXISTING verdict-!==-FAVORABLE
+//     lesson block (not a new call) writes the dissent's reason to failure_lessons, with its class
+//     overridden to the queryable "semantic_dissent_held" instead of the generic fall-through;
 //   - the parked-landing resume (readParkedLanding -> resumeParkedLanding) refuses to auto-resume a
 //     dissent_held park, because resumeParkedLanding skips the semantic gate entirely ("the park
 //     already passed ... the semantic gate") — auto-resuming would silently push the very thing this
@@ -89,11 +94,51 @@ describe("systemAuthoredDissentHold: pure", () => {
   });
 });
 
+// A dissent-held draft is a FAILED attempt (qa ruling, superseding an earlier BUSY/park-and-renew design):
+// it charges through the EXISTING verdict-!==-FAVORABLE path (failed_attempts/escalation increment the normal
+// way), its lesson class is queryable as "semantic_dissent_held", and the landing lease is released normally —
+// NOT renewed, because nothing in the held cutovers entry reads as pending.
+describe("a held landing is a failed attempt: no lease renewal, charged as \"fix\"", () => {
+  let guard: FetchGuard;
+  let execGuard: ExecGuard;
+  beforeEach(() => { guard = installCutoverFetchGuard(); execGuard = installCutoverExecGuard(); });
+  afterEach(() => {
+    const execViolations = execGuard.restore();
+    expect(guard.restore()).toEqual([]);
+    expect(execViolations).toEqual([]);
+  });
+  afterAll(() => { restoreCutoverFetch(); restoreCutoverExecModules(); });
+
+  const pendingIn = exported<(o: { body?: { cutovers?: unknown } } | null) => boolean>("cutoverPendingIn");
+  const failureKind = exported<(i: { verdict: string; terminal_refusal: string | null; cutover_env_class: string | null; verify: unknown[]; semantic_judge_unavailable?: boolean }) => string | null>("composeFailureKind");
+
+  // The exact shape the held branch now pushes: {vessel, landed:false, reason} with NO `result` key.
+  const HELD_CUTOVERS = [{ vessel: "v", landed: false, reason: "semantic gate addresses:false on a system-authored landing; held for operator review, not pushed" }];
+
+  it("MUST-FAIL: a held landing's cutovers entry is NOT pending -> releaseOrKeepLandingLease releases, it does not renew", () => {
+    expect(pendingIn({ body: { cutovers: HELD_CUTOVERS } })).toBe(false);
+  });
+
+  it("CONTROL: the OLD (now-removed) deferred:true shape WOULD have renewed the lease — proving the new shape is a deliberate choice, not an oversight", () => {
+    expect(pendingIn({ body: { cutovers: [{ vessel: "v", landed: false, result: { deferred: true } }] } })).toBe(true);
+  });
+
+  it('MUST-FAIL: a held landing classifies as "fix" (charged, not a non-attempt) when verify passed and the judge was reachable', () => {
+    const kind = failureKind({ verdict: "UNFAVORABLE", terminal_refusal: null, cutover_env_class: null, verify: [{ ok: true, output: "", own: false }], semantic_judge_unavailable: false });
+    expect(kind).toBe("fix");
+  });
+
+  it("CONTROL: an actual environment condition (judge unavailable) still classifies as environment, not fix — the held case is distinct from an infra refusal", () => {
+    const kind = failureKind({ verdict: "UNFAVORABLE", terminal_refusal: null, cutover_env_class: null, verify: [{ ok: true, output: "", own: false }], semantic_judge_unavailable: true });
+    expect(kind).toBe("environment");
+  });
+});
+
 describe("the cutover loop's dissent-hold wiring (AST, comments/reflow-proof)", () => {
   const SRC_PATH = new URL("../../src/resolvers/feature-compose.ts", import.meta.url).pathname;
   const src = readFileSync(SRC_PATH, "utf8");
 
-  it("MUST-FAIL: the per-vessel landing loop computes systemDissentHold from the exported helper, parks it dissent_held, and never reaches the cutover or settleSemanticDissent calls when held", () => {
+  it("MUST-FAIL: the landing block computes systemDissentHold once (outside the per-vessel loop) from the exported helper, parks it dissent_held, and the held branch pushes NO `result` field, calls neither the cutover, settleSemanticDissent nor an explicit lesson write, and `continue`s", () => {
     const holdIdx = src.indexOf("const systemDissentHold = systemAuthoredDissentHold(");
     expect(holdIdx, "systemDissentHold must be computed from systemAuthoredDissentHold").toBeGreaterThan(-1);
     const parkReasonIdx = src.indexOf('reason: systemDissentHold ? "dissent_held" : "pre-cutover"');
@@ -103,13 +148,26 @@ describe("the cutover loop's dissent-hold wiring (AST, comments/reflow-proof)", 
     const cutIdx = src.indexOf("const cut = await resolveVesselMitosisCutover({", ifHoldIdx);
     expect(cutIdx, "the cutover call must come after (textually below) the hold branch").toBeGreaterThan(ifHoldIdx);
     const holdBlock = src.slice(ifHoldIdx, cutIdx);
-    // The hold branch writes the lesson, records a non-pushed cutover entry, and `continue`s before
-    // reaching resolveVesselMitosisCutover / settleSemanticDissent (neither name appears in the block).
-    expect(holdBlock.includes("appendComposeLesson(")).toBe(true);
-    expect(holdBlock.includes("semantic_dissent_held")).toBe(true);
     expect(/\bcontinue;/.test(holdBlock)).toBe(true);
+    // No fake pending result (qa ruling: no lease renewal), no explicit duplicate lesson write (the
+    // existing verdict-!==-FAVORABLE block below writes it instead), and no cutover/settle call.
+    expect(holdBlock.includes("deferred:")).toBe(false);
+    expect(holdBlock.includes("preserve_pending")).toBe(false);
+    expect(holdBlock.includes("appendComposeLesson(")).toBe(false);
     expect(holdBlock.includes("resolveVesselMitosisCutover(")).toBe(false);
     expect(holdBlock.includes("settleSemanticDissent(")).toBe(false);
+    // The cutovers entry it DOES push carries `landed: false` and a `reason`, no `result`.
+    expect(/cutovers\.push\(\{\s*vessel,\s*landed:\s*false,\s*reason:/.test(holdBlock)).toBe(true);
+  });
+
+  it('MUST-FAIL: the failure-lesson block (verdict !== FAVORABLE) overrides lessonClass to "semantic_dissent_held" for a held landing, reusing the EXISTING write-back instead of a new one', () => {
+    const lessonClassIdx = src.indexOf("const lessonClass = systemDissentHold");
+    expect(lessonClassIdx, "lessonClass must switch on systemDissentHold").toBeGreaterThan(-1);
+    const window = src.slice(lessonClassIdx, lessonClassIdx + 220);
+    expect(window.includes('"semantic_dissent_held"')).toBe(true);
+    expect(window.includes("composeLessonClass(")).toBe(true);
+    const appendIdx = src.indexOf("appendComposeLesson(lessonClass,", lessonClassIdx);
+    expect(appendIdx, "the EXISTING appendComposeLesson(lessonClass, ...) call must follow").toBeGreaterThan(lessonClassIdx);
   });
 
   it("MUST-FAIL: the parked-landing resume refuses to auto-resume a dissent_held park", () => {

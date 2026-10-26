@@ -10770,6 +10770,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // cutover that does not land can be undone. See the restore block after the loop.
   const preLiveSync = new Map<string, string | null>(); // abs live path -> bytes, or null if absent
   let parkedAny = false; // a verified patch was parked before its cutover (resumable landings)
+  // A SYSTEM-AUTHORED SOURCE landing whose semantic gate said addresses:false. Before this,
+  // semanticGateDisposition's land:true-with-dissent pushed anyway and settleSemanticDissent
+  // recorded the gate's refusal as PARTIAL only AFTER the push — so the gate's verdict was
+  // never load-bearing: measured, every one of 12 such landings since 2026-10-24 landed as
+  // landed_unverified regardless of what the gate said. Operator-directed work is unaffected
+  // (`directed === true` is goal-host's operator/edit-intent signal — the same one the
+  // autonomy-scope floor above reads as "directed work is never checked"): the push and the
+  // dissent record stay exactly as they were. One value for the whole landing (semanticDissent
+  // does not vary per touched vessel), computed once so the later failure-lesson block can read it.
+  const systemDissentHold = systemAuthoredDissentHold(semanticDissent, (pointer as { directed?: boolean }).directed, pointer.gap?.id);
   if (verdict === "FAVORABLE" && pointer.land) {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     for (const v of touched) {
@@ -10851,15 +10861,6 @@ const earlyAttempt = await Promise.race([
       }
       const shaRes = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vBase)} show ${shq(`HEAD:${changedRel[0]}`)} | sha256sum | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
-      // A SYSTEM-AUTHORED SOURCE landing whose semantic gate said addresses:false. Before this,
-      // semanticGateDisposition's land:true-with-dissent pushed anyway and settleSemanticDissent
-      // recorded the gate's refusal as PARTIAL only AFTER the push — so the gate's verdict was
-      // never load-bearing: measured, every one of 12 such landings since 2026-10-24 landed as
-      // landed_unverified regardless of what the gate said. Operator-directed work is unaffected
-      // (`directed === true` is goal-host's operator/edit-intent signal — the same one the
-      // autonomy-scope floor above reads as "directed work is never checked"): the push and the
-      // dissent record stay exactly as they were.
-      const systemDissentHold = systemAuthoredDissentHold(semanticDissent, (pointer as { directed?: boolean }).directed, pointer.gap?.id);
       // PARK BEFORE THE CUTOVER: everything up to here (verify + semantic gate) is the
       // expensive part; if the cutover is refused or the process is restarted, the park
       // is what survives and the next compose for this gap resumes it. For a systemDissentHold
@@ -10892,17 +10893,16 @@ const earlyAttempt = await Promise.race([
       // DISSENT HELD, NOT PARTIAL: no push, no cutover, no settleSemanticDissent (which records
       // landed_partial and mints a narrowed child, both ONLY meaningful for a landing that
       // happened — see its own "NO PHANTOM DISSENT" doc comment). The park above survives for an
-      // operator to resolve, and the reason is written to failure_lessons through the existing
-      // write-back (appendComposeLesson) so the next draft for this gap sees it, the same way any
-      // other semantic-gate rejection teaches the next attempt.
+      // operator to resolve. This cutovers entry carries no `result` (no `deferred`/
+      // `preserve_pending`), so landingVerdictFromCutovers reads it as UNFAVORABLE, not BUSY (qa
+      // ruling): a dissent-held draft IS a failed attempt — failed_attempts/escalation increment
+      // through the EXISTING verdict-!==-FAVORABLE lesson block below (composeLessonClass is
+      // overridden to "semantic_dissent_held" there so the class is queryable; that block is also
+      // where the reason reaches failure_lessons, so no separate appendComposeLesson call here), and
+      // the landing lease is RELEASED normally (cutoverPendingIn reads no pending result -> no
+      // renewal), not held for this gap.
       if (systemDissentHold) {
-        await appendComposeLesson(
-          "semantic_dissent_held",
-          `held, not landed: the semantic gate said addresses:false though the gap's own check went red->green: ${semanticDissent!.reason}`,
-          vessel,
-          pointer.gap,
-        );
-        cutovers.push({ vessel, landed: false, result: { deferred: true, kind: "semantic_dissent_held", reason: "semantic gate addresses:false on a system-authored landing; held for operator review, not pushed" } });
+        cutovers.push({ vessel, landed: false, reason: "semantic gate addresses:false on a system-authored landing; held for operator review, not pushed" });
         try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
         continue;
       }
@@ -11046,7 +11046,12 @@ const earlyAttempt = await Promise.race([
     // What the next drafter reads as "Verify failure from prior attempt" (priorAttemptFeedbackBlock): this draft's
     // failure, never the log's first error or its tail, both of which can be red on the parent (verifyFailureReason).
     const firstTscError = verifyFailureReason(verify.find((v) => !v.ok));
-    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? omissionReason ?? ""), scopeWithheld);
+    // A dissent-held landing is a FAILED attempt (qa ruling), charged through this EXISTING path
+    // like any other semantic-gate rejection — but its class says WHY: the own check went red->green
+    // and the gate still said addresses:false, which classifyComposeFailure's generic fall-through
+    // (semantic_reject) would not distinguish from an ordinary rejection. Queryable on the gap's
+    // failure_lessons as classification_metadata.failure_lessons[].class.
+    const lessonClass = systemDissentHold ? "semantic_dissent_held" : composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? omissionReason ?? ""), scopeWithheld);
     // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
     // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
     if (pointer.gap?.id && firstTscError && !gapClosedInStore) {

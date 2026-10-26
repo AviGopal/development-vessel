@@ -27,7 +27,6 @@ import { join } from "path";
 import { resolveFsRead } from "../../src/resolvers/fs-read.js";
 import { resolveInAnyWorkspaceForRead } from "../../src/resolvers/workspace-roots.js";
 import { OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE } from "../../src/seed/observe-and-author-from-gaps.js";
-import { PROPOSALS_DIR } from "../../src/config.js";
 
 const PINNED = ["WORKSPACE_ROOT", "EXTRA_WORKSPACE_ROOTS", "FS_READ_EXTRA_ROOTS", "MITOSIS_RUNTIME_DIR"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -77,14 +76,14 @@ describe("observe-and-author-from-gaps read_dedupe_map reads the volume proposal
     expect(map["the-example-gap-id"]).toBe("2026-10-01T00:00:00.000Z");
   });
 
-  test("x.json under the real PROPOSALS_DIR constant is a read root", async () => {
-    const r = await resolveFsRead({ type: "fs_read", path: `${PROPOSALS_DIR}/x.json`, allow_missing: true });
+  test("x.json under the default proposals dir is a read root", async () => {
+    const r = await resolveFsRead({ type: "fs_read", path: `${proposalsDirDefault}/x.json`, allow_missing: true });
     expect((r.body as { missing?: boolean }).missing).toBe(true);
   });
 
   test("the shared read guard (fs_list, fs_grep) accepts the proposals dir", () => {
-    expect(resolveInAnyWorkspaceForRead(PROPOSALS_DIR, root)).toBe(PROPOSALS_DIR);
-    expect(resolveInAnyWorkspaceForRead(`${PROPOSALS_DIR}/x.json`, root)).toBe(`${PROPOSALS_DIR}/x.json`);
+    expect(resolveInAnyWorkspaceForRead(proposalsDirDefault, root)).toBe(proposalsDirDefault);
+    expect(resolveInAnyWorkspaceForRead(`${proposalsDirDefault}/x.json`, root)).toBe(`${proposalsDirDefault}/x.json`);
   });
 });
 

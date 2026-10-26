@@ -92,6 +92,31 @@ export function blindRepairEdit(
   return { old_string: bound.anchor, new_string: replacement };
 }
 
+/**
+ * THE REPAIR ROUND'S old_string, BOUND TO THE FILE AS IT IS NOW (agf_4ukvuyt3mad9). Pure: the caller read `content` in this
+ * round, just before writing. A verbatim anchor is used as it is. Otherwise the anchor is matched with every run of
+ * whitespace in it standing for any run of whitespace (indentation, a wrapped line, CRLF), and only when that matches
+ * EXACTLY ONE place is the file's own text there returned. Nothing but whitespace is tolerated: a changed token, quote or
+ * character, a single-token anchor, or a second match is refused, never guessed. When the anchor began with indentation,
+ * the bound text starts at its line's indentation so the replacement's own indentation takes its place.
+ */
+export function resolveRepairAnchor(content: string, oldString: string): { anchor: string; via: "verbatim" | "whitespace" } | { refused: "repair_anchor_absent" | "repair_anchor_non_unique"; hits: number } {
+  if (oldString && content.includes(oldString)) return { anchor: oldString, via: "verbatim" };
+  const tokens = oldString.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length < 2) return { refused: "repair_anchor_absent", hits: 0 };
+  const re = new RegExp(tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"), "g");
+  const hits = [...content.matchAll(re)];
+  if (hits.length !== 1) return { refused: hits.length === 0 ? "repair_anchor_absent" : "repair_anchor_non_unique", hits: hits.length };
+  let start = hits[0]!.index!;
+  const end = start + hits[0]![0].length;
+  if (/^[ \t]/.test(oldString)) {
+    let s = start;
+    while (s > 0 && (content[s - 1] === " " || content[s - 1] === "\t")) s--;
+    if (s === 0 || content[s - 1] === "\n") start = s;
+  }
+  return { anchor: content.slice(start, end), via: "whitespace" };
+}
+
 export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
   for (const op of ops) {
@@ -10217,17 +10242,21 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;
+          // The anchor is bound to the bytes read just now: verbatim, or the one place it matches modulo whitespace.
+          const bound = cur.ok && typeof curContent === "string" ? resolveRepairAnchor(curContent, String(fix.old_string)) : null;
+          const osAnchor = bound && "anchor" in bound ? bound.anchor : String(fix.old_string);
           const osBase = typeof curContent === "string" ? (preEditContent.get(efAbs) ?? curContent) : "";
-          const osSpan = osBase ? baseSpanOfOp(osBase, { kind: "edit", old_string: String(fix.old_string) }) : null;
-          const osRefusal = osBase ? checkOpNoEffect({ path: efNorm, kind: "edit", old_string: String(fix.old_string) }, osBase, priorLessons) : null;
+          const osSpan = osBase ? baseSpanOfOp(osBase, { kind: "edit", old_string: osAnchor }) : null;
+          const osRefusal = osBase ? checkOpNoEffect({ path: efNorm, kind: "edit", old_string: osAnchor }, osBase, priorLessons) : null;
           if (osRefusal) {
             noteNoEffectRefusal("fc-repair edit", osRefusal);
-          } else if (cur.ok && typeof curContent === "string" && !curContent.includes(String(fix.old_string))) {
+          } else if (cur.ok && typeof curContent === "string" && !curContent.includes(osAnchor)) {
             // Was silent: a repair whose anchor is not in the file wrote nothing and logged nothing (CHANGE-33/R1).
-            console.warn(`[fc-repair] edit REFUSED ${ef}: old_string not found in the file's current content (${JSON.stringify(String(fix.old_string).slice(0, 80))})`);
-          } else if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
+            console.warn(`[fc-repair] edit REFUSED ${ef}: old_string not found in the file's current content (${JSON.stringify(String(fix.old_string).slice(0, 80))})${bound && "refused" in bound && bound.hits > 1 ? ` — it matches ${bound.hits} places modulo whitespace, so none is chosen` : ""}`);
+          } else if (cur.ok && typeof curContent === "string" && curContent.includes(osAnchor)) {
+            if (bound && "anchor" in bound && bound.via === "whitespace") console.log(`[fc-repair] edit ${ef}: old_string bound to the file's bytes modulo whitespace (one match)`);
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
-            const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
+            const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: osAnchor, new_string: String(fix.new_string ?? "") });
             if (w.ok) { if (osSpan) repairSpans.push(spanRecord(efNorm, osBase, osSpan.start, osSpan.end)); anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); await recordPostEdit(efAbs); }
           }
         }

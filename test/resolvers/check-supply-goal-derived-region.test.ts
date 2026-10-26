@@ -51,14 +51,17 @@ describe("the check goal names the gate's derived region", () => {
   it("[CONTROL] a row with no derivable region gets the goal byte-unchanged", () => {
     const plain: string = supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), []);
     expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [], [], {})).toBe(plain);
-    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [], [], { must_fail: "g fails somehow" })).toBe(plain);
+    // The row's must-fail is said to the drafter (mustFailControlSentence), but no region sentence is added.
+    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [], [], { must_fail: "g fails somehow" })).toBe(plain.replace(supply.mustFailControlSentence(null), supply.mustFailControlSentence({ must_fail: "g fails somehow" })));
     expect(plain).not.toContain("Assert on THIS");
   });
 
   it("[CONTROL] a literal region in the site (no region gate) and a goal with no reader are byte-unchanged", () => {
     const lit = { ...META, region: "throw new Error" };
-    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [], [], lit)).toBe(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), []));
-    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, undefined, [], [], META)).toBe(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, undefined, []));
-    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader({}), [], [], META)).toBe(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader({}), []));
+    // Unchanged but for the row's must-fail, which every code-site goal now carries (mustFailControlSentence).
+    const withRow = (goal: string): string => goal.replace(supply.mustFailControlSentence(null), supply.mustFailControlSentence(META));
+    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [], [], lit)).toBe(withRow(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader(FILES), [])));
+    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, undefined, [], [], META)).toBe(withRow(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, undefined, [])));
+    expect(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader({}), [], [], META)).toBe(withRow(supply.checkSupplyGoal(V, CHECK, SUMMARY, SITE, reader({}), [])));
   });
 });

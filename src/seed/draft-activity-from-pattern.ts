@@ -124,24 +124,24 @@ Use ONLY these resolvers and these exact config shapes:
 
 PREFER TYPED SUBSTRATE RESOLVERS over raw http_fetch for substrate-internal data (core principle: resolvers live where the data lives; the backend is a trace store, NOT a universal HTTP resolver). The pruned vocabulary above lists the substrate's typed resolvers — use them by name as a task's "resolver" with their documented config. In particular, for resolver/output-shape usage and orphan detection use:
   { "type": "resolver_pattern_report" }  → emits resolverPatternReport whose body.rows is [{ resolver_id, output_shape, count, success_count, failure_count, success_rate }] over a recent window — the authoritative orphan signal (count==0 ⇒ orphaned). It runs in-vessel with auth; a raw http_fetch GET to activity-api returns 401 and is the wrong tool.
-Reserve http_fetch for genuinely external endpoints or writes (e.g. concept_create_write POST to concept-db). Pass a typed resolver's output into the next LLM task as {{<task_id>_text}}.
+Reserve http_fetch for genuinely external endpoints and the activity-api GET reads listed below. A substrate WRITE is never an http_fetch POST: it is a resolver task named by its *_write shape (see SUBSTRATE WRITES below). Pass a typed resolver's output into the next LLM task as {{<task_id>_text}}.
 
 Cross-task data flows through {{<prior_task_id>_text}} interpolation (the raw text output of an earlier task). There is no {{shape.field}} addressing — to use a field from a prior JSON output, either json_path_extract it into its own task first, or pass the whole {{<task>_text}} into the next prompt.
 
-CRITICAL — embedding a prior task's output inside a JSON "body" string: raw text contains quotes and newlines that BREAK the JSON body when placed inside quotes. Do NOT write "content": "{{classify_text}}". Instead use the {{<task>_json}} form, which expands to an already-quoted, escaped JSON string literal — place it WITHOUT surrounding quotes:
-  "body": "{\\"pointer\\":{\\"type\\":\\"concept_create_write\\",\\"conceptData\\":{\\"shape\\":\\"<snake>\\",\\"source_type\\":\\"extracted\\",\\"summary\\":\\"<short literal>\\",\\"content\\":{{classify_orphaned_shapes_json}},\\"priority\\":0.5,\\"budget\\":2000}}}"
-Note "content":{{..._json}} has NO quotes around the token (the _json form supplies them). Keep "summary" a short literal you write yourself (no interpolation) so the body stays valid even if an upstream task returned nothing.
+CRITICAL — embedding a prior task's output inside an EXTERNAL http_fetch JSON "body" string: raw text contains quotes and newlines that BREAK the JSON body when placed inside quotes. Use the {{<task>_json}} form there, which expands to an already-quoted, escaped JSON string literal, and place it WITHOUT surrounding quotes (e.g. "body": "{\\"text\\":{{classify_json}}}"). A resolver task's "config" is a JSON OBJECT, not a string, so inside it a plain "content": "{{classify_text}}" is correct.
 
-Substrate write endpoints (use http_fetch POST with a JSON-string body of EXACTLY this shape):
-- concept_create_write → http://127.0.0.1:8260/v2/impulses/resolve
-  body (stringified): {"pointer":{"type":"concept_create_write","conceptData":{"shape":"<snake_case>","source_type":"extracted","summary":"<text>","content":"<text>","priority":0.5,"budget":2000}}}
-- substrateGap_write → http://127.0.0.1:8270/v2/impulses/resolve
+SUBSTRATE WRITES ARE RESOLVER TASKS. Every *_write shape a vessel serves (in the pruned vocabulary or named by the cluster) is dispatchable BY NAME: goal-host's discovery proxy finds the vessel that serves the shape at run time and sends it the task's config as the write's pointer, so the write is routed, attributed to the run, and seen by the write door. An http_fetch POST to a vessel's /resolve route hides the write inside a body string, and a loopback port is dead on any node that does not run that vessel. Form:
+  { "id": "<id>", "description": "<>=40 chars>", "resolver": "<shape>_write", "config": { <the write's pointer fields> }, "outputShapes": ["<shape>_write"] }
+The config holds only the write's own fields: no "type", "url", "method", "headers" or "body". Do not add dispatch_id, execution_id or template_id; registration stamps the run's attribution onto the write. Examples:
+- concept_create_write: config { "conceptData": { "shape": "<snake_case>", "source_type": "extracted", "summary": "<short literal>", "content": "{{<classify_task>_text}}", "priority": 0.5, "budget": 2000 } }
+- substrateGap_write: config { "gap": { "id": "<stable id>", "category": "<category>", "source": "<this template id>", "summary": "<short literal>", "status": "open" } }
+
 - activity-api reads — use these EXACT paths (other paths 404/401; GETs to these serve substrate-public data with no auth header needed):
     templates / advertised output shapes: GET http://127.0.0.1:8080/v2/activities/templates?limit=200
     recent execution traces / invocations:  GET http://127.0.0.1:8080/v2/activities/execution-traces?limit=50
   Do NOT invent shorter forms like /v2/templates or /v2/traces/recent — they do not exist.
 
-The LAST task MUST produce the cluster's output shape so executing the template yields it.
+The LAST task MUST produce the cluster's output shape so executing the template yields it. When the cluster's output shape, or the consumer it feeds, is a vessel-served *_write shape, the LAST task IS that resolver task ({ "resolver": "<shape>_write" }), and the *_write shape appears in BOTH that task's outputShapes and the template's top-level outputShapes.
 
 Output ONLY a single JSON object matching the ActivityTemplate shape. No
 markdown fences, no surrounding prose. The id MUST begin with

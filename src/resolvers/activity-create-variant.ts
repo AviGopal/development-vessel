@@ -235,6 +235,67 @@ export function collectTaskProducedShapes(template: Record<string, unknown>): Se
   return produced;
 }
 
+/** A shape whose resolve writes a vessel's store (the `_write` suffix family, as goal-host's isStoreWriteShape). */
+const VESSEL_WRITE_SHAPE = /_write$/;
+
+/**
+ * A DRAFTED SUBSTRATE WRITE IS A RESOLVER TASK, NOT AN http_fetch POST.
+ *
+ * The pattern drafter was told to POST a write's pointer to a vessel's /resolve route through
+ * http_fetch, so the write lived inside a body string: invisible to the write doors (which read the
+ * task's resolver and declared shapes), unattributed, and pinned to a loopback port that is dead on a
+ * node that does not run the vessel. goal-host registers a discovery-proxy resolver for every shape a
+ * vessel advertises, so `{ resolver: "<shape>_write", config: <pointer fields> }` routes the same write
+ * by shape at run time. This rewrites the http_fetch form the drafter still emits into that one, and
+ * for every write task (rewritten or authored that way):
+ *   - the write shape is in the task's outputShapes, and, when it is the LAST task, in the template's;
+ *   - the write carries the run that made it: execution_id as the engine-seeded {{execution_id}} token,
+ *     and template_id as this template's id (no run-time token names the template). dispatch_id is not
+ *     stamped: the run's variables and the proxy's dispatch attribution carry it, and a {{dispatch_id}}
+ *     token would stay literal on a run that has no dispatch.
+ * A field the draft set itself is never replaced. An http_fetch whose body is not an impulse pointer
+ * (an external endpoint) is left alone. Mutates the template in place.
+ */
+export function routeVesselWritesAsResolverTasks(template: Record<string, unknown>): void {
+  const tasks = Array.isArray(template["tasks"]) ? (template["tasks"] as Record<string, unknown>[]) : [];
+  const templateId = String(template["id"] ?? "");
+  for (const task of tasks) {
+    if (!task || typeof task !== "object") continue;
+    const cfg = (task["config"] && typeof task["config"] === "object" ? task["config"] : {}) as Record<string, unknown>;
+    if ((task["resolver"] === "http_fetch" || cfg["type"] === "http_fetch")
+      && String(cfg["method"] ?? "").toUpperCase() === "POST"
+      && /\/resolve(\?|$)/.test(String(cfg["url"] ?? ""))) {
+      let body: unknown = cfg["body"];
+      if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = undefined; } }
+      const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+      const imp = b["impulse"] as Record<string, unknown> | undefined;
+      const ptr = (imp && typeof imp["pointer"] === "object" ? imp["pointer"] : b["pointer"]) as Record<string, unknown> | undefined;
+      const shape = ptr && typeof ptr["type"] === "string" ? ptr["type"] : "";
+      if (VESSEL_WRITE_SHAPE.test(shape)) {
+        const { type: _t, ...fields } = ptr!;
+        task["resolver"] = shape;
+        task["config"] = fields;
+      }
+    }
+    const resolver = String(task["resolver"] ?? "");
+    if (!VESSEL_WRITE_SHAPE.test(resolver)) continue;
+    const wcfg = (task["config"] && typeof task["config"] === "object" ? task["config"] : (task["config"] = {})) as Record<string, unknown>;
+    if (wcfg["execution_id"] === undefined) wcfg["execution_id"] = "{{execution_id}}";
+    if (wcfg["template_id"] === undefined && templateId) wcfg["template_id"] = templateId;
+    const os = Array.isArray(task["outputShapes"]) ? (task["outputShapes"] as string[]) : [];
+    if (!os.includes(resolver)) task["outputShapes"] = [...os, resolver];
+  }
+  const last = tasks[tasks.length - 1];
+  const lastShape = last && typeof last === "object" ? String(last["resolver"] ?? "") : "";
+  if (VESSEL_WRITE_SHAPE.test(lastShape)) {
+    const declared = Array.isArray(template["outputShapes"]) ? (template["outputShapes"] as string[])
+      : Array.isArray(template["output_shapes"]) ? (template["output_shapes"] as string[]) : [];
+    const shapes = declared.includes(lastShape) ? [...declared] : [...declared, lastShape];
+    template["outputShapes"] = shapes;
+    template["output_shapes"] = [...shapes];
+  }
+}
+
 /**
  * Reachability check: returns the declared template output shapes that are
  * NOT produced by any task. An empty array means every declared output is
@@ -593,6 +654,9 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     const isPermissiveScope =
       tid.startsWith("proposed_pattern_authored_")
       || (pointer as unknown as Record<string, unknown>)["validate_permissive_scope"] === true;
+    // Before the invariants, so I5 judges the write shape the rewritten task produces. Permissive scope
+    // only: the gap-closing path below allows http_fetch and not a *_write resolver.
+    if (isPermissiveScope) routeVesselWritesAsResolverTasks(t);
     // Apply the substrate-authored default BEFORE the invariants run so I6
     // sees the proposed=true flag the registration would actually carry.
     // Operator seeds keep opt-out via an explicit proposed=false.

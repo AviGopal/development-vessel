@@ -15,6 +15,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-ownlit-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -162,6 +163,7 @@ async function landAndArm(prefix: string, at: { vessel: string; siteRel: string 
   writeFileSync(join(CLONES, at.vessel, checkPathOf(id)), check);
   git(at.vessel, "add", "-A");
   git(at.vessel, "commit", "-q", "-m", `check ${id}`);
+  landCheck(join(CLONES, at.vessel), checkPathOf(id));
   await tick(later());
   return { id, row: (await storeRow(id))! };
 }
@@ -179,6 +181,7 @@ describe("a correct check on a literal-own-site row (the replacement control)", 
     writeFileSync(join(CLONES, OWN.vessel, "test/checks/own-literal.check.ts"), CHECK_OWN);
     git(OWN.vessel, "add", "-A");
     git(OWN.vessel, "commit", "-q", "-m", "the control check");
+    landCheck(join(CLONES, OWN.vessel), "test/checks/own-literal.check.ts");
     const at = OWN_SRC.indexOf(LITERAL);
     expect(OWN_SRC.split(LITERAL).length - 1).toBe(1);
     const m = regionStatementMutant(OWN_SRC, at, at + LITERAL.length, OWN.siteRel)!;

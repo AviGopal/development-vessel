@@ -17,6 +17,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-settle-once-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -173,6 +174,7 @@ describe("an unknown verdict keeps the row's state", () => {
   const landed = (id: string): string => {
     const tf = `test/checks/${id}.check.ts`;
     writeFileSync(join(CLONES, VESSEL, tf), `import { expect, test } from "bun:test";\nimport * as mod from "../../src/widget";\ntest("widget is two ${RUN}", () => { expect(mod.widget).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), tf);
     return tf;
   };
 

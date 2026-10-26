@@ -23,6 +23,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-checkfile-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -195,6 +196,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     await tick(later());
     const title = `p3 widget is two ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     const m = metaOf(await storeRow(id));
     expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
@@ -236,6 +238,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     const first = goalFor(id)[0]!.goal;
     const title = `p3 green memory ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(1); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     const judged = ledgerOf(await storeRow(id));
     expect(judged["state"]).toBe("green_at_head");
@@ -265,6 +268,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     await tick(later());
     const title = `p3 net red ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", async () => { const r = await fetch("http://127.0.0.1:1/"); expect(r.ok && mod.widget === 2).toBe(true); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     const m = metaOf(await storeRow(id));
     expect(m["evidence_resolve"]).toBeUndefined();
@@ -278,6 +282,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     await tick(later());
     const title = `p3 noreason ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     stripRedReason = true;
     await tick(later());
     expect(metaOf(await storeRow(id))["evidence_resolve"]).toBeUndefined();
@@ -291,6 +296,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     await tick(later());
     const title = `p3 dyn ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}test("${title}", async () => { const m = await import("../../src/widget.ts"); expect(m.widget).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
     expect(metaOf(await storeRow(id))["edit_site"]).toBe(SITE);
@@ -303,6 +309,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     const title = `p3 typeonly ${RUN}`;
     // an assertion red that never touches the erased binding: only W2 can refuse it
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import type * as mod from "../../src/widget";\ntest("${title}", () => { expect(2).toBe(1); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     expect(metaOf(await storeRow(id))["evidence_resolve"]).toBeUndefined();
     expect(ledgerOf(await storeRow(id))["state"]).toBe("arm_refused");
@@ -315,6 +322,7 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     await tick(later());
     const title = `p3 typeplus ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import type { widget as W } from "../../src/widget";\nimport * as mod from "../../src/widget";\ntest("${title}", () => { const w: typeof W = mod.widget; expect(w).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await tick(later());
     expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
     expect(metaOf(await storeRow(id))["edit_site"]).toBe(SITE);

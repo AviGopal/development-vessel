@@ -14,6 +14,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-echo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -173,6 +174,7 @@ describe("echo-satisfiable checks are refused at arm", () => {
     writeFileSync(join(CLONES, CDB.vessel, checkPathOf(id)), CHECK_ECHO);
     git(CDB.vessel, "add", "-A");
     git(CDB.vessel, "commit", "-q", "-m", `check ${id}`);
+    landCheck(join(CLONES, CDB.vessel), checkPathOf(id));
     await tick();
     const row = await storeRow(id);
     expect(ledgerOf(row)["state"]).toBe("arm_refused");

@@ -64,6 +64,9 @@ test("an edit-site mutation gate refusal writes arm_refused AND logs one line na
   // The fixture check's test call is assembled, so this file declares only its own title to a title reader.
   const declare = "test";
   writeFileSync(join(CLONES, V, testFile), `import { describe, expect, test } from "bun:test";\nimport * as mod from "../../src/widget";\ndescribe("widget", () => {\n  ${declare}("${TITLE}", () => { expect(mod.score(3)).toBe(7); });\n});\n`);
+  // The arm reads the check where it has LANDED (the clone's origin/dev), so the check is committed and that ref set.
+  const git = (...a: string[]) => Bun.spawnSync(["git", "-C", join(CLONES, V), "-c", "commit.gpgsign=false", ...a], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  for (const a of [["init", "-q", "-b", "dev"], ["add", "-A"], ["commit", "-q", "-m", "land the check"], ["update-ref", "refs/remotes/origin/dev", "HEAD"]]) expect(git(...a).exitCode).toBe(0);
   lines.length = 0;
   await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: (now += 30 * 3600_000) } as never);
   await sg.__settleBirthEvaluationsForTests();

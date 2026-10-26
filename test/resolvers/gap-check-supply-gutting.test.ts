@@ -24,6 +24,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-gut-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -158,6 +159,7 @@ async function landAndArm(prefix: string, check: string, e: ReturnType<typeof ev
   writeFileSync(join(CLONES, at.vessel, checkPathOf(id)), check);
   git(at.vessel, "add", "-A");
   git(at.vessel, "commit", "-q", "-m", `check ${id}`);
+  landCheck(join(CLONES, at.vessel), checkPathOf(id));
   await tick();
   return (await storeRow(id))!;
 }
@@ -168,6 +170,7 @@ async function gutGate(prefix: string, check: string, at: { vessel: string; site
   writeFileSync(join(CLONES, at.vessel, testFile), check);
   git(at.vessel, "add", "-A");
   git(at.vessel, "commit", "-q", "-m", `check ${prefix}`);
+  landCheck(join(CLONES, at.vessel), testFile);
   const gate = supply["guttingGate"] as (a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[] }) => Promise<{ kind: string; reason?: string; record?: Row }>;
   return gate({ vessel: at.vessel, siteRel: at.siteRel, testFile, checkSrc: check, titles: supply.declaredTestTitles(check) });
 }

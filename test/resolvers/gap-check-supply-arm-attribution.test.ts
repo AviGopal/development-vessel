@@ -16,6 +16,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-armattr-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -192,8 +193,10 @@ function T(prefix: string): string {
   throw new Error("no treatment id");
 }
 const checkPathOf = (id: string): string => `test/checks/${(csa["checkSupplyCheckFile"] as (x: string) => string)(id)}`;
-const writeCheck = (id: string, title: string, expected: number): void =>
+const writeCheck = (id: string, title: string, expected: number): void => {
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(${expected}); });\n`);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
+};
 let clock = Date.now() + 5000 * 3600_000;
 const later = (): number => (clock += 30 * 3600_000);
 /** A minute on: inside every outcome bound, so a dispatched row with no titles is left unwritten (the store reads newest first). */
@@ -269,6 +272,7 @@ describe("the arm entry is a copy taken at arm time", () => {
     expect(w.shape).not.toBe("structuredError");
     await asHolder(() => sg.__settleBirthEvaluationsForTests());
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${first}", () => { expect(mod.widget).toBe(2); });\ntest("attr copy second ${RUN}", () => { expect(mod.widget).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), checkPathOf(id));
     await forwardingTick(later(), C); // C hands the new check off: the row's handed_off_from is now C's
     const led = ledgerOf(await stored(id));
     expect(led["handed_off_from"]).toBe(C);
@@ -287,6 +291,7 @@ async function reattempt(id: string, n: number): Promise<void> {
   await asHolder(() => sg.__settleBirthEvaluationsForTests());
   const tests = Array.from({ length: n }, (_, i) => `test("attr rearm ${i} ${RUN}", () => { expect(mod.widget).toBe(2); });`).join("\n");
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\n${tests}\n`);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
 }
 const armsOf = async (id: string): Promise<Row[]> => ((ledgerOf(await stored(id))["arms"] ?? []) as Row[]);
 

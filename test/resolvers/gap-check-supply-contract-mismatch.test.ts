@@ -19,6 +19,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-contract-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -142,6 +143,7 @@ async function landAndArm(prefix: string, check: string): Promise<Row> {
   await tick(later());
   expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: SITE });
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
   await tick(later());
   return (await storeRow(id))!;
 }

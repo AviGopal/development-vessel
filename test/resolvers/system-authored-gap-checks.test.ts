@@ -32,6 +32,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests, __setDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `sys-gap-checks-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -104,6 +105,7 @@ beforeAll(() => {
   writeFileSync(join(RUNTIME, VESSEL, "src", "shell-containment.ts"), "export function containShell(cmd: string): boolean { return true; }\n");
   for (const f of ["site-x.ts", "site-y.ts"]) writeFileSync(join(CLONES, VESSEL, "src", f), `export const ${f.replace(/\W/g, "_")} = 1;\n`);
   writeFileSync(join(CLONES, VESSEL, EXISTING_TEST), `import { expect, test } from "bun:test";\nimport { containShell } from "./shell-containment.js";\ntest("allows ls", () => { expect(containShell("ls")).toBe(true); });\n`);
+  landCheck(join(CLONES, VESSEL), EXISTING_TEST);
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -281,6 +283,7 @@ async function landTest(prefix: string, content: (title: string) => string, at: 
   expect(testFile).toMatch(CHECK_RE);
   const title = `${prefix} reproduces ${RUN}`;
   writeFileSync(join(CLONES, VESSEL, testFile), content(title));
+  landCheck(join(CLONES, VESSEL), testFile);
   return { id, title, testFile };
 }
 const IMPORTING_RED = (title: string): string => `import { expect, test } from "bun:test";\nimport { containShell } from "../../src/shell-containment.js";\ntest("${title}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`;
@@ -348,6 +351,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     expect(led["baseline_titles"]).toEqual([oldTitle]);
     const newTitle = `sgc-baseline new red ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, testFile), readFileSync(join(CLONES, VESSEL, testFile), "utf-8") + `test("${newTitle}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`);
+    landCheck(join(CLONES, VESSEL), testFile);
     verdictFor = () => "present";
     await tick({ now_ms: t0 + 31 * 3600_000 });
     const m = metaOf(await storeRow(id));
@@ -389,6 +393,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\ntest("noimport red ${RUN}", () => { expect(1).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), testFile);
     await tick({ now_ms: Date.now() + 2700 * 3600_000 });
     const m = metaOf(await storeRow(id));
     expect(m["evidence_resolve"]).toBeUndefined();
@@ -406,6 +411,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_y_ts } from "../../src/site-y.js";\ntest("otherimport red ${RUN}", () => { expect(site_y_ts).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), testFile);
     await tick({ now_ms: Date.now() + 2900 * 3600_000 });
     const m = metaOf(await storeRow(id));
     expect(m["evidence_resolve"]).toBeUndefined();
@@ -423,6 +429,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_x_ts } from "../../src/site-x.js";\ntest("siteimport red ${RUN}", () => { expect(site_x_ts).toBe(2); });\n`);
+    landCheck(join(CLONES, VESSEL), testFile);
     await tick({ now_ms: Date.now() + 3100 * 3600_000 });
     const m = metaOf(await storeRow(id));
     expect(m["falsifier"]).toBe("class2");
@@ -632,6 +639,7 @@ describe("system-authored gap checks: (g) anchors come from the evidence and res
     expect(supply).not.toBeNull();
     mkdirSync(join(CLONES, VESSEL, "src", "seed"), { recursive: true });
     writeFileSync(join(CLONES, VESSEL, "src", "seed", "shell-ticks.ts"), "export const SHELL_TICKS = [{ id: \"shell-tick\", resolver: \"shell_report\" }];\n");
+    landCheck(join(CLONES, VESSEL, "src", "seed"), "shell-ticks.ts");
     const id = T("sgc-config");
     await seed(id, `config fixture ${RUN}: the shell report tick is systematically failing`, { edit_site: `repos/${VESSEL}/src/seed/shell-ticks.ts` });
     await tick({ now_ms: Date.now() + 2003 * 3600_000 });

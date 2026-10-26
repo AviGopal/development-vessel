@@ -97,7 +97,8 @@ import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./re
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY } from "../config.js";
-import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
+import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
+import { testChildEnv } from "../test-child-env.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
@@ -202,6 +203,37 @@ const firstFailureOf = (redReason: unknown): Row | null => {
 };
 const clonesRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
 const runtimeRoot = (): string => process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels";
+
+/** The arm's and the re-evaluation's reason for a check that is in no landed tree. */
+export const CHECK_NOT_LANDED = "check_not_landed";
+export type LandedCheck = { state: "landed"; src: string } | { state: "absent" } | { state: "unreadable" };
+/**
+ * THE CHECK AS LANDED: the supplied test file read from the vessel clone's origin/dev (the ref the mirror keeps), in the
+ * object store, never the work tree. The arm read the work tree, so a check a REFUSED cutover left there untracked
+ * armed its gap; the mirror's next refresh removed the file and the gap stayed armed on a check no tree holds, so every
+ * fix draft for it ran a missing file and was "unjudged" (81 of 99 armed own-check runs on one node, 2026-10-26). Read
+ * from the blob, an untracked edit cannot add a title either. "absent": origin/dev is readable and holds no such file;
+ * "unreadable": the clone has no origin/dev (neither arms nor un-arms). `refs` caches the ref read per vessel per tick.
+ * No fetch: the tick has none of its own; the mirror moves origin/dev.
+ */
+export function landedCheckSource(vessel: string, testFile: string, refs?: Map<string, boolean>): LandedCheck {
+  const dir = join(clonesRoot(), vessel);
+  let ok = refs?.get(vessel);
+  if (ok === undefined) {
+    ok = sweepGitOut(dir, ["rev-parse", "--verify", "-q", "origin/dev^{commit}"]) !== null;
+    refs?.set(vessel, ok);
+  }
+  if (!ok) return { state: "unreadable" };
+  const rel = normalize(testFile).replace(/^(?:\.\/)+/, "");
+  if (sweepGitOut(dir, ["cat-file", "-e", `origin/dev:${rel}`]) === null) return { state: "absent" };
+  // Read whole (sweepGitOut trims): the source is the check as landed, byte for byte (a lesson keeps its excerpt).
+  let src: string | null = null;
+  try {
+    const p = Bun.spawnSync(["git", "-C", dir, "show", `origin/dev:${rel}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000, env: testChildEnv() });
+    if (p.exitCode === 0) src = new TextDecoder().decode(p.stdout);
+  } catch { /* spawn failed: unreadable */ }
+  return src === null ? { state: "unreadable" } : { state: "landed", src };
+}
 
 /**
  * NEEDS-LOCALIZATION: an open gap the lane cannot take only because it has no check of its own (or no edit site),
@@ -1720,6 +1752,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   const resettled: Array<{ id: string; dispatch_id: string | null }> = [];
 
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
+  const landedRefs = new Map<string, boolean>();
   let armBudget = perTick;
   for (const row of open) {
     // A forwarding node reads on past a spent budget: a row waiting on, or settled by, the holder spends none.
@@ -1729,10 +1762,15 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const ledger = ledgerOf(meta);
     // A failed or lost goal's test may still land late: its titles arm the gap all the same.
     if (!(ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
-    const path = join(clonesRoot(), ledger.vessel, ledger.test_file);
-    if (!existsSync(path)) continue;
-    let src = "";
-    try { src = readFileSync(path, "utf-8"); } catch { src = ""; }
+    // LANDED, NOT PRESENT: the check is read from the clone's origin/dev (landedCheckSource). A file only in the work
+    // tree (a refused cutover's leftover, or a landing still on its way) arms nothing and writes nothing: if it lands,
+    // a later tick arms it.
+    const landed = landedCheckSource(ledger.vessel, ledger.test_file, landedRefs);
+    if (landed.state !== "landed") {
+      if (existsSync(join(clonesRoot(), ledger.vessel, ledger.test_file))) notArmed.push({ id, reason: `${CHECK_NOT_LANDED}: ${ledger.test_file} is in the clone's work tree but not at origin/dev${landed.state === "unreadable" ? " (origin/dev unreadable)" : ""}` });
+      continue;
+    }
+    const src = landed.src;
     const baseline = Array.isArray(ledger.baseline_titles) ? ledger.baseline_titles : [];
     const titles = declaredTestTitles(src).filter((t) => !baseline.includes(t)).slice(0, 20);
     if (titles.length === 0) continue; // nothing appended yet: still waiting on the goal
@@ -1948,6 +1986,32 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     }
   }
   console.log(`[check-supply] control: check_no_control=${noControlRefused} armed_with_control=${armedWithControl} control_titles=${controlsArmed} armed=${armed.length} require_control=${rhythm.body["require_control"] !== false ? "on" : "off"} node=${localNode}`);
+
+  // 2n. AN ARM ON A CHECK THAT NEVER LANDED IS TAKEN BACK. Rows armed before the arm read origin/dev (above) may stand on
+  // a check that is at no landed tree (a refused cutover's leftover the mirror has since removed). Each pass re-reads
+  // every armed check-supply row's check at origin/dev; one that is absent there is un-armed as 2a un-arms
+  // (arm_refused, evidence_resolve cleared, the reason the next goal's lesson). Only this node's own arms (or one
+  // recorded before arms named their node): another node's clone may hold a landing this one has not pulled yet. An
+  // unreadable origin/dev decides nothing.
+  for (const row of open) {
+    const id = String(row["id"]);
+    if (touched.has(id)) continue;
+    const meta = metaOf(row);
+    const ledger = ledgerOf(meta);
+    if (ledger.state !== "armed" || !ledger.test_file || !ledger.vessel || String(meta["predicate_source"] ?? "") !== CHECK_SUPPLY_SOURCE) continue;
+    if (nonEmpty(ledger.armed_by_node) && ledger.armed_by_node !== localNode) continue;
+    const er = (meta["evidence_resolve"] ?? null) as { input?: Row } | null;
+    if (er?.input?.["test_file"] !== ledger.test_file) continue;
+    if (landedCheckSource(ledger.vessel, ledger.test_file, landedRefs).state !== "absent") continue;
+    touched.add(id);
+    const reason = `${CHECK_NOT_LANDED}: the armed check ${ledger.test_file} is not at origin/dev in the ${ledger.vessel} clone (never landed, or removed); un-armed`;
+    refused += 1;
+    notArmed.push({ id, reason });
+    console.warn(`[gap-check-supply] ${id}: ${reason}`);
+    if (pointer.dry_run) continue;
+    const lessons = withArmRefusalLesson(meta, { reason, testFile: ledger.test_file, checkSrc: "", at: nowIso });
+    await writeMeta(row, { evidence_resolve: null, ...(lessons ? { failure_lessons: lessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason } });
+  }
 
   // 2a. THE REGION GATE, CAUGHT UP (qa re-arm ruling, 2026-10-24). Rows armed before the region gate existed carry no
   // mutation_gate.region_gate, so nothing measured that their check depends on the gap's region, and their

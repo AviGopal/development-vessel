@@ -22,6 +22,7 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `gcs-fwdarm-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -190,8 +191,10 @@ function T(prefix: string): string {
   throw new Error("no treatment id");
 }
 const checkPathOf = (id: string): string => `test/checks/${(csa["checkSupplyCheckFile"] as (x: string) => string)(id)}`;
-const writeCheck = (id: string, title: string, expected: number): void =>
+const writeCheck = (id: string, title: string, expected: number): void => {
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(${expected}); });\n`);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
+};
 let clock = Date.now() + 5000 * 3600_000;
 const later = (): number => (clock += 30 * 3600_000);
 /** A minute on: inside every outcome bound, so a dispatched row with no titles is left unwritten (the store reads newest first). */

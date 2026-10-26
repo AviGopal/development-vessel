@@ -30,6 +30,7 @@ import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { __resetDiscoveryForTests } from "../../src/config.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
 
 const ROOT = join(tmpdir(), `missing-export-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
@@ -83,6 +84,7 @@ beforeAll(() => {
     mkdirSync(join(CLONES, vessel, rel, ".."), { recursive: true });
     mkdirSync(join(CLONES, vessel, "test", "checks"), { recursive: true });
     writeFileSync(join(CLONES, vessel, rel), text);
+    landCheck(join(CLONES, vessel), rel);
   }
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
@@ -138,6 +140,7 @@ async function landAndTick(prefix: string, vessel: string, editSite: string, tex
   if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
   await sg.__settleBirthEvaluationsForTests();
   writeFileSync(join(CLONES, vessel, testFile), text);
+  landCheck(join(CLONES, vessel), testFile);
   const r = await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: now } as never);
   await sg.__settleBirthEvaluationsForTests();
   return { id, body: r.body as Row };

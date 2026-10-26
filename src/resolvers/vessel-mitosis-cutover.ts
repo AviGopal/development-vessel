@@ -23,7 +23,7 @@ import { readRecords } from "./attempt-ledger.js";
 import type { AutonomyScope } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
-import { resolveTestSuite } from "./test-suite.js";
+import { resolveTestSuite, ONLY_TESTS_MAX_NAMES } from "./test-suite.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
@@ -3369,10 +3369,24 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
               return (segments[segments.length - 1] ?? "").trim();
             })
             .filter((n) => n.length > 0);
-          const failAgain = isolatedNames.length === newlyFailing.length
+          //
+          // AN UNMEASURED CONFIRMATION IS NOT A PASS (2026-10-26). A confirmation run with no result (failAgain null: the
+          // runner did not run, a shell or dispatch failure, a refused name list) used to clear newlyFailing, so the
+          // staging landed on no evidence. It now refuses, named isolation_unmeasurable, keeping the unconfirmed names.
+          // More names than test_suite accepts in one only_tests list (ONLY_TESTS_MAX_NAMES) take the whole-suite
+          // confirmation, the fallback this block already uses for unparseable names: a run that breaks that many tests
+          // is not a load flake that isolation exists to tell apart, and one run confirms them all.
+          const failAgain = isolatedNames.length === newlyFailing.length && isolatedNames.length <= ONLY_TESTS_MAX_NAMES
             ? await runSuiteOnly(isolatedNames)
             : await runSuite();
-          newlyFailing = failAgain === null ? [] : await dropTrackedRed(computeNewlyFailing(baseline, failAgain));
+          if (failAgain === null) {
+            await unstage("isolation_unmeasurable");
+            return softRefuse(
+              `isolation_unmeasurable: ${newlyFailing.length} test(s) fail on the staged tree that passed at the last landed baseline, and the confirmation re-run produced no result — e.g. "${newlyFailing[0]!.slice(0, 120)}". An unconfirmed regression is not a pass; refusing.`,
+              { kind: "isolation_unmeasurable", skip_reason: "isolation_unmeasurable", vessel_name, staged_files: stagedFiles, newly_failing: newlyFailing.slice(0, 8), operations },
+            );
+          }
+          newlyFailing = await dropTrackedRed(computeNewlyFailing(baseline, failAgain));
         }
         // A CHECK-ONLY STAGING IS JUDGED AGAINST ITS PARENT, MEASURED NOW (isCheckOnlyStaging): the confirmed names that
         // are red on the parent too are not this staging's regression. So is ANY staging whose baseline is LEGACY

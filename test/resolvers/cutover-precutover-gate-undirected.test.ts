@@ -34,6 +34,7 @@ import {
   BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch,
 } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -52,9 +53,15 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+// SYSTEMD THROUGH A STUB, never the real tool (the test preload blocks systemctl in the live
+// container). registerAttempt's own invariant snapshot (attempt-checks.ts "systemd_units") spawns
+// `systemctl show <clone>/host-repo.service -p LoadState --value` on any FRESH attempt-ledger
+// registration after a successful landing — same seam cutover-landing-lease.test.ts stubs.
+let execGuard: ExecGuard;
 afterAll(() => {
   restoreCutoverFsModules();
   restoreCutoverFetch();
+  restoreCutoverExecModules();
 });
 
 const VESSEL = "development-vessel";
@@ -84,6 +91,8 @@ beforeEach(async () => {
   currentHost = "";
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "host-repo-load-state", match: (c) => /^systemctl show \S+\/host-repo\.service -p LoadState --value$/.test(c), respond: () => ({ exitCode: 0, stdout: "not-found\n" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -92,6 +101,8 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const unroutedExec = execGuard.restore();
+  if (unroutedExec.length > 0) throw new Error(`unrouted systemd call(s): ${unroutedExec.join("; ")}`);
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   await rm(ws, { recursive: true, force: true });

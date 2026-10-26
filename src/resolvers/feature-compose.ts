@@ -6121,6 +6121,54 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   ].join("\n");
   return `A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\n${head}\n\nThe gate's output (its first ${REPAIR_OUTPUT_SLICE} chars; the reason above may lie past them):\n\n${slice}${errorSiteWindow}${ask}`;
 }
+/** Lines of context either side of the region a draft changed, in the repair round's region window. */
+export const REPAIR_REGION_CONTEXT = 25;
+/** An unchanged file is shown whole to the repair round only up to this many lines; a larger one is not shown. */
+export const REPAIR_WHOLE_FILE_MAX_LINES = 400;
+/** The most lines one region window shows. */
+export const REPAIR_REGION_MAX_LINES = 300;
+/**
+ * THE REPAIR ROUND IS SHOWN THE FILE IT MUST QUOTE (agf_4ukvuyt3mad9). The only file bytes a repair prompt carried were
+ * the window around a tsc `file(line,col)` (or the shape-dispatch switch). A draft that typechecks and then fails its
+ * tests or its own check has neither, so the round was asked for "a verbatim substring of that file's CURRENT content"
+ * of a file it was never shown, and invented one. Measured on one node, 2026-10-26: 77 of 80 "old_string not found"
+ * refusals followed a tests or own_check prompt, e.g. `resolved === false` where the file reads
+ * `p["resolved"] === false`, `export {}`, and four quote/order variants of the bun:test import line.
+ *
+ * Pure: `current` is the file as the caller read it at the start of this round (after the draft and any earlier round),
+ * `base` its pre-draft snapshot or undefined. The window is the region the draft changed (common leading and trailing
+ * lines trimmed) with REPAIR_REGION_CONTEXT lines either side; an unchanged file is shown whole when it is small, and
+ * not at all otherwise (a 20k-line file is not a window). The gutter and the replace_lines ask match the tsc window's,
+ * so the round can name a line range and the system reads the anchor from the file itself.
+ */
+export function repairRegionWindow(relPath: string, current: string, base: string | undefined): { text: string; lo: number; hi: number } | null {
+  const ls = current.split("\n");
+  let lo: number, hi: number, what: string;
+  if (base !== undefined && base !== current) {
+    const bs = base.split("\n");
+    let p = 0;
+    while (p < ls.length && p < bs.length && ls[p] === bs[p]) p++;
+    let s = 0;
+    while (s < ls.length - p && s < bs.length - p && ls[ls.length - 1 - s] === bs[bs.length - 1 - s]) s++;
+    lo = Math.max(0, p - REPAIR_REGION_CONTEXT);
+    hi = Math.min(ls.length, Math.max(p, ls.length - s) + REPAIR_REGION_CONTEXT);
+    what = "the region this draft changed, with its surrounding lines";
+  } else if (ls.length <= REPAIR_WHOLE_FILE_MAX_LINES) {
+    lo = 0; hi = ls.length; what = "the whole file";
+  } else {
+    return null;
+  }
+  hi = Math.min(hi, lo + REPAIR_REGION_MAX_LINES);
+  const gutter = ls.slice(lo, hi).map((l, i) => `${String(lo + i + 1).padStart(5, " ")}| ${l}`).join("\n");
+  const text = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi}, read from the file now (${what}).\n` +
+    `The leading "NNN| " is a LINE-NUMBER GUTTER added for reference — it is NOT part of the file. ` +
+    `Never include it in old_string, new_string or expect_first_line.\n` +
+    `PREFERRED for this repair: emit {"kind":"replace_lines","path":"${relPath}","start_line":N,"end_line":M,"new_string":"<the replacement lines>"}. ` +
+    `You do NOT need to reproduce any existing line — do not send old_string or expect_first_line. The system reads lines N..M from the file itself, ` +
+    `so give it the RANGE and the REPLACEMENT only. ` +
+    `If you send old_string instead it must be copied VERBATIM from these real bytes; a re-derived or normalised anchor is rejected.\n${gutter}`;
+  return { text, lo: lo + 1, hi };
+}
 /**
  * THE CREATED-FILE REPAIR'S PROMPT (repairCreatedFile, the full re-author of a file this change created). It quotes the
  * first 4000 chars of the verify output as "TYPECHECK OUTPUT". A test-writing compose CREATES its check, and the verify
@@ -10064,6 +10112,28 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             const widen = symbolWidenBlock(errText, readVesselSourcesAt(vesselRoot(fv.vessel)), groundingPolicy.tc_symbol_window_lines);
             if (widen.text) { errorSiteWindow += widen.text; console.log(`[fc-repair] re-grounded on ${widen.symbols.join(", ")} before the repair round`); }
           } catch (err) { console.warn(`[fc-repair] symbol re-grounding failed: ${String(err).slice(0, 160)}`); }
+        }
+        // NO tsc SITE (a tests or own_check failure): show the edit site's current bytes, read now, or the first other
+        // file this draft edited in the vessel when the edit site shows nothing (repairRegionWindow).
+        if (!errorSiteWindow) {
+          try {
+            const vPrefix = `${fv.vessel}/`;
+            const site = testWritingScope?.targets?.[0] ?? gapEditSiteOf(pointer);
+            const siteAbs = site && site.startsWith(vPrefix) ? opAbs(site) : null;
+            const vAbsRoot = `${vesselRoot(fv.vessel)}/`;
+            const candidates = [...new Set([...(siteAbs ? [siteAbs] : []), ...edited.filter((p) => p.startsWith(vAbsRoot))])];
+            for (const abs of candidates) {
+              const g = await callTool(toolsEndpoint, "fs_read", { path: abs });
+              const gc = (g.body as { content?: unknown })?.content;
+              if (!g.ok || typeof gc !== "string") continue;
+              const rel = abs.startsWith(vAbsRoot) ? abs.slice(vAbsRoot.length) : abs;
+              const win = repairRegionWindow(rel, gc, preEditContent.get(abs));
+              if (!win) continue;
+              errorSiteWindow = win.text;
+              console.log(`[fc-repair] grounded on ${rel} lines ${win.lo}-${win.hi} (read now; stage ${fv.stage ?? "unknown"})`);
+              break;
+            }
+          } catch (err) { console.warn(`[fc-repair] region grounding failed: ${String(err).slice(0, 160)}`); }
         }
         const fix = parseJsonObject(await llmCallWithFailover(
           // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.

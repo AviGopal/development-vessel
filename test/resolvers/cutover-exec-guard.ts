@@ -27,6 +27,12 @@
 // return to the baseline, never to the unguarded originals. A blocked spawn under the baseline throws and is
 // recorded; the preload's afterEach fails the test that recorded one (takePreloadExecViolations()).
 //
+// EACH VIOLATION CARRIES ITS RECORDING TEST'S IDENTITY (2026-10-25). installPreloadExecGuard() is given an
+// `owner` function (preload-test-identity.ts's ownerForRecord, ALS-based) that is read at the moment a
+// violation is pushed, so a violation recorded asynchronously after its own test ended still names that
+// test — never whichever test happens to be running when it finally lands. See
+// takePreloadExecViolationsMatching.
+//
 // Scope, stated honestly: a child process (e.g. `bun --eval …`) is NOT covered; its own Bun.spawn is
 // a fresh, unguarded one. A test that spawns a child which may run a blocked tool must instead pass
 // the child an environment in which that tool cannot resolve.
@@ -51,6 +57,8 @@ export type ExecGuard = {
   route: (r: ExecRoute) => void;
   /** Blocked commands that matched no route, in order ("<api>: <command>"). */
   violations: string[];
+  /** The recording test's identity for each entry of `violations`, same index, when an owner fn was given. */
+  owners: unknown[];
   /** Routed (stubbed) blocked commands, by route name. */
   hits: string[];
   restore: () => string[];
@@ -79,10 +87,11 @@ export function restoreCutoverExecModules(): void {
 }
 
 /** The test preload's always-on layer (test/preload.ts): installs the guard with no routes and makes it the
- *  baseline every restore returns to. Idempotent. */
-export function installPreloadExecGuard(): ExecGuard {
+ *  baseline every restore returns to. `owner`, when given, is read at the moment each violation is recorded
+ *  and tags it (preload-test-identity.ts's ownerForRecord). Idempotent (the owner from the first call wins). */
+export function installPreloadExecGuard(owner?: () => unknown): ExecGuard {
   if (preloadGuard) return preloadGuard;
-  preloadGuard = installCutoverExecGuard();
+  preloadGuard = installCutoverExecGuard(owner);
   BASE_CP = currentCp!;
   BASE_SPAWN = Bun.spawn;
   BASE_SPAWN_SYNC = Bun.spawnSync;
@@ -93,13 +102,28 @@ export const preloadExecGuard = (): ExecGuard | null => preloadGuard;
 /** The blocked spawns the preload's guard recorded since the last take, cleared. A test that blocks one on
  *  purpose takes it; the preload's afterEach takes the rest and fails the test that made them. */
 export function takePreloadExecViolations(): string[] {
-  return preloadGuard ? preloadGuard.violations.splice(0) : [];
+  if (!preloadGuard) return [];
+  preloadGuard.owners.splice(0);
+  return preloadGuard.violations.splice(0);
+}
+/** Removes and returns the preload's recorded violations whose owner matches `pred`, leaving every other
+ *  entry (and its owner) in place and in order. Used to attribute a violation to its own recording test or
+ *  file rather than draining everything indiscriminately. */
+export function takePreloadExecViolationsMatching(pred: (owner: unknown) => boolean): string[] {
+  if (!preloadGuard) return [];
+  const { violations, owners } = preloadGuard;
+  const matched: string[] = [];
+  for (let i = violations.length - 1; i >= 0; i--) {
+    if (pred(owners[i])) { matched.unshift(violations[i]!); violations.splice(i, 1); owners.splice(i, 1); }
+  }
+  return matched;
 }
 let currentCp: Record<string, any> | null = null;
 
-export function installCutoverExecGuard(): ExecGuard {
+export function installCutoverExecGuard(owner?: () => unknown): ExecGuard {
   const routes: ExecRoute[] = [];
   const violations: string[] = [];
+  const owners: unknown[] = [];
   const hits: string[] = [];
   /** null = pass through; otherwise the routed result. Throws (after recording) when blocked and unrouted. */
   const decide = (api: string, command: string): ExecRouteResult | null => {
@@ -109,6 +133,7 @@ export function installCutoverExecGuard(): ExecGuard {
       if (r.match(command)) { hits.push(r.name); return r.respond(command); }
     }
     violations.push(`${api}: ${command}`);
+    owners.push(owner ? owner() : undefined);
     const err = new Error(`cutover exec guard: blocked ${api} of a host-lifecycle tool: ${command}`) as NodeJS.ErrnoException;
     err.code = "EPERM";
     throw err;
@@ -213,6 +238,7 @@ export function installCutoverExecGuard(): ExecGuard {
   return {
     route: (r) => { routes.push(r); },
     violations,
+    owners,
     hits,
     restore: () => {
       restoreCutoverExecModules();

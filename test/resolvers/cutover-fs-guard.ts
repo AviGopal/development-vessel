@@ -34,6 +34,11 @@
 // throws EACCES and is RECORDED; the preload's afterEach fails the test that made one
 // (takeSecretReadViolations()). That layer is the BASELINE: installCutoverFsGuard() stacks on it and its
 // restore returns to it. existsSync/stat/readdir are not content reads and are not blocked.
+//
+// EACH VIOLATION CARRIES ITS RECORDING TEST'S IDENTITY (2026-10-25). installSecretReadGuard() takes an
+// `owner` function (preload-test-identity.ts's ownerForRecord, ALS-based), read at the moment a violation
+// is pushed, so an async leak lands charged to the test that caused it rather than whichever test is running
+// when it fires. See takeSecretReadViolationsMatching.
 import { mock } from "bun:test";
 import * as realFsp from "node:fs/promises";
 import * as realFs from "node:fs";
@@ -80,7 +85,12 @@ function writeFlags(flags: unknown): boolean {
   return /[wa+]/.test(String(flags));
 }
 
-export type FsGuard = { violations: string[]; restore: () => string[] };
+export type FsGuard = {
+  violations: string[];
+  /** The recording test's identity for each entry of `violations`, same index, when an owner fn was given. */
+  owners: unknown[];
+  restore: () => string[];
+};
 
 /** Re-installs the baseline node:fs, node:fs/promises, Bun.write and Bun.file: the preload's secret-read guard
  *  when it is installed, else the real ones. Idempotent; safe in afterAll. */
@@ -105,11 +115,13 @@ function secretTarget(abs: string): boolean {
 let secretGuard: FsGuard | null = null;
 /** The test preload's always-on secret-read layer (test/preload.ts); makes itself the baseline. `scratchRoots`: the
  *  tmp root(s) the process started with, which stay writable for installCutoverFsGuard() and never count as a key
- *  location. Idempotent. */
-export function installSecretReadGuard(scratchRoots: readonly string[] = []): FsGuard {
+ *  location. `owner`, when given, is read at the moment each violation is recorded and tags it. Idempotent (the
+ *  first call's owner wins). */
+export function installSecretReadGuard(scratchRoots: readonly string[] = [], owner?: () => unknown): FsGuard {
   if (secretGuard) return secretGuard;
   for (const r of scratchRoots) allowScratchRoot(r);
   const violations: string[] = [];
+  const owners: unknown[] = [];
   const check = (op: string, target: unknown): void => {
     const lexical = toPath(target);
     if (lexical === null) return;
@@ -117,6 +129,7 @@ export function installSecretReadGuard(scratchRoots: readonly string[] = []): Fs
     try { real = realFs.realpathSync(lexical); } catch { /* absent: the lexical path decides */ }
     if (!secretTarget(lexical) && !secretTarget(real)) return;
     violations.push(`${op} ${lexical}`);
+    owners.push(owner ? owner() : undefined);
     const err = new Error(`test secret-read guard: ${op} of a secret path: ${lexical}`) as NodeJS.ErrnoException;
     err.code = "EACCES";
     throw err;
@@ -150,14 +163,27 @@ export function installSecretReadGuard(scratchRoots: readonly string[] = []): Fs
   const bunFile = (path: unknown, ...rest: unknown[]) => { check("Bun.file", path); return (ORIG_BUN_FILE as (...a: unknown[]) => unknown)(path, ...rest); };
   BASE_BUN_FILE = bunFile;
   (Bun as unknown as { file: unknown }).file = bunFile;
-  secretGuard = { violations, restore: () => [...violations] };
+  secretGuard = { violations, owners, restore: () => [...violations] };
   return secretGuard;
 }
 /** The preload's secret-read guard, or null when this process runs without the preload. */
 export const secretReadGuard = (): FsGuard | null => secretGuard;
 /** The secret reads the preload's guard blocked since the last take, cleared (as takePreloadExecViolations). */
 export function takeSecretReadViolations(): string[] {
-  return secretGuard ? secretGuard.violations.splice(0) : [];
+  if (!secretGuard) return [];
+  secretGuard.owners.splice(0);
+  return secretGuard.violations.splice(0);
+}
+/** Removes and returns the preload's recorded secret-read violations whose owner matches `pred`, leaving
+ *  every other entry (and its owner) in place and in order — see takePreloadExecViolationsMatching. */
+export function takeSecretReadViolationsMatching(pred: (owner: unknown) => boolean): string[] {
+  if (!secretGuard) return [];
+  const { violations, owners } = secretGuard;
+  const matched: string[] = [];
+  for (let i = violations.length - 1; i >= 0; i--) {
+    if (pred(owners[i])) { matched.unshift(violations[i]!); violations.splice(i, 1); owners.splice(i, 1); }
+  }
+  return matched;
 }
 
 export function installCutoverFsGuard(): FsGuard {
@@ -205,6 +231,7 @@ export function installCutoverFsGuard(): FsGuard {
   };
   return {
     violations,
+    owners: [],
     restore: () => {
       restoreCutoverFsModules();
       return [...violations];

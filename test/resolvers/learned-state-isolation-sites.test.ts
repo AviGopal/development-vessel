@@ -136,7 +136,16 @@ describe("[WIRING] every fixed site uses the isolation", () => {
 // src/resolvers/substrate-gap.ts and asserts checkSupplySite()'s return value, which contains
 // "…/src/resolvers/substrate-gap.ts" — neither is an import, and the old bare-substring match falsely flagged
 // that file as an unisolated learned-state writer.
-const WRITER = /(?:^|["'`(]|\.\.\/|\.\/)(?:\.\.\/|\.\/)*src\/(?:resolvers\/(?:substrate-gap|gap-to-feature|feature-compose|auto-revert)|judge\/(?:gap-attempt-credit|learning-credit|gap-landing-verdict|gap-admission|gap-policy))|close-oracle|expectation-calib|detector-closure/;
+// NOT A WIDENING (qa, 2026-10-25): the offender SET is identical at the fix's parent (8692a8ff) and its tip
+// except for that one false positive — {gap-check-supply-site-edit-site-wins.test.ts} -> {}. Scanned drops 133 ->
+// 129 because 3 files lose their ONLY match (the same false-positive shape, a fixture/assertion string, not an
+// import) while they were never offenders: scope-change-pin.test.ts:16 and pool-record-pin-policy.test.ts:12 both
+// read `isolateLearnedStateInProcess(process.env["WORKSPACE_ROOT"]!);`, and self-fact-trust-completion.test.ts:19
+// reads `isolateLearnedStateInProcess(ROOT);` — all three already call the helper. A genuine offender (a real
+// relative import, e.g. `from "../../src/resolvers/substrate-gap.js"`, with no isolateLearnedStateInProcess call)
+// still matches WRITER and is still flagged: only the position moved (must start an import specifier), not the
+// set of real imports the regex recognises.
+const WRITER =/(?:^|["'`(]|\.\.\/|\.\/)(?:\.\.\/|\.\/)*src\/(?:resolvers\/(?:substrate-gap|gap-to-feature|feature-compose|auto-revert)|judge\/(?:gap-attempt-credit|learning-credit|gap-landing-verdict|gap-admission|gap-policy))|close-oracle|expectation-calib|detector-closure/;
 const SETS_WS = /process\.env(\["WORKSPACE_ROOT"\]|\.WORKSPACE_ROOT) *(=|\?\?=|\|\|=)[^=]/;
 function testFiles(d: string, out: string[] = []): string[] {
   for (const n of readdirSync(d)) {

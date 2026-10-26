@@ -29,7 +29,7 @@ import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
-import { armingOnlyLanding } from "./check-supply-admission.js";
+import { armingOnlyLanding, OUT_OF_SUITE_CHECK_RE } from "./check-supply-admission.js";
 import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy, familyHold, landingAdmissible, type Admissibility } from "./staged-mitosis-gate.js";
 
 /**
@@ -446,6 +446,35 @@ export function subtractTrackedRed(newlyFailing: string[], trackedNames: string[
   const cand = new Set(trackedRedCandidates(newlyFailing, trackedNames, ownNames));
   const base = new Set(redOnBase);
   return newlyFailing.filter((l) => !(cand.has(l) && base.has(l)));
+}
+
+/**
+ * A CHECK-ONLY STAGING IS JUDGED AGAINST ITS PARENT, MEASURED NOW (2026-10-26). A staging whose every file is an
+ * out-of-suite check (test/checks/<name>.check.ts, OUT_OF_SUITE_CHECK_RE: bun's default discovery never collects one)
+ * leaves the whole suite's tree exactly as it is at the parent, so no test the suite runs can newly fail BECAUSE of it.
+ * The gate still compares the staged run against the last landed baseline, and a test red at the parent today but not
+ * in that baseline (environment, drift since the baseline, or a name the baseline's capped list never held) reads as
+ * newly failing; the isolation re-run confirms it because it really is red. The baseline refreshes only on a green
+ * landing, so the lane deadlocks (node1 2026-10-26: 9 check-only stagings refused on tests they could not touch).
+ * So for a check-only staging the confirmed names are also run on the parent (the clone's HEAD in a detached worktree,
+ * the same runner, environment and name filter, at the same tick, as makeTrackedRedFilter's base run), and a name red
+ * there too is not this staging's regression. Fails CLOSED: a base run with no result subtracts nothing.
+ */
+export function isCheckOnlyStaging(stagedFiles: readonly string[]): boolean {
+  return stagedFiles.length > 0 && stagedFiles.every((f) => OUT_OF_SUITE_CHECK_RE.test(String(f).replace(/^(\.\/)+/, "")));
+}
+
+/** `names` minus those that also fail on the parent tree. `runBase(names)` returns the base run's failing lines, or null
+ *  when it produced no result (then, or when it throws, nothing is subtracted). */
+export async function dropRedOnBase(
+  names: string[],
+  runBase: (lines: string[]) => Promise<string[] | null>,
+): Promise<{ kept: string[]; red_on_base: string[]; note?: string }> {
+  if (names.length === 0) return { kept: [], red_on_base: [] };
+  const base = await runBase(names).catch(() => null);
+  if (base === null) return { kept: [...names], red_on_base: [], note: "the parent tree produced no result; nothing subtracted" };
+  const red = new Set(base);
+  return { kept: names.filter((l) => !red.has(l)), red_on_base: names.filter((l) => red.has(l)) };
 }
 
 /**
@@ -3312,6 +3341,21 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             ? await runSuiteOnly(isolatedNames)
             : await runSuite();
           newlyFailing = failAgain === null ? [] : await dropTrackedRed(computeNewlyFailing(baseline, failAgain));
+        }
+        // A CHECK-ONLY STAGING IS JUDGED AGAINST ITS PARENT, MEASURED NOW (isCheckOnlyStaging): the confirmed names that
+        // are red on the parent too are not this staging's regression. A staging that touches anything else is unchanged.
+        if (newlyFailing.length > 0 && isCheckOnlyStaging(stagedFiles)) {
+          const r = await dropRedOnBase(
+            newlyFailing,
+            async (lines) => (await runSuiteWith({ only_tests: lines.map((l) => l.replace(/^\s*\(fail\)\s*/, "").trim()), base_ref: "HEAD" })).failing,
+          );
+          if (r.note) operations.push({ op: "precutover_red_on_base", status: "warn", detail: r.note });
+          if (r.red_on_base.length > 0) {
+            const msg = `precutover: check-only staging; ${r.red_on_base.length} confirmed failing test(s) also fail on the parent tree at this tick, not counted: ${r.red_on_base.join(" ; ").slice(0, 400)}`;
+            console.log(`[mitosis-cutover] ${msg}`);
+            operations.push({ op: "precutover_red_on_base", status: "ok", detail: msg });
+          }
+          newlyFailing = r.kept;
         }
         if (newlyFailing.length > 0) {
           await unstage("precutover_regression");

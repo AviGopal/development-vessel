@@ -129,7 +129,7 @@ export function testWritingPathAllowed(path: string, gapId: unknown): boolean {
 }
 
 /** An out-of-suite check (vessel-relative): bun's default discovery never collects a .check.ts under test/checks/. */
-const OUT_OF_SUITE_CHECK_RE = /^test\/checks\/[^/]+\.check\.ts$/;
+export const OUT_OF_SUITE_CHECK_RE = /^test\/checks\/[^/]+\.check\.ts$/;
 /**
  * AN ARMING-ONLY LANDING IS NOT A FIX. A landing whose diff touches nothing but the gap's OWN check (the supply's
  * test/checks/<checkSupplyCheckFile(gap id)>, or the out-of-suite test/checks/<name>.check.ts its test_suite

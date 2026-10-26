@@ -116,6 +116,9 @@ export const FAILURE_MODE_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-mod
 export const FAILURE_MODE_VESSEL_SCENARIOS_DIR = `${VOLUME_ROOT}/validation/failure-modes/vessel-scenarios`;
 /** Recurring-pattern clusters: the trace and arrival scans write them, draft-activity-from-pattern reads them. */
 export const PATTERNS_DIR = `${VOLUME_ROOT}/patterns`;
+/** Drafted proposal reports and the auto-dispatch dedupe map: draft-gap-closing-activity and
+ * resolver-author write them, observe-and-author-from-gaps' read_dedupe_map task reads them back. */
+export const PROPOSALS_DIR = `${VOLUME_ROOT}/proposals`;
 /**
  * The volume dirs the substrate itself writes and then reads back through fs_read / fs_list / fs_grep.
  * Listed one by one, never the whole volume: the read guard roots at WORKSPACE_ROOT (the super-repo
@@ -125,6 +128,7 @@ export const VOLUME_RUNTIME_READ_DIRS: readonly string[] = [
   PATTERNS_DIR,
   FAILURE_MODE_SCENARIOS_DIR,
   FAILURE_MODE_VESSEL_SCENARIOS_DIR,
+  PROPOSALS_DIR,
 ];
 
 /**

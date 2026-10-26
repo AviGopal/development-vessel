@@ -1711,6 +1711,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   const localized: Array<{ id: string; edit_site: string; method: string }> = [];
   const outcomes: { not_attempts: Array<{ id: string; kind: string; reason: string; not_before: string }>; failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { not_attempts: [], failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
   let refused = 0;
+  // THE CONTROL SIGNAL (law 6): this pass's check_no_control refusals and its arms that carried a control, said in one
+  // line after the arm loop, so the refusal's effect on arming is read from the journal, not inferred.
+  let noControlRefused = 0, armedWithControl = 0, controlsArmed = 0;
   // Attempts the rhythm already holds as settled, and the ones this tick settles (stored by its settlement write).
   const settledBefore = new Set(settledAttemptsOf(rhythm.body));
   const settledNow: string[] = [];
@@ -1893,6 +1896,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const configSite = site.ok && configEditSite(site.edit_site, vesselReader.read(site.edit_site)) !== null;
     const requireControl = rhythm.body["require_control"] !== false;
     const wrongReason = gatedReason ?? (gutGate?.kind === "refuse" ? gutGate.reason : null) ?? (verdict === "present" && requireControl && !configSite ? noControlRefusal(controlTitles) : null);
+    if (wrongReason === CHECK_NO_CONTROL_REASON) noControlRefused += 1;
     const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}), ...(gutGate ? { gut_gate: gutGate.record } : {}), ...(mutation.kind === "refuse" && regionMoved ? { refusal_overridden_by: "region_gate" } : {}) } } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
@@ -1912,7 +1916,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (!pointer.dry_run) await writeMeta(row, { ...(handedOff ? { evidence_resolve: null } : {}), ...(armLessons ? { failure_lessons: armLessons } : {}), check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
       continue;
     }
-    if (pointer.dry_run) { armed.push(id); continue; }
+    const countControl = (): void => { if (controlTitles.length > 0) { armedWithControl += 1; controlsArmed += controlTitles.length; } };
+    if (pointer.dry_run) { armed.push(id); countControl(); continue; }
     // WHO ARMED IT, AND THROUGH WHICH HAND-OFF. The arm names the node whose tick wrote it; a check the holder measured
     // for a node that handed it off (its stamp's key is this check's) also names that node, from the hand-off write.
     // Without both, an arm on a forwarding node read the same as the holder's own, and could not be attributed.
@@ -1939,8 +1944,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason } });
     } else {
       armed.push(id);
+      countControl();
     }
   }
+  console.log(`[check-supply] control: check_no_control=${noControlRefused} armed_with_control=${armedWithControl} control_titles=${controlsArmed} armed=${armed.length} require_control=${rhythm.body["require_control"] !== false ? "on" : "off"} node=${localNode}`);
 
   // 2a. THE REGION GATE, CAUGHT UP (qa re-arm ruling, 2026-10-24). Rows armed before the region gate existed carry no
   // mutation_gate.region_gate, so nothing measured that their check depends on the gap's region, and their

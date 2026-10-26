@@ -74,7 +74,10 @@ let gapStore: { restore: () => Promise<void> } | null = null;
 let holderServesReports = true;
 /** Every test_suite run, and which node ran it. */
 let suiteRuns: Array<{ test_file: unknown; on_holder: boolean; via: "judge" | "holder_url" }> = [];
-const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", require_control: false, budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5 } });
+/** The suite's single-test checks predate CHECK_NO_CONTROL_STAGE: off, except where a case runs the default (unset). */
+let controlDefault = false;
+let logged: string[] = [];
+const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", ...(controlDefault ? {} : { require_control: false }), budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5 } });
 
 async function asHolder<T>(fn: () => Promise<T>): Promise<T> {
   const was = process.env["GAP_STORE_ENDPOINT"];
@@ -139,7 +142,7 @@ beforeAll(() => {
     if ((body?.pointer ?? imp?.pointer)?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
     return Response.json({ body: { impulses: [] } });
   }) as unknown as typeof fetch;
-  console.log = () => {};
+  console.log = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
   console.warn = () => {};
 });
 afterAll(async () => {
@@ -152,7 +155,7 @@ afterAll(async () => {
   for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
-beforeEach(() => { suiteRuns = []; holderServesReports = true; delete process.env["GAP_STORE_ENDPOINT"]; execGuard = installCutoverExecGuard(); g2fPolicy.__resetPolicyReadsForTests(); });
+beforeEach(() => { suiteRuns = []; logged = []; controlDefault = false; holderServesReports = true; delete process.env["GAP_STORE_ENDPOINT"]; execGuard = installCutoverExecGuard(); g2fPolicy.__resetPolicyReadsForTests(); });
 afterEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; expect(execGuard?.restore() ?? []).toEqual([]); });
 
 const metaOf = (r: Row | undefined): Row => ((r?.["classification_metadata"] ?? {}) as Row);
@@ -267,5 +270,31 @@ describe("a forwarding node judges a handed-off check by the same gates, from th
     await forwardingTick(later());
     const armed = await stored(id);
     expect(ledgerOf(armed)["state"]).toBe("armed");
+  });
+});
+
+describe("a forwarding node refuses a handed-off check with no control, by default", () => {
+  const CONTROL_TEST = `  test('a template with no inputs is still scanned (control)', async () => {
+    const result = await mod.resolveTemplateInputLintScan({ type: 'template_input_lint_scan', dry_run: true, _templates: [] });
+    expect(result.shape).toBe('templateInputLintReport');
+  });
+});`;
+  it("[MUST-FAIL] with require_control unset, a right-reason red check with no control is NOT armed: check_no_control, counted in the control line", async () => {
+    controlDefault = true;
+    const { afterHandOff, row } = await landOnForwardingNode("fwd-nocontrol", fixture("genuine-red.check.ts.txt"));
+    expect(metaOf(afterHandOff)["predicate_birth_verdict"]).toBe("present");
+    expect(ledgerOf(row)["state"]).toBe("arm_refused");
+    expect(String(ledgerOf(row)["reason"])).toStartWith("check_no_control:");
+    expect(metaOf(row)["evidence_resolve"] ?? null).toBeNull();
+    expect(logged.some((l) => /^\[check-supply\] control: check_no_control=1 armed_with_control=0 control_titles=0 armed=0 require_control=on /.test(l))).toBe(true);
+  });
+  it("[CONTROL] with require_control unset, the same check plus a green control arms from a forwarding node, counted", async () => {
+    controlDefault = true;
+    const withControl = fixture("genuine-red.check.ts.txt").replace(/\n\}\);\s*$/, `\n${CONTROL_TEST}\n`);
+    expect(withControl).toContain("(control)");
+    const { row } = await landOnForwardingNode("fwd-withcontrol", withControl);
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(ledgerOf(row)["control_titles"]).toEqual(["a template with no inputs is still scanned (control)"]);
+    expect(logged.some((l) => /^\[check-supply\] control: check_no_control=0 armed_with_control=1 control_titles=1 armed=1 require_control=on /.test(l))).toBe(true);
   });
 });

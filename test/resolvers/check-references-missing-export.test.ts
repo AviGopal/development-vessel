@@ -71,7 +71,7 @@ const origLog = console.log;
 const origWarn = console.warn;
 let gapStore: { restore: () => Promise<void> } | null = null;
 let judged: string[] = [];
-const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5 } });
+const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", require_control: false, budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5 } });
 const assertionRedReason = (t: string[]): Row => ({ ran: true, pass: 0, unhandled: false, unhandled_cause: null, unhandled_error: null, failures: t.map((name) => ({ name, cls: "assertion", error: "error: expect(received).toBe(expected)" })) });
 
 beforeAll(() => {

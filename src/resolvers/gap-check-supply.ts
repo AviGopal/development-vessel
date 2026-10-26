@@ -484,6 +484,7 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
   const regionLine = codeSite && reader && meta ? regionGoalSentence(codeSite, reader.read(codeSite), summary, meta) : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
     `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named + regionLine +
+    mustFailControlSentence(meta) +
     priorAttemptSentence(prior) +
     "No network, no services, no timers. Do not change src/ or any other file.";
 }
@@ -553,6 +554,29 @@ export function exportListSentence(siteRel: string, reader: SrcReader, summary: 
 }
 
 /**
+ * THE ROW'S MUST-FAIL AND CONTROL, SAID TO THE DRAFTER (law 8). The row's meta.must_fail and meta.control reached the
+ * region gate (regionInputsOf) but never the goal, so the drafter guessed what the failing assertion should expect and
+ * wrote no control: tonight's arming-only landing expected a literal no src line holds. The must-fail is the expected
+ * (correct) value the failing assertion states; absent, the drafter is asked to name that value in the test's title.
+ * A CONTROL is always asked for, and the arm step refuses a check with none (CHECK_NO_CONTROL_STAGE). Each row text is
+ * clamped to MUST_FAIL_CONTROL_MAX_CHARS, as the export list is, so the goal stays inside MAX_GOAL_LEN.
+ */
+export const MUST_FAIL_CONTROL_MAX_CHARS = 300;
+export const CONTROL_REQUEST = "Write a second test, a CONTROL: an input the defect does not touch, asserting behaviour that must stay the same. It passes now and after the fix.";
+const clampRowText = (v: unknown): string => {
+  const t = typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+  return t.length > MUST_FAIL_CONTROL_MAX_CHARS ? `${t.slice(0, MUST_FAIL_CONTROL_MAX_CHARS - 1)}…` : t;
+};
+export function mustFailControlSentence(meta: Row | null): string {
+  const mustFail = clampRowText(meta?.["must_fail"]);
+  const control = clampRowText(meta?.["control"]);
+  const mf = mustFail
+    ? `After the fix, this must hold: ${mustFail}. The failing assertion states THAT expected value; it is red now because the code does something else. `
+    : "Name the expected (correct) value in the failing test's title. ";
+  return mf + `${CONTROL_REQUEST} ` + (control ? `The control: ${control}. ` : "");
+}
+
+/**
  * WHAT THE LAST JUDGED ATTEMPT SHOWED, said to the next one. Without it a check that landed green at HEAD was followed
  * by the same goal text, so the drafter wrote the same check again. The wording follows the dissent child's ("must
  * differ from … which already passes"): it names the check that did not reproduce and asks for a different one. The
@@ -569,6 +593,25 @@ export function priorAttemptSentence(prior: readonly Row[]): string {
   const reason = String(last["reason"] ?? "");
   const sym = new RegExp(`${MISSING_EXPORT_STAGE}:[\\w$]+`).exec(reason);
   return `An earlier attempt wrote ${named}, which was not accepted (${reason.slice(0, Math.max(160, sym ? sym.index + sym[0].length : 0))}): write a different test that avoids that. `;
+}
+
+/**
+ * NO CONTROL, NO ARM (CHECK_NO_CONTROL_STAGE). A check whose every new test is red at HEAD carries no control: nothing
+ * in it shows the code still does what the defect does not touch, so a fix that breaks everything else passes it. The
+ * run's report splits the new titles (the failingTests match the red-reason judges use): red are the must-fail tests,
+ * green the controls. With no green title the check is refused; the reason, read back by priorAttemptSentence inside
+ * its first 160 characters, tells the next draft to add one.
+ */
+export const CHECK_NO_CONTROL_STAGE = "check_no_control";
+export const CHECK_NO_CONTROL_REASON = `${CHECK_NO_CONTROL_STAGE}: every new test is red at HEAD; add a CONTROL test (an input the defect does not touch) that passes now and after the fix`;
+export function splitRedGreen(report: Row | null, titles: readonly string[]): { red: string[]; green: string[] } {
+  const failing = Array.isArray(report?.["failingTests"]) ? (report!["failingTests"] as unknown[]).map(String) : [];
+  const red: string[] = [], green: string[] = [];
+  for (const t of titles) (failing.some((f) => f.includes(t)) ? red : green).push(t);
+  return { red, green };
+}
+export function noControlRefusal(controlTitles: readonly string[]): string | null {
+  return controlTitles.length === 0 ? CHECK_NO_CONTROL_REASON : null;
 }
 
 /** The source of the call `test("<title>", …)` / `it(…)` from its opening parenthesis to the matching close (strings skipped). */
@@ -1805,12 +1848,19 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // check is judged from the holder's report of it, read above.
     // An assertion red on a contract the target does not have (333be5f: a shape and a body field the resolver never
     // returns) is red on every tree: contractMismatchRefusal, the verify's rule, judged from the same report.
+    // A CHECK CARRIES A CONTROL (CHECK_NO_CONTROL_STAGE): the run's red titles are the must-fail tests, judged by every
+    // gate below; its green titles are the controls, kept in the predicate (they must stay green after the fix). A
+    // check with no green title is refused after every other gate (wrongReason), so a wrong red keeps its own lesson.
+    // No red title at all (a present with no failingTests) is judged on every title, so the judges refuse it as before.
+    const split = splitRedGreen(report, titles);
+    const redTitles = split.red.length > 0 ? split.red : titles;
+    const controlTitles = split.red.length > 0 ? split.green : [];
     const redReason = (report as Record<string, unknown> | null)?.["red_reason"];
-    const classified = verdict === "present" ? armRedReasonRefusal(redReason, titles) : null;
-    const gateReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText)?.reason : null) ?? null : null;
+    const classified = verdict === "present" ? armRedReasonRefusal(redReason, redTitles) : null;
+    const gateReason = verdict === "present" ? redForTheRightReason(report, redTitles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText)?.reason : null) ?? null : null;
     // Last, as the costliest: is the red about the edit site at all (EDIT-SITE MUTATION GATE)?
     const mutation = verdict === "present" && !gateReason && site.ok
-      ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles, baseline: report, k: coverageKnobs(rhythm.body).k })
+      ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles: redTitles, baseline: report, k: coverageKnobs(rhythm.body).k })
       : null;
     // Then, on a row with no literal region, the region derived from the evidence (regionMutantGate). It also runs when
     // the edit-site gate refused: the region mutant is a mutant of the site, so a red it moves does depend on the site,
@@ -1818,7 +1868,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // mutants, spread over every declaration the check reaches, can all miss the code a correct check measures (the
     // hand-written 5e69d7a0 check: six mutants of supplyPass's reach, none on the refusal path).
     const regionGate = (mutation?.kind === "pass" || mutation?.kind === "refuse") && site.ok && regionGateApplies(meta, region ? regionSite : null)
-      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
+      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles: redTitles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
       : null;
     if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
     const waiting = mutation?.kind === "wait" ? mutation : regionGate?.kind === "wait" ? regionGate : null;
@@ -1831,13 +1881,18 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const siteRefusal = mutation?.kind === "refuse" && !regionMoved ? mutation.reason : null;
     const gatedReason = gateReason ?? siteRefusal ?? (regionGate?.kind === "refuse" ? regionGate.reason : null);
     // Last of all, one more run for a check every gate above let through: does gutting the site pass it (guttingGate)?
-    const gutGate = mutation && !gatedReason && site.ok ? await guttingGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles }) : null;
+    const gutGate = mutation && !gatedReason && site.ok ? await guttingGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles: redTitles }) : null;
     if (gutGate?.kind === "wait") {
       notArmed.push({ id, reason: `awaiting_mutation_runs: ${gutGate.detail}` });
       console.warn(`[gap-check-supply] ${id}: not armed until its edit-site mutant runs are read (${gutGate.detail})`);
       continue;
     }
-    const wrongReason = gatedReason ?? (gutGate?.kind === "refuse" ? gutGate.reason : null);
+    // Last of the refusals, so a check red for a wrong reason is told that reason first: no control (a config site's
+    // goal asks for its control as the first assertion of its one test, so it is not judged by titles). Fail-closed:
+    // only the rhythm's shaped require_control set to false (the record the selector reads) turns it off.
+    const configSite = site.ok && configEditSite(site.edit_site, vesselReader.read(site.edit_site)) !== null;
+    const requireControl = rhythm.body["require_control"] !== false;
+    const wrongReason = gatedReason ?? (gutGate?.kind === "refuse" ? gutGate.reason : null) ?? (verdict === "present" && requireControl && !configSite ? noControlRefusal(controlTitles) : null);
     const mutationRecord = mutation && mutation.kind !== "wait" ? { mutation_gate: { ...mutation.record, ...(regionGate && regionGate.kind !== "wait" ? { region_gate: regionGate.record } : {}), ...(gutGate ? { gut_gate: gutGate.record } : {}), ...(mutation.kind === "refuse" && regionMoved ? { refusal_overridden_by: "region_gate" } : {}) } } : {};
     // What the red was at birth (the first failure's error line and the values it compared), kept on the ledger.
     const firstFailure = firstFailureOf(redReason);
@@ -1875,7 +1930,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, ...attribution, arm: armEntry, arms, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
+      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, control_titles: controlTitles, ...attribution, arm: armEntry, arms, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;

@@ -119,7 +119,7 @@ let execGuard: ExecGuard | null = null;
 let gapStore: { restore: () => Promise<void> } | null = null;
 /** Every test_suite run: which check, mutated or not, and on which node. */
 let suiteRuns: Array<{ test_file: unknown; mutant: boolean; on_holder: boolean }> = [];
-const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5, mutants_per_file: 2 } });
+const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", require_control: false, budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5, mutants_per_file: 2 } });
 
 const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: join(CLONES, VESSEL), stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
 async function asHolder<T>(fn: () => Promise<T>): Promise<T> {

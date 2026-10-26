@@ -343,7 +343,7 @@ async function runShellCheck(a: { name: string; rel: string; testFile: string; o
       check_exit: exit !== undefined ? Number(exit) : null,
       requested_not_passing: ran && a.onlyTests.length > 0 ? a.onlyTests.filter((t) => !shellCheckLabelPassed(lines, t)).length : null,
       skip: 0,
-      failingTests: lines.fail.slice(0, 25),
+      failingTests: lines.fail,   // every FAIL label, uncapped (THE WHOLE FAILING SET, below)
       timestamp: new Date().toISOString(),
     },
   };
@@ -547,7 +547,14 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       ...(mutate ? { mutation: { sha: mutate.sha, file: mutate.file, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       ...(edit ? { mutation: { kind: "edit", file: edit.file, operator: edit.operator ?? null, start: edit.start, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       skip: parsed.skip,
-      failingTests: parsed.failingTests.slice(0, 25),
+      // THE WHOLE FAILING SET, NEVER A PREFIX (2026-10-26). This list used to be capped at 25 names. Every reader
+      // compares it as a SET: the post-land baseline is written from it and the pre-cutover gate subtracts it
+      // (computeNewlyFailing), and the landing verdict diffs base against candidate. On a suite with more than 25
+      // failures those were two capped prefixes, so which names fell past the cap depended on file order: a test
+      // already red at the baseline read as newly failing (measured on node1: a 25-name goal-host baseline for
+      // suites failing 27 to 29, refusing stagings that could not touch the test), and a real regression past
+      // position 25 was invisible. A reader that only displays names caps its own copy.
+      failingTests: parsed.failingTests,
       // WHY THE ONE FILE IS RED (B′): the shared classifier's reading of this run (retry-evidence.ts classifyCheckRun),
       // so the arm step judges a check's red by the same rule feature_compose's test_writing verify uses. Only for a
       // run of one test_file: a whole-suite run is not a check's measurement.

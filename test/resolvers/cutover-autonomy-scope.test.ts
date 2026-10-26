@@ -37,7 +37,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, BUN_PASSING, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
@@ -141,10 +141,14 @@ beforeEach(async () => {
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
-  // The pre-cutover suite: a run with no tests (ran=false); the gap's own check is the measurement.
+  // PRE-cutover (clone still at "baseline"): a real pass (ran=true). This file is about the
+  // autonomy-scope chokepoint, not the precutover suite: a "did not run" answer here (2026-10-25)
+  // now parks every undirected landing at the 5d gate regardless of scope, which would make the
+  // "lands" CONTROLs below fail for a reason orthogonal to what they pin. POST-land (the commit now
+  // exists) still answers "no tests", unchanged.
   routeShell(guard, () => {
     if (!currentHost || git(currentHost, "log", "-1", "--format=%s") !== "baseline") return BUN_NO_TESTS;
-    return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${BUN_NO_TESTS}`;
+    return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${BUN_PASSING}`;
   });
   routeScope(guard); // after routeShell: later routes win, so the poolImpulse lookup is answered here
   process.env["IDENTITY_VESSEL_URL"] = IDENTITY;

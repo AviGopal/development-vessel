@@ -62,7 +62,7 @@ export async function resolveConceptSearchBySource(
   const baseUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB_URL;
   const limit = pointer.limit ?? 10;
   const q = pointer.query ?? "";
-  const url = `${baseUrl}?q=${encodeURIComponent(q)}&limit=${limit * 3}`;
+  const url = `${baseUrl}?query=${encodeURIComponent(q)}&limit=${limit * 3}`;
 
   // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
   const headers: Record<string, string> = selfAuthHeaders(baseUrl, DEFAULT_CONCEPT_DB_URL);

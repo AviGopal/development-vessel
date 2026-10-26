@@ -70,4 +70,26 @@ describe("concept_search_by_source", () => {
     });
     expect(r.shape).toBe("structuredError");
   });
+
+  // concept-db's GET /concepts/search reads `query` (concept-db src/routes/concepts.ts, c.req.query('query')); a `q`
+  // parameter is ignored, so every recall through this resolver searched with no query at all.
+  it("[MUST-FAIL] the request names the text as `query`, the parameter concept-db reads, not `q`", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (u: string) => {
+      urls.push(String(u));
+      return new Response(JSON.stringify({ concepts: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await resolveConceptSearchBySource({
+      type: "concept_search_by_source",
+      source_type: "vessel_construction_pattern",
+      query: "vessel scaffold",
+      limit: 4,
+      conceptDbUrl: "http://test/concepts/search",
+    });
+    expect(urls.length).toBe(1);
+    const sp = new URL(urls[0]!).searchParams;
+    expect(sp.get("query")).toBe("vessel scaffold");
+    expect(sp.has("q")).toBe(false);
+    expect(sp.get("limit")).toBe("12");
+  });
 });

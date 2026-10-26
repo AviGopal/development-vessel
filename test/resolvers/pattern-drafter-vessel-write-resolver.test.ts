@@ -141,7 +141,15 @@ describe("draft-activity-from-pattern: vessel writes are resolver tasks", () => 
 describe("reuse-before-mint does not treat a store write as the template's capability", () => {
   const writer = (id: string): Record<string, unknown> =>
     draft(id, [read, classify, { id: "persist_widget", description: DESC, resolver: "widget_write", config: { widget: { name: "w" } } }], ["widgetSummary"]);
-  afterAll(() => { producedElsewhere = new Set(); });
+  // reuse-before-mint runs in its default mode here. Another file in the same bun process
+  // (author-producer.test.ts) sets REUSE_BEFORE_MINT=off and does not restore it, which made the
+  // CONTROL below fail in the whole-suite run (no probe, so no refusal). Pin the default; restore after.
+  let priorReuseMode: string | undefined;
+  beforeAll(() => { priorReuseMode = process.env["REUSE_BEFORE_MINT"]; process.env["REUSE_BEFORE_MINT"] = "enforce"; });
+  afterAll(() => {
+    producedElsewhere = new Set();
+    if (priorReuseMode === undefined) delete process.env["REUSE_BEFORE_MINT"]; else process.env["REUSE_BEFORE_MINT"] = priorReuseMode;
+  });
 
   test("MUST-FAIL: a second drafted writer of the same store is not refused as a duplicate of the first", async () => {
     producedElsewhere = new Set(["widget_write"]);

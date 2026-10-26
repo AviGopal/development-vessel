@@ -5,7 +5,8 @@
 // gap on it, the mirror's next refresh removed the file, and the gap stayed armed on a check no tree holds: every later
 // fix draft ran a missing file and was unjudged (81 of 99 armed own-check runs on one node, 2026-10-26). The arm now
 // reads the check at the clone's origin/dev (landedCheckSource), and each pass un-arms this node's armed check-supply
-// rows whose check is not there.
+// rows whose check is not there, but only when origin/dev is current (it contains this node's gated sha for the vessel,
+// originDevCurrent): a stale ref, or no marker, decides nothing.
 //
 // Hermetic: a temp bare origin and a clone of it at VESSELS_CLONE_ROOT/<vessel>; the gap store, the rhythm and the
 // check runs are the in-process fixtures the other tick tests use. Fixture gap text from a five-word draw
@@ -40,6 +41,7 @@ const elig = await import("../../src/judge/gap-eligibility.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
+const { WORKSPACE_ROOT } = await import("../../src/config.js");
 
 type Row = Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -151,6 +153,14 @@ const writeCheck = (id: string, title: string): void =>
 const land = (id: string): void => { git("add", "--", checkPathOf(id)); git("commit", "-q", "-m", `check ${id}`); git("push", "-q", "origin", "dev"); };
 /** The check taken off dev (and so off the clone, as the mirror's refresh does). */
 const unland = (id: string): void => { git("rm", "-q", "--", checkPathOf(id)); git("commit", "-q", "-m", `drop ${id}`); git("push", "-q", "origin", "dev"); };
+/** This node's pull-sync gate marker for the vessel (<workspace>/.pull-sync/<vessel>.gated-sha), or none. */
+const MARKER = join(WORKSPACE_ROOT, ".pull-sync", `${VESSEL}.gated-sha`);
+const setGated = (sha: string | null): void => {
+  if (!WORKSPACE_ROOT.startsWith(tmpdir()) && !WORKSPACE_ROOT.startsWith("/tmp/")) throw new Error(`workspace root ${WORKSPACE_ROOT} is not a temp dir`);
+  if (sha === null) { rmSync(MARKER, { force: true }); return; }
+  mkdirSync(join(WORKSPACE_ROOT, ".pull-sync"), { recursive: true });
+  writeFileSync(MARKER, `${sha}\n`);
+};
 let clock = Date.now() + 5000 * 3600_000;
 const later = (): number => (clock += 30 * 3600_000);
 /** A row armed by this node on a landed check, then the check taken off dev. */
@@ -219,6 +229,7 @@ describe("the arm reads the check at origin/dev, not the work tree", () => {
 describe("an arm on a check that is not at origin/dev is taken back", () => {
   it("[MUST-FAIL] this node's armed gap whose check is no longer at origin/dev is un-armed, with the reason recorded", async () => {
     const id = await armedThenUnlanded("landed-unarm");
+    setGated(git("rev-parse", "origin/dev")); // origin/dev is current: it holds what the gate verified
     await tick(later());
     const row = await stored(id);
     const led = ledgerOf(row);
@@ -226,6 +237,35 @@ describe("an arm on a check that is not at origin/dev is taken back", () => {
     expect(String(led["reason"] ?? "")).toContain("check_not_landed");
     expect(metaOf(row)["evidence_resolve"] ?? null).toBeNull();
     expect(elig.composeEligibilitySkipReason(row!)).toBe("unarmed");
+  });
+
+  it("[MUST-FAIL] a STALE origin/dev (behind the gated sha, which holds the check) takes no arm back", async () => {
+    const id = T("landed-stale");
+    await seed(id);
+    await tick(later()); // dispatch
+    writeCheck(id, `stale shelf radiation ${id}`);
+    land(id);
+    await tick(later()); // armed
+    expect(ledgerOf(await stored(id))["state"]).toBe("armed");
+    const landedAt = git("rev-parse", "origin/dev");
+    setGated(landedAt);
+    // The clone's ref falls behind the landing (the mirror did not move it): the check reads absent there.
+    git("update-ref", "refs/remotes/origin/dev", `${landedAt}~1`);
+    try {
+      await tick(later());
+      const row = await stored(id);
+      expect(ledgerOf(row)["state"]).toBe("armed");
+      expect(elig.composeEligibilitySkipReason(row!)).toBeNull();
+    } finally { git("update-ref", "refs/remotes/origin/dev", landedAt); }
+  });
+
+  it("[MUST-FAIL] a missing gated-sha marker decides nothing: the arm stays", async () => {
+    const id = await armedThenUnlanded("landed-nomarker");
+    setGated(null);
+    await tick(later());
+    const row = await stored(id);
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(elig.composeEligibilitySkipReason(row!)).toBeNull();
   });
 
   it("[CONTROL] another node's arm is left alone (its clone may hold a landing this one has not pulled)", async () => {
@@ -237,6 +277,7 @@ describe("an arm on a check that is not at origin/dev is taken back", () => {
     const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: row } as never);
     expect(w.shape).not.toBe("structuredError");
     await sg.__settleBirthEvaluationsForTests();
+    setGated(git("rev-parse", "origin/dev"));
     await tick(later());
     const after = await stored(id);
     expect(ledgerOf(after)["state"]).toBe("armed");

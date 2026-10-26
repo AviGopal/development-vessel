@@ -96,7 +96,7 @@ import { dispatchGoalOnPeer, placeCompose, placementArmKnobs, readPlacedDispatch
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
-import { METABOB_API_KEY } from "../config.js";
+import { METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
 import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
 import { testChildEnv } from "../test-child-env.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
@@ -235,6 +235,26 @@ export function landedCheckSource(vessel: string, testFile: string, trees?: Map<
     if (p.exitCode === 0) src = new TextDecoder().decode(p.stdout);
   } catch { /* spawn failed: unreadable */ }
   return src === null ? { state: "unreadable" } : { state: "landed", src };
+}
+
+/**
+ * IS THIS CLONE'S origin/dev CURRENT ENOUGH TO SAY A CHECK IS NOT THERE? An "absent" read from a STALE ref (the mirror
+ * did not move it, a fetch failed) would take back an arm on a check that did land. So an absent decides only when
+ * origin/dev contains the sha this node's pull-sync gate last verified for the vessel (its marker
+ * <workspace>/.pull-sync/<vessel>.gated-sha, the one pull-sync reads first). A missing or malformed marker, or a ref
+ * that does not contain it, is not current: nothing is decided. `cache` holds the answer per vessel for the tick.
+ */
+export function originDevCurrent(vessel: string, cache?: Map<string, { current: boolean; why: string }>): { current: boolean; why: string } {
+  const hit = cache?.get(vessel);
+  if (hit) return hit;
+  let out: { current: boolean; why: string };
+  let gated = "";
+  try { gated = readFileSync(join(WORKSPACE_ROOT, ".pull-sync", `${vessel}.gated-sha`), "utf-8").trim(); } catch { gated = ""; }
+  if (!/^[0-9a-f]{40}$/i.test(gated)) out = { current: false, why: `no readable gated-sha marker for ${vessel}` };
+  else if (sweepGitOut(join(clonesRoot(), vessel), ["merge-base", "--is-ancestor", gated, "origin/dev"]) === null) out = { current: false, why: `origin/dev does not contain the gated sha ${gated.slice(0, 12)}` };
+  else out = { current: true, why: "" };
+  cache?.set(vessel, out);
+  return out;
 }
 
 /**
@@ -1994,7 +2014,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // every armed check-supply row's check at origin/dev; one that is absent there is un-armed as 2a un-arms
   // (arm_refused, evidence_resolve cleared, the reason the next goal's lesson). Only this node's own arms (or one
   // recorded before arms named their node): another node's clone may hold a landing this one has not pulled yet. An
-  // unreadable origin/dev decides nothing.
+  // unreadable origin/dev decides nothing, and so does a stale one (originDevCurrent).
+  const devCurrent = new Map<string, { current: boolean; why: string }>();
+  const staleSaid = new Set<string>();
   for (const row of open) {
     const id = String(row["id"]);
     if (touched.has(id)) continue;
@@ -2005,6 +2027,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const er = (meta["evidence_resolve"] ?? null) as { input?: Row } | null;
     if (er?.input?.["test_file"] !== ledger.test_file) continue;
     if (landedCheckSource(ledger.vessel, ledger.test_file, landedRefs).state !== "absent") continue;
+    // A STALE origin/dev DECIDES NOTHING (originDevCurrent): said once per vessel per tick.
+    const cur = originDevCurrent(ledger.vessel, devCurrent);
+    if (!cur.current) {
+      if (!staleSaid.has(ledger.vessel)) { staleSaid.add(ledger.vessel); console.warn(`[gap-check-supply] stale origin/dev in the ${ledger.vessel} clone (${cur.why}): no armed check is taken back this tick`); }
+      continue;
+    }
     touched.add(id);
     const reason = `${CHECK_NOT_LANDED}: the armed check ${ledger.test_file} is not at origin/dev in the ${ledger.vessel} clone (never landed, or removed); un-armed`;
     refused += 1;

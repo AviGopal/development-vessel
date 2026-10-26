@@ -172,6 +172,33 @@ const DEFAULT_LLM_TOOLS: LlmTool[] = [
   },
 ];
 
+/** The completion's text and caller-run tool_calls, from any of the three `content` envelopes (see the tail). */
+function extractCompletion(rawBody: { content?: unknown }): { rawText: any; toolCalls: any[] | undefined } {
+  const _c = rawBody.content as any;
+  const rawText = typeof _c === "string"
+    ? _c
+    : Array.isArray(_c)
+      ? (_c[0] as { text?: string } | undefined)?.text
+      : (_c && typeof _c === "object")
+        ? (_c.value ?? _c.text ?? _c.body?.value ?? _c.body?.content)
+        : undefined;
+  const toolCalls = typeof _c === "string"
+    ? undefined
+    : Array.isArray(_c)
+      ? (_c[0] as { tool_calls?: any[] } | undefined)?.tool_calls
+      : (_c && typeof _c === "object")
+        ? _c.tool_calls
+        : undefined;
+  return { rawText, toolCalls };
+}
+
+/** No text (null, "" or whitespace) and no caller-run tool_calls: an answer that carries nothing. */
+function isEmptyCompletion(candidate: { content?: unknown }): boolean {
+  const { rawText, toolCalls } = extractCompletion(candidate);
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) return false;
+  return rawText == null || (typeof rawText === "string" && rawText.trim() === "");
+}
+
 /** This resolver's tier, declared where it is defined: it runs a model call, so it is an `llm` resolver. Registration
  *  (discovery-registration.ts declaredResolverTiers) sends it as `resolvers[]`, discovery echoes it on the capability
  *  row, and a dispatcher stamps the trace task with it (the learning loop's M4 tier-restricted skip reads that stamp). */
@@ -278,6 +305,10 @@ export async function resolveLlmCompletionDispatch(
     // name (llm-model-selection observability seam).
     model?: string;
     fallback_from?: string;
+    // Why the provider stopped (max_tokens, stop, tool loop exhausted). Read only to explain an
+    // empty completion; absent on today's resolver, which does not report it.
+    stop_reason?: string;
+    iterations?: number;
     // Tools the llm-resolver EXECUTED server-side in its own tool loop
     // ({iteration, tool_name, tool_input, tool_output | {error}, duration_ms}).
     // Distinct from content-level tool_calls, which are calls the CALLER must run.
@@ -336,6 +367,62 @@ export async function resolveLlmCompletionDispatch(
         detail: typeof r["error"] === "string" ? r["error"] : "dispatch input-token budget spent",
         failure_mode: "dispatch_budget_exhausted",
         dispatch_budget: r["dispatch_budget"] ?? null,
+      },
+    };
+  };
+
+  // AN EMPTY ANSWER IS NOT A WINNER. llm-resolver answers `resolved:true, content:""` when a
+  // model spends its budget on hidden reasoning, runs its tool loop out, or returns an empty
+  // turn. The guard above checks only error/resolved/success, so that body won, the loop broke,
+  // and the tail threw "did not return text or tool_calls" — an HTTP 500 for the caller, while
+  // every other endpoint and federated arm went untried. It was about half of one node's
+  // failures. An answer with no text (null, "" or whitespace) and no tool_calls is a
+  // verifier_negative for that arm, and the cascade moves on. The coming resolver form,
+  // `resolved:false, error:"empty_completion"`, is the same class and is tagged the same way.
+  const emptyArms: Array<{ endpoint: string; model?: string; stop_reason?: string; iterations?: number }> = [];
+  const emptyEvidence = (c: unknown, endpoint: string): { endpoint: string; model?: string; stop_reason?: string; iterations?: number } => {
+    const top = (c && typeof c === "object" ? c : {}) as Record<string, unknown>;
+    const content = top["content"] && typeof top["content"] === "object" ? top["content"] as Record<string, unknown> : {};
+    const inner = content["body"] && typeof content["body"] === "object" ? content["body"] as Record<string, unknown> : {};
+    const pick = (k: string): unknown => top[k] ?? content[k] ?? inner[k];
+    const m = pick("model"), sr = pick("stop_reason") ?? pick("finish_reason"), it = pick("iterations");
+    return {
+      endpoint,
+      ...(typeof m === "string" ? { model: m } : {}),
+      ...(typeof sr === "string" ? { stop_reason: sr } : {}),
+      ...(typeof it === "number" ? { iterations: it } : {}),
+    };
+  };
+  const isEmptyCompletionError = (e: unknown): boolean => typeof e === "string" && e.startsWith("empty_completion");
+  const recordEmpty = (c: unknown, endpoint: string): void => {
+    const ev = emptyEvidence(c, endpoint);
+    emptyArms.push(ev);
+    const d = `empty_completion${ev.model ? ` model=${ev.model}` : ""}${ev.stop_reason ? ` stop_reason=${ev.stop_reason}` : ""}: the arm answered with no text and no tool_calls`;
+    failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+    // An empty answer never displaces a specific refusal another arm gave: that refusal is the
+    // cause a caller can act on.
+    if (!primaryRefusal) {
+      primaryRefusal = { detail: d };
+      lastFailure = { detail: d, failure_mode: "verifier_negative" };
+    }
+  };
+  // Fields that explain an empty completion go FIRST, in the body and in `detail`: the route copies
+  // `detail` into `error`, and upstream dispatchers keep only the first ~200 characters.
+  const emptyCompletionError = (): ResolverResult => {
+    const models = [...new Set(emptyArms.map((a) => a.model).filter((m): m is string => !!m))];
+    const stopReasons = [...new Set(emptyArms.map((a) => a.stop_reason).filter((r): r is string => !!r))];
+    const iterations = emptyArms.map((a) => a.iterations).find((n) => typeof n === "number");
+    return {
+      shape: "structuredError",
+      body: {
+        failure_mode: "empty_completion",
+        models,
+        requested_model: model,
+        ...(stopReasons.length > 0 ? { stop_reason: stopReasons.join(",") } : {}),
+        ...(typeof iterations === "number" ? { iterations } : {}),
+        resolver: "llm_completion_dispatch",
+        detail: `empty_completion models=${models.join(",") || "unknown"} requested=${model}${stopReasons.length > 0 ? ` stop_reason=${stopReasons.join(",")}` : ""}: every arm that answered returned no text and no tool_calls`,
+        failures,
       },
     };
   };
@@ -423,6 +510,10 @@ export async function resolveLlmCompletionDispatch(
     const refusedLocal = budgetRefusalOf(candidate);
     if (refusedLocal) return refusedLocal;
     const nested = federatedError(candidate);
+    if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
+      recordEmpty(candidate, endpoint);
+      continue;
+    }
     if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
       {
         const d = candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false";
@@ -430,6 +521,10 @@ export async function resolveLlmCompletionDispatch(
         if (!primaryRefusal) primaryRefusal = { detail: d };
         lastFailure = { detail: d, failure_mode: "verifier_negative" };
       }
+      continue;
+    }
+    if (isEmptyCompletion(candidate)) {
+      recordEmpty(candidate, endpoint);
       continue;
     }
 
@@ -468,6 +563,10 @@ export async function resolveLlmCompletionDispatch(
         const refusedFed = budgetRefusalOf(candidate);
         if (refusedFed) return refusedFed;
         const nested = federatedError(candidate);
+        if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
+          recordEmpty(candidate, endpoint);
+          continue;
+        }
         if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
           {
             const d = candidate?.error ?? nested ?? "federated arm returned error";
@@ -477,12 +576,20 @@ export async function resolveLlmCompletionDispatch(
           }
           continue;
         }
+        if (isEmptyCompletion(candidate)) {
+          recordEmpty(candidate, endpoint);
+          continue;
+        }
         result = candidate;
         break;
       }
     }
   }
 
+  // Every arm that ANSWERED answered empty (arms that could not be reached do not change that).
+  if (!result && emptyArms.length > 0 && failures.every((f) => f.failure_mode !== "verifier_negative" || f.detail.startsWith("empty_completion"))) {
+    return emptyCompletionError();
+  }
   if (!result) {
     return {
       shape: "structuredError",
@@ -499,23 +606,13 @@ export async function resolveLlmCompletionDispatch(
   // llm-resolver-vessel answers over libp2p. The last case previously fell
   // through `content?.[0]` (undefined) and discarded a correctly-computed
   // answer, starving every LLM-tier walk step (the ReAct floor). Unwrap all three.
-  const _c = rawBody.content as any;
-  const rawText = typeof _c === "string"
-    ? _c
-    : Array.isArray(_c)
-      ? (_c[0] as { text?: string } | undefined)?.text
-      : (_c && typeof _c === "object")
-        ? (_c.value ?? _c.text ?? _c.body?.value ?? _c.body?.content)
-        : undefined;
-  const toolCalls = typeof _c === "string"
-    ? undefined
-    : Array.isArray(_c)
-      ? (_c[0] as { tool_calls?: any[] } | undefined)?.tool_calls
-      : (_c && typeof _c === "object")
-        ? _c.tool_calls
-        : undefined;
+  const { rawText, toolCalls } = extractCompletion(rawBody);
   if (!rawText && !toolCalls) {
-    throw new Error(`LLM completion did not return text or tool_calls: ${JSON.stringify(rawBody)}`);
+    // The loops reject an empty answer with the same extractor, so only a falsy non-string
+    // `content` reaches here; it is returned as an error, never thrown (a throw becomes an
+    // HTTP 500 that hides the cause).
+    recordEmpty(rawBody, "(winner)");
+    return emptyCompletionError();
   }
   if (toolCalls && toolCalls.length > 0) {
     return { shape: "llmToolCalls" as const, body: { tool_calls: toolCalls } };

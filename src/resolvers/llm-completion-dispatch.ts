@@ -328,7 +328,7 @@ export async function resolveLlmCompletionDispatch(
     failure_mode: "cascading",
   };
   let primaryRefusal: { detail: string } | null = null;
-  type FailureEntry = { endpoint: string; status?: number; detail: string; failure_mode: string };
+  type FailureEntry = { endpoint: string; status?: number; detail: string; failure_mode: string; model?: string; requested_model?: string };
   const failures: FailureEntry[] = [];
   // Hoisted to function scope: both the local loop and the lazy federated loop
   // below need it, and a failure envelope looks the same wherever it comes from.
@@ -379,16 +379,23 @@ export async function resolveLlmCompletionDispatch(
   // failures. An answer with no text (null, "" or whitespace) and no tool_calls is a
   // verifier_negative for that arm, and the cascade moves on. The coming resolver form,
   // `resolved:false, error:"empty_completion"`, is the same class and is tagged the same way.
-  const emptyArms: Array<{ endpoint: string; model?: string; stop_reason?: string; iterations?: number }> = [];
-  const emptyEvidence = (c: unknown, endpoint: string): { endpoint: string; model?: string; stop_reason?: string; iterations?: number } => {
+  type EmptyArm = { endpoint: string; model?: string; requested_model?: string; stop_reason?: string; iterations?: number };
+  const emptyArms: EmptyArm[] = [];
+  // The model that ANSWERED empty is `served_model` when the resolver names it: on its refusals
+  // `model` is the drawn arm and `requested_model` what the caller asked for, neither of which is
+  // the one to blame. Older bodies carry only `model`.
+  const emptyEvidence = (c: unknown, endpoint: string): EmptyArm => {
     const top = (c && typeof c === "object" ? c : {}) as Record<string, unknown>;
     const content = top["content"] && typeof top["content"] === "object" ? top["content"] as Record<string, unknown> : {};
     const inner = content["body"] && typeof content["body"] === "object" ? content["body"] as Record<string, unknown> : {};
     const pick = (k: string): unknown => top[k] ?? content[k] ?? inner[k];
-    const m = pick("model"), sr = pick("stop_reason") ?? pick("finish_reason"), it = pick("iterations");
+    const served = pick("served_model");
+    const m = typeof served === "string" && served ? served : pick("model");
+    const rq = pick("requested_model"), sr = pick("stop_reason") ?? pick("finish_reason"), it = pick("iterations");
     return {
       endpoint,
       ...(typeof m === "string" ? { model: m } : {}),
+      ...(typeof rq === "string" && rq ? { requested_model: rq } : {}),
       ...(typeof sr === "string" ? { stop_reason: sr } : {}),
       ...(typeof it === "number" ? { iterations: it } : {}),
     };
@@ -397,8 +404,12 @@ export async function resolveLlmCompletionDispatch(
   const recordEmpty = (c: unknown, endpoint: string): void => {
     const ev = emptyEvidence(c, endpoint);
     emptyArms.push(ev);
-    const d = `empty_completion${ev.model ? ` model=${ev.model}` : ""}${ev.stop_reason ? ` stop_reason=${ev.stop_reason}` : ""}: the arm answered with no text and no tool_calls`;
-    failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+    const d = `empty_completion${ev.model ? ` model=${ev.model}` : ""}${ev.requested_model ? ` requested=${ev.requested_model}` : ""}${ev.stop_reason ? ` stop_reason=${ev.stop_reason}` : ""}: the arm answered with no text and no tool_calls`;
+    failures.push({
+      endpoint, detail: d, failure_mode: "verifier_negative",
+      ...(ev.model ? { model: ev.model } : {}),
+      ...(ev.requested_model ? { requested_model: ev.requested_model } : {}),
+    });
     // An empty answer never displaces a specific refusal another arm gave: that refusal is the
     // cause a caller can act on.
     if (!primaryRefusal) {
@@ -412,6 +423,9 @@ export async function resolveLlmCompletionDispatch(
     const models = [...new Set(emptyArms.map((a) => a.model).filter((m): m is string => !!m))];
     const stopReasons = [...new Set(emptyArms.map((a) => a.stop_reason).filter((r): r is string => !!r))];
     const iterations = emptyArms.map((a) => a.iterations).find((n) => typeof n === "number");
+    // What the arms say was requested, when they say; otherwise what this dispatch asked for.
+    const armRequested = [...new Set(emptyArms.map((a) => a.requested_model).filter((r): r is string => !!r))];
+    const requested = armRequested.length > 0 ? armRequested.join(",") : model;
     return {
       shape: "structuredError",
       body: {
@@ -421,7 +435,7 @@ export async function resolveLlmCompletionDispatch(
         ...(stopReasons.length > 0 ? { stop_reason: stopReasons.join(",") } : {}),
         ...(typeof iterations === "number" ? { iterations } : {}),
         resolver: "llm_completion_dispatch",
-        detail: `empty_completion models=${models.join(",") || "unknown"} requested=${model}${stopReasons.length > 0 ? ` stop_reason=${stopReasons.join(",")}` : ""}: every arm that answered returned no text and no tool_calls`,
+        detail: `empty_completion models=${models.join(",") || "unknown"} requested=${requested}${stopReasons.length > 0 ? ` stop_reason=${stopReasons.join(",")}` : ""}: every arm that answered returned no text and no tool_calls`,
         failures,
       },
     };

@@ -119,6 +119,20 @@ describe("MUST-FAIL — every endpoint answers empty: a structuredError empty_co
     expect(b.stop_reason).toBe("tool_loop_exhausted");
   });
 
+  it("the arm that ANSWERED empty is named: served_model, not the drawn or requested arm (nested and top-level refusals)", async () => {
+    const refusal = { resolved: false, error: "empty_completion", served_model: "Y", model: "X", requested_model: "X" };
+    answerFor = (u) => (u === A ? { content: { body: refusal } } : refusal);
+    const r = await dispatch();
+    expect(r.shape).toBe("structuredError");
+    const b = r.body as Body;
+    expect(b.failure_mode).toBe("empty_completion");
+    expect(b.models).toEqual(["Y"]);
+    expect(String(b.detail).startsWith("empty_completion models=Y requested=X")).toBe(true);
+    const failures = b.failures as Array<Body>;
+    expect(failures.map((f) => [f.model, f.requested_model])).toEqual([["Y", "X"], ["Y", "X"]]);
+    for (const f of failures) expect(String(f.detail).startsWith("empty_completion model=Y requested=X")).toBe(true);
+  });
+
   it("an arm that could not be reached does not hide that the arms that answered were empty", async () => {
     answerFor = (u) => (u === A ? "connect" : { resolved: true, content: "", model: "m-b" });
     const r = await dispatch();

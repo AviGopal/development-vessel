@@ -385,6 +385,23 @@ export class GapDrainObserver {
       this.recordDrain({ action: "refused_remedy_type", gap_id: gapId, category, impulse_type: impulseType.slice(0, 80) });
       return;
     }
+    // ADMISSION HOLD. The dispatchable path never asked whether the gap is admissible: operator_hold, a parking
+    // disposition (needs_information, needs_info, awaiting_operator_review) or a landing awaiting its verdict
+    // (pending_verification) were dispatched anyway. gap-eligibility's isAdmissionHeld is the SAME predicate the
+    // composable path (composeEligibilitySkipReason, above) and the picker use, so a hold decision here can never
+    // drift from theirs. The event payload carries no classification_metadata, so the row is read (readGapRowForNudge,
+    // the same cached reader the composable path uses); an unreadable row holds nothing, same fail-open as the
+    // livelock hold just below.
+    try {
+      const row = await readGapRowForNudge(gapId);
+      const { isAdmissionHeld } = await import("../judge/gap-eligibility.js");
+      if (row && isAdmissionHeld(row)) {
+        this.recordDrain({ action: "held_admission", gap_id: gapId, category });
+        return;
+      }
+    } catch (err) {
+      console.log(`[gap-drain-observer] admission-hold read failed for ${gapId} (dispatching as before): ${String(err).slice(0, 200)}`);
+    }
     // LIVELOCK HOLD. remedy_effectiveness_observer files an open remedy_livelock gap naming the gap whose remedy keeps
     // being dispatched without moving its metric (classification_metadata.failing_gap_id). Nothing consumed it, so
     // this observer kept re-dispatching the very gap it names. While such a gap is open, the named gap is held

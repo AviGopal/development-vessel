@@ -221,6 +221,18 @@ export function ownCheckUnarmMeta(own: { site: string; check: string }, at: stri
  *  as a string or {class}), naming an edit site (edit_site, file_path, change_site, suspected_real_location or a
  *  row-level file_path) that is not its own check (editSiteIsOwnCheck), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
 export type ComposeEligibilitySkipReason = "not_open" | "edit_site_is_own_check" | "unarmed" | "no_edit_site" | "held";
+
+/** The held-from-compose predicate composeEligibilitySkipReason's own "held" branch uses: operator_hold, a parking
+ *  disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), or a landing awaiting its verdict
+ *  (isAwaitingLandVerification). Exported so a caller with no armed/edit-site notion of its own — the drain
+ *  observer's dispatchable path, which dispatches gaps composeEligibilitySkipReason was never meant to gate — can
+ *  apply the SAME hold without duplicating it or drifting from the picker's. */
+export function isAdmissionHeld(row: Record<string, unknown>): boolean {
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  return meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION || isAwaitingLandVerification(row);
+}
+
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
   if (String(row["status"] ?? "open") !== "open") return "not_open";
   const rawMeta = row["classification_metadata"] ?? row["metadata"];
@@ -231,7 +243,7 @@ export function composeEligibilitySkipReason(row: Record<string, unknown>): Comp
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
   if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
-  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION || isAwaitingLandVerification(row)) return "held";
+  if (isAdmissionHeld(row)) return "held";
   return null;
 }
 

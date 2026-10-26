@@ -4909,6 +4909,23 @@ export function landedCloseReason(meta: Record<string, unknown> | null | undefin
 export function systemAuthoredDissentHold(dissent: SemanticDissent | null | undefined, directed: unknown, gapId: unknown): boolean {
   return !!dissent && gapId != null && String(gapId) !== "" && directed !== true;
 }
+/**
+ * THE bf3eb526 PATTERN: a park written BEFORE dissent_held existed carries no such reason, so the
+ * "dissent_held" resume guard misses it — but writeParkedLanding has ALWAYS recorded the semantic
+ * gate's verdict on every park, old code included: `judge: { addresses, reason }`. Read THAT instead
+ * of the reason string. Refuse a SYSTEM-authored resume (directed !== true, the same signal
+ * systemAuthoredDissentHold reads) unless the recorded verdict is an explicit addresses:true:
+ *   - addresses:false (a legacy dissent, whatever its reason) -> refuse, whatever its reason;
+ *   - addresses missing/null (no verdict was recorded for this landing at all) -> refuse too, fail
+ *     closed, so the gap re-drafts and faces the judge fresh rather than silently landing what
+ *     nothing judged;
+ *   - addresses:true -> an unrelated, gate-agreed park; resume as before.
+ * An operator-directed resume is unaffected: a stale park cannot take away the operator's authority
+ * to land over the gate's opinion, same as systemAuthoredDissentHold.
+ */
+export function legacyParkVerdictRefusal(judgeAddresses: unknown, directed: unknown): boolean {
+  return directed !== true && judgeAddresses !== true;
+}
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {
   return !!oc && oc.ran && oc.tc_ok && Array.isArray(oc.base_red) && oc.base_red.length > 0 && oc.draft_red.length === 0 && !oc.contract_breach;
@@ -7309,6 +7326,11 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
       // exists to withhold. Leave it parked and redraft, which re-runs the gate fresh.
       if (park.reason === "dissent_held") {
         console.log(`[feature-compose] park for ${pointer.gap.id} is dissent_held (semantic gate addresses:false); not auto-resumed, redrafting`);
+      } else if (legacyParkVerdictRefusal(park.judge?.addresses, (pointer as { directed?: boolean }).directed)) {
+        // A park from BEFORE dissent_held existed (or from any other route) carries no such reason,
+        // but its recorded judge.addresses is not an explicit true: same refusal as dissent_held,
+        // read from the verdict every park has always carried instead of the reason string.
+        console.log(`[feature-compose] park for ${pointer.gap.id} has no addresses:true verdict recorded (judge.addresses=${JSON.stringify(park.judge?.addresses ?? null)}); not auto-resumed on a system landing, redrafting`);
       } else if (Date.now() - Date.parse(park.parked_at) < (pointer.parked_landing_ttl_ms ?? 86_400_000)) {
         const resumed = await resumeParkedLanding(pointer, park, toolsEndpoint);
         if (resumed) return resumed;

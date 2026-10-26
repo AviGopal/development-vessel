@@ -315,6 +315,9 @@ function park(gapId: string, reason: string) {
 function entryPointer(gapId: string) {
   return { type: "feature_compose", spec: "fixture spec", land: true, skip_push: true, directed: true, gap: { id: gapId } };
 }
+function parkWithJudge(gapId: string, reason: string, judge: { addresses: boolean | null; reason: string | null }) {
+  return { ...park(gapId, reason), judge };
+}
 
 describe("a dissent_held park is never auto-resumed; a pre-cutover park still is", () => {
   it("MUST-FAIL: a dissent_held park is NOT resumed — no cutover call, the compose falls through to a normal (re-)draft", async () => {
@@ -337,5 +340,78 @@ describe("a dissent_held park is never auto-resumed; a pre-cutover park still is
     const r = await fc2.resolveFeatureCompose(entryPointer(gapId));
     expect(cutoverCalls.length).toBe(1);
     expect((r.body as Record<string, unknown>)["resumed_from"]).toBe(`${VESSEL}-fc-test`);
+  });
+});
+
+// THE bf3eb526 PATTERN: a park written BEFORE dissent_held existed (any reason other than
+// "dissent_held") carries no such reason, but writeParkedLanding has ALWAYS recorded the semantic
+// gate's verdict on every park (judge: {addresses, reason}) — read THAT instead. Measured: at
+// 20:30:58Z a dissented compose logged "cutover did not land — verified patch parked" and the park
+// it left had reason "pre-cutover" with judge.addresses:false; the dissent_held-only guard would
+// have let it auto-resume and land once this fix installed.
+describe("legacyParkVerdictRefusal: pure", () => {
+  let guard: FetchGuard;
+  let execGuard: ExecGuard;
+  beforeEach(() => { guard = installCutoverFetchGuard(); execGuard = installCutoverExecGuard(); });
+  afterEach(() => {
+    const execViolations = execGuard.restore();
+    expect(guard.restore()).toEqual([]);
+    expect(execViolations).toEqual([]);
+  });
+  afterAll(() => { restoreCutoverFetch(); restoreCutoverExecModules(); });
+
+  const refuse = exported<(judgeAddresses: unknown, directed: unknown) => boolean>("legacyParkVerdictRefusal");
+
+  it("MUST-FAIL: a legacy park recording addresses:false on a system (undirected) resume is refused, whatever its reason", () => {
+    expect(refuse(false, undefined)).toBe(true);
+    expect(refuse(false, false)).toBe(true);
+  });
+
+  it("MUST-FAIL: a park with NO recorded verdict (null/undefined) on a system resume is refused too (fail closed)", () => {
+    expect(refuse(null, undefined)).toBe(true);
+    expect(refuse(undefined, undefined)).toBe(true);
+  });
+
+  it("CONTROL: a park recording an explicit addresses:true still resumes, even on a system landing", () => {
+    expect(refuse(true, undefined)).toBe(false);
+  });
+
+  it("CONTROL: an OPERATOR-directed resume is unaffected whatever the park recorded (false, null, or true)", () => {
+    expect(refuse(false, true)).toBe(false);
+    expect(refuse(null, true)).toBe(false);
+    expect(refuse(true, true)).toBe(false);
+  });
+});
+
+// An UNDIRECTED entry through the full resolveFeatureCompose hits an EARLIER, unrelated admission gate
+// first (spendEnvelopeAllows: "undirected compose NOT started: spend envelope ... no poolImpulse
+// producer discovered" — a budget check this fixture has no discovery/pool producer for), so the three
+// undirected cases below are proven at the level the rest of this file already uses for anything past
+// that gate (feature-compose-semantic-dissent.test.ts, feature-compose-dissent-partial.test.ts: pure +
+// AST, never a full own-check-pipeline drive): the pure predicate above (already pinning
+// false/null/undefined -> refuse, true -> resume) plus this wiring pin that the CALLER actually reads
+// park.judge.addresses through it, in the right place, before the ttl-resume. The one case this file CAN
+// drive end-to-end — directed, which skips spendEnvelopeAllows entirely — is the integration test below.
+describe("the resume entry reads the park's RECORDED verdict (judge.addresses), not only its reason", () => {
+  it("CONTROL: a DIRECTED (operator) entry still resumes a park recording addresses:false", async () => {
+    const gapId = "gap-legacy-dissent-directed";
+    await setup(gapId);
+    await fc2.writeParkedLanding(parkWithJudge(gapId, "pre-cutover", { addresses: false, reason: "2/2 refuters: advisory (legacy fixture)" }));
+    const r = await fc2.resolveFeatureCompose(entryPointer(gapId));
+    expect(cutoverCalls.length).toBe(1);
+    expect((r.body as Record<string, unknown>)["resumed_from"]).toBe(`${VESSEL}-fc-test`);
+  });
+
+  it("MUST-FAIL (AST, comments/reflow-proof): the resume entry calls legacyParkVerdictRefusal on park.judge.addresses — not park.reason — between the dissent_held branch and the ttl-resume, and that branch itself never calls resumeParkedLanding", () => {
+    const SRC_PATH = new URL("../../src/resolvers/feature-compose.ts", import.meta.url).pathname;
+    const src = readFileSync(SRC_PATH, "utf8");
+    const dissentHeldIdx = src.indexOf('if (park.reason === "dissent_held") {');
+    expect(dissentHeldIdx, 'the dissent_held branch must exist first').toBeGreaterThan(-1);
+    const legacyIdx = src.indexOf("legacyParkVerdictRefusal(park.judge?.addresses,", dissentHeldIdx);
+    expect(legacyIdx, "an else-if reading park.judge.addresses through legacyParkVerdictRefusal must follow the dissent_held branch").toBeGreaterThan(dissentHeldIdx);
+    const resumeCallIdx = src.indexOf("await resumeParkedLanding(pointer, park, toolsEndpoint)", legacyIdx);
+    expect(resumeCallIdx, "the real resumeParkedLanding call must come after (textually below) the legacy-park guard").toBeGreaterThan(legacyIdx);
+    const guardBlock = src.slice(legacyIdx, resumeCallIdx);
+    expect(guardBlock.includes("resumeParkedLanding(")).toBe(false);
   });
 });

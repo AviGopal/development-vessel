@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { selfAuthKey } from "../lib/self-auth.js";
 import { discoverActivityApiEndpoint, discoverConceptDbEndpoint } from "../lib/discovered-endpoint.js";
+import { DRAFTER_DECLARED_WRITES } from "../seed/draft-activity-from-pattern.js";
 import path from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveCreditVesselShapes } from "./credit-vessel-shapes.js";
@@ -335,6 +336,9 @@ async function dispatchClusterAuthor(
       body: JSON.stringify({
         goal: `author an activity that observes the arrived vessel from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
+        // Declare the drafter's write so goal-host admits the pinned dispatch as a change; undeclared, its
+        // register_variant task is skipped at the write door (as for the other three pattern feeders).
+        expected_output_shapes: DRAFTER_DECLARED_WRITES,
         variables: {
           pattern_id: patternId,
           patterns_dir: patternsDir,

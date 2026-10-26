@@ -2617,6 +2617,10 @@ const familySample: string[] = await (async () => {
         body: JSON.stringify({
           goal: "reconcile the trace store back under its configured cap",
           targetTemplateId: selectedTemplateId,
+          // The lease is a store write: goal-host's task door skips it on a pinned dispatch unless it is the goal's
+          // declared product, and the reconcile then fails for a missing lease_token. Declaring it makes acquire_lease
+          // and release_lease run; the health report stays the reach target.
+          expected_output_shapes: ["maintenanceLease_write", "traceStoreHealthReport"],
         }),
         signal: AbortSignal.timeout(15_000),
       });

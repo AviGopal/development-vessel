@@ -6466,9 +6466,10 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
     }
     const stored = rows?.find((r) => String(r.id) === _gapIdForSlot);
     const land = admissionLand;
-    let held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
+    const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
     // A HOLD COVERS ITS LINEAGE (heldLineageAncestor): a recommit / narrowed / step child of a held gap is refused as
     // held. Each ancestor is read by id (by-id reads are never hold-filtered); one that cannot be read counts as held.
+    let lineageHeld = false;
     if (stored && !held) {
       // The walk is the pure one; the ancestors it asks for are read here until it asks for none it lacks.
       const ancestorRows = new Map<string, Array<Record<string, unknown>> | null>();
@@ -6484,7 +6485,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
       }
       const heldBy = heldLineageAncestor(stored, (id) => ancestorRows.has(id) ? ancestorRows.get(id)! : null);
       if (heldBy) {
-        held = true;
+        lineageHeld = true;
         console.log(`[feature-compose] gap ${_gapIdForSlot}: lineage ancestor ${heldBy.id} ${heldBy.why === "unreadable" ? "could not be read (a hold fails closed)" : "is under operator_hold"}; refused as held`);
       }
     }
@@ -6508,7 +6509,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
     let admissionWhy: string | null = null;
     let supplyException: { admitted: boolean; why: string } | null = null;
     let admissionStored: "unreadable" | "absent" | "present" = rows === null ? "unreadable" : stored ? "present" : "absent";
-    if (stored && land && !held) {
+    if (stored && land && !held && !lineageHeld) {
       const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
       why = composeEligibilitySkipReason(stored);
       admissionWhy = why;
@@ -6552,7 +6553,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
     const metaSite = (m: unknown): string | null => { const e = (m as { edit_site?: unknown } | undefined)?.edit_site; return typeof e === "string" && e.trim() ? e.trim() : null; };
     const admissionInput: import("./compose-admission-core.js").ComposeAdmissionInput = {
       schema: 1, entry: "composeAdmission", gap_id: _gapIdForSlot, lane, land, supply_marker: !!supplyMarker,
-      stored: rows === null ? "unreadable" : stored ? "present" : "absent", operator_hold: held, why, supply_verdict: supplyVerdict,
+      stored: rows === null ? "unreadable" : stored ? "present" : "absent", operator_hold: held || lineageHeld, why, supply_verdict: supplyVerdict,
       edit_site: metaSite(stored?.classification_metadata) ?? metaSite((pointer.gap as { classification_metadata?: unknown } | undefined)?.classification_metadata),
       // The scope port is not read at admission yet (the scope is checked at landing); the record says so.
       scope: null, scope_reason: SCOPE_NOT_CONSULTED,

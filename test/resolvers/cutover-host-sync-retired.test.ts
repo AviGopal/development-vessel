@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TESTS, BUN_PASSING, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
@@ -45,10 +46,12 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 let errLines: string[] = [];
 let errSpy: ReturnType<typeof spyOn> | null = null;
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 
@@ -91,6 +94,11 @@ beforeEach(async () => {
   clearScopeDefault();
   __resetPolicyReadsForTests();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL above, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -113,12 +121,14 @@ afterEach(async () => {
   errSpy = null;
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   __setOwnCheckDepsForTests(null);
   __resetPolicyReadsForTests();
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   await rm(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 function git(cwd: string, ...args: string[]): string {

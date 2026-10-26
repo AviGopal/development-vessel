@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 const setBaseline = (cutoverMod as unknown as { __setPrecutoverBaselineForTests?: (f: ((v: string) => Promise<string[] | null>) | null) => void }).__setPrecutoverBaselineForTests;
@@ -32,11 +33,13 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 let gapRows: Map<string, Record<string, any>>;
 let suiteRed = false;
 const notReached: string[] = [];
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 
@@ -148,6 +151,11 @@ beforeEach(async () => {
   });
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL above, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   gapRows = routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -167,6 +175,7 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   __setOwnCheckDepsForTests(null);
   setBaseline?.(null);
   for (const k of ENV_KEYS) {
@@ -176,6 +185,7 @@ afterEach(async () => {
   await rm(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 describe("cutover revert_of: a regressed lane landing is reverted through the landing chokepoint", () => {

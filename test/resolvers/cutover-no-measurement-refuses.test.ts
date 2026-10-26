@@ -66,6 +66,7 @@ import {
   installCutoverFetchGuard, routeFleetUnreachable, routeShell,
   BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { appendRecord } from "../../src/resolvers/attempt-ledger.js";
 import { directedIntentStamp } from "../../src/resolvers/attempt-register.js";
 
@@ -99,10 +100,12 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 // Backstop: whatever happened in this file, the next file in the same bun process gets the real
 // fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 
@@ -158,6 +161,11 @@ beforeEach(async () => {
   currentHost = "";
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL above, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // never the module-load-captured store
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -166,6 +174,7 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -173,6 +182,7 @@ afterEach(async () => {
   }
   await rm(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);
+  expect(execViolations).toEqual([]);
   expect(fsViolations).toEqual([]);
 });
 

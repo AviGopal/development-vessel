@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { spawnSync as spawnSyncGuard } from "node:child_process";
 
 let tmpRoot: string;
@@ -56,10 +57,12 @@ const savedPushScopeEnv: Record<string, string | undefined> = {};
 // (no_measurement_available), and these tests are about apply/push scope, not about that.
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 // Backstop: whatever happened in this file, the next file in the same bun process gets the real
 // fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 /** The in-memory gap store every gap read/write in this file goes to (GAP_STORE_ENDPOINT). */
@@ -76,6 +79,11 @@ let currentHost = "";
 beforeEach(() => {
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   gapStore = routeFixtureGapStore(guard);
@@ -92,10 +100,12 @@ beforeEach(() => {
 afterEach(() => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"];
   else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint;
   expect(violations).toEqual([]);
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 beforeEach(async () => {

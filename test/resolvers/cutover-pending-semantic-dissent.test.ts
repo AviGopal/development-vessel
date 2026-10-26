@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
@@ -48,10 +49,12 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 // Backstop: whatever happened in this file, the next file in the same bun process gets the real
 // fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 /** Pre-cutover suite runs: shell calls made while the landing clone still sat at "baseline". */
@@ -86,6 +89,11 @@ beforeEach(async () => {
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL above, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // never the module-load-captured store
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -96,6 +104,7 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   setDeps(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -105,6 +114,7 @@ afterEach(async () => {
   for (const r of extraRoots.splice(0)) await rm(r, { recursive: true, force: true });
   expect(violations).toEqual([]);               // last, so a violation never skips the cleanup above
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }> {

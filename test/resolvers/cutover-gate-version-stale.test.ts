@@ -89,6 +89,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test"
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { clearGateVersionDefault, FIXTURE_GATE_VERSION } from "./cutover-gate-default.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, copyFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -144,9 +145,11 @@ let ws: string;
 const extraDirs: string[] = [];
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+let execGuard: ExecGuard;
 // Backstop: the next file in the same bun process gets the real fs and fetch (see cutover-fs-guard.ts).
 afterAll(() => {
   restoreCutoverFsModules();
+  restoreCutoverExecModules();
   restoreCutoverFetch();
 });
 let currentHost = "";
@@ -182,6 +185,11 @@ beforeEach(async () => {
   // default, cutover-gate-default.ts), fs guard, and the in-memory fixture gap store.
   guard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
+  // attempt-checks.ts's systemd_units check spawns `systemctl show <vessel>.service -p LoadState --value`
+  // (not gated by MITOSIS_CUTOVER_SKIP_SYSTEMCTL above, a different call site): answered as a host with no
+  // systemd, as test/drafter-split/harness.ts and auto-revert.test.ts already do for the same check.
+  execGuard = installCutoverExecGuard();
+  execGuard.route({ name: "attempt-check-unit", match: (c) => /systemctl show \S+ -p LoadState --value/.test(c), respond: () => ({ exitCode: 1, stdout: "" }) });
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
   routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
@@ -192,6 +200,7 @@ beforeEach(async () => {
 afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
+  const execViolations = execGuard.restore();
   setGateDeps(null);
   setOwnDeps(null);
   for (const k of ENV_KEYS) {
@@ -202,6 +211,7 @@ afterEach(async () => {
   for (const d of extraDirs.splice(0)) await rm(d, { recursive: true, force: true });
   expect(violations).toEqual([]);
   expect(fsViolations).toEqual([]);
+  expect(execViolations).toEqual([]);
 });
 
 type Fixture = { baseRoot: string; mitosisRoot: string; hostRepoRoot: string; originRoot: string; baseSha: string; pendingPath: string };

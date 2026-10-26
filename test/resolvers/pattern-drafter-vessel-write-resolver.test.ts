@@ -24,10 +24,16 @@ type Task = { id: string; description: string; resolver: string; config: Record<
 type Posted = { id: string; tasks: Task[]; outputShapes?: string[]; output_shapes?: string[] };
 
 let posted: Posted | null = null;
+/** Shapes the stubbed registry already has a producer for (discover-by-shapes answers CONTAINSANY). */
+let producedElsewhere = new Set<string>();
 beforeAll(() => {
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     const u = String(url);
-    if (u.includes("/discover-by-shapes")) return new Response(JSON.stringify({ activities: [] }), { status: 200 });
+    if (u.includes("/discover-by-shapes")) {
+      const req = (JSON.parse(String(init?.body ?? "{}")) as { required_shapes?: string[] }).required_shapes ?? [];
+      const hit = req.some((s) => producedElsewhere.has(s));
+      return new Response(JSON.stringify({ activities: hit ? [{ id: "proposed_pattern_authored_other_writer" }] : [] }), { status: 200 });
+    }
     if (u.endsWith("/v2/activities/templates")) {
       posted = JSON.parse(String(init?.body ?? "{}")) as Posted;
       return new Response(JSON.stringify({ id: posted.id }), { status: 200 });
@@ -48,9 +54,13 @@ function draft(id: string, tasks: Task[], outputShapes: string[]): Record<string
   };
 }
 
-async function register(tpl: Record<string, unknown>, extra: Record<string, unknown> = { validate_permissive_scope: true }): Promise<Posted> {
+async function attempt(tpl: Record<string, unknown>, extra: Record<string, unknown> = { validate_permissive_scope: true }) {
   posted = null;
-  const r = await resolveActivityCreateVariant({ type: "activity_create_variant", template: JSON.stringify(tpl), _registryLookupFn: async () => [], ...extra } as never);
+  return resolveActivityCreateVariant({ type: "activity_create_variant", template: JSON.stringify(tpl), _registryLookupFn: async () => [], ...extra } as never);
+}
+
+async function register(tpl: Record<string, unknown>, extra?: Record<string, unknown>): Promise<Posted> {
+  const r = await attempt(tpl, extra);
   expect({ shape: r.shape, body: r.shape === "structuredError" ? r.body : "ok" }).toEqual({ shape: "activityRegistryChange", body: "ok" });
   return posted!;
 }
@@ -125,5 +135,25 @@ describe("draft-activity-from-pattern: vessel writes are resolver tasks", () => 
     const out = await register(draft("gap-closing:widget_fixture", [write], ["httpResponse"]), {});
     expect(out.tasks[0]!.resolver).toBe("http_fetch");
     expect(out.tasks[0]!.config).toEqual(write.config);
+  });
+});
+
+describe("reuse-before-mint does not treat a store write as the template's capability", () => {
+  const writer = (id: string): Record<string, unknown> =>
+    draft(id, [read, classify, { id: "persist_widget", description: DESC, resolver: "widget_write", config: { widget: { name: "w" } } }], ["widgetSummary"]);
+  afterAll(() => { producedElsewhere = new Set(); });
+
+  test("MUST-FAIL: a second drafted writer of the same store is not refused as a duplicate of the first", async () => {
+    producedElsewhere = new Set(["widget_write"]);
+    const out = await register(writer("proposed_pattern_authored_second_widget_writer"));
+    expect(out.output_shapes).toEqual(["widgetSummary", "widget_write"]);
+  });
+
+  test("CONTROL: an existing producer of the template's own capability shape still refuses the mint", async () => {
+    producedElsewhere = new Set(["widgetSummary"]);
+    const r = await attempt(writer("proposed_pattern_authored_duplicate_summary"));
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { failure_mode?: string }).failure_mode).toBe("reuse_existing_producer");
+    expect(posted).toBeNull();
   });
 });

@@ -915,7 +915,11 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       "testRunResult",
       "pattern_metadata",
     ]);
-    const capabilityIdentifyingDeclaredOut = declaredOut.filter(shapeName => !GENERIC_IO_SHAPES.has(shapeName));
+    // A store write (`*_write`) is a sink the vessel serves, not a capability this template owns: every
+    // template that persists to the same store declares it, so probing it refused the second drafted
+    // writer of a store as a duplicate of the first. It neither triggers the probe nor is probed.
+    const probedOut = declaredOut.filter((shapeName) => !VESSEL_WRITE_SHAPE.test(shapeName));
+    const capabilityIdentifyingDeclaredOut = probedOut.filter(shapeName => !GENERIC_IO_SHAPES.has(shapeName));
 
     if (
       reuseMode !== "off" &&
@@ -937,7 +941,7 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
         const dres = await fetch(`${METABOB_ENDPOINT}/v2/activities/discover-by-shapes`, {
           method: "POST",
           headers: { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "candidates_with_scores", required_shapes: declaredOut }),
+          body: JSON.stringify({ mode: "candidates_with_scores", required_shapes: probedOut }),
           signal: AbortSignal.timeout(8000),
         });
         if (dres.ok) {

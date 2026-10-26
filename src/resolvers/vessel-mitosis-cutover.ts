@@ -373,6 +373,28 @@ let precutoverBaselineForTests: ((vessel: string) => Promise<string[] | null>) |
 export function __setPrecutoverBaselineForTests(f: ((vessel: string) => Promise<string[] | null>) | null): void {
   precutoverBaselineForTests = f;
 }
+/** Tests only: the baseline file's TEXT for a vessel (null = no file), in place of the file read, so the gate parses it
+ *  (parsePostLandBaseline) as it parses the live file; null restores the file read. */
+let precutoverBaselineTextForTests: ((vessel: string) => Promise<string | null>) | null = null;
+export function __setPrecutoverBaselineTextForTests(f: ((vessel: string) => Promise<string | null>) | null): void {
+  precutoverBaselineTextForTests = f;
+}
+
+/**
+ * THE POST-LAND BASELINE FILE NAMES ITS FORMAT (2026-10-26). Up to test-suite.ts THE WHOLE FAILING SET, the file held
+ * a bare JSON list written from test_suite's failingTests, which was capped at 25 names: on a suite failing more than
+ * 25 tests it is a prefix, not the failing set. The writer now stores { format: POST_LAND_BASELINE_FORMAT, failing }.
+ * A bare list is LEGACY: still read (it is the only baseline a vessel has until its next landing rewrites it), but
+ * marked so the pre-cutover gate re-measures the parent for what it would refuse (dropRedOnBase), and the post-land
+ * attribution files nothing against it. Anything else is no baseline.
+ */
+export const POST_LAND_BASELINE_FORMAT = 2;
+export function parsePostLandBaseline(raw: unknown): { names: string[]; legacy: boolean } | null {
+  if (Array.isArray(raw)) return { names: raw.map(String), legacy: true };
+  const o = (raw && typeof raw === "object" ? raw : null) as { format?: unknown; failing?: unknown } | null;
+  if (o && o.format === POST_LAND_BASELINE_FORMAT && Array.isArray(o.failing)) return { names: o.failing.map(String), legacy: false };
+  return null;
+}
 
 export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
   // AN EMPTY BASELINE IS UNMEASURED, NOT GREEN.
@@ -3280,17 +3302,27 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       if (failNow !== null) {                // null = unmeasurable → fall through and commit
         const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
         let baseline: string[] | null = null;
+        let baselineLegacy = false;
         try {
-          const bstat = await fs.stat(baseFile);
-          // A baseline older than BASELINE_MAX_AGE_MS predates whatever has since drifted in the
-          // tree, so treating it as authoritative blames every staged change for pre-existing
-          // failures — and the refusal prevents the green landing that would refresh it. An
-          // unusable baseline already fails open (computeNewlyFailing(null, …) === []); reuse it.
-          if (Date.now() - bstat.mtimeMs <= BASELINE_MAX_AGE_MS) {
-            baseline = JSON.parse(await readFile(baseFile, "utf8")) as string[];
+          if (precutoverBaselineTextForTests) {
+            const text = await precutoverBaselineTextForTests(String(vessel_name));
+            const parsed = text === null ? null : parsePostLandBaseline(JSON.parse(text));
+            baseline = parsed?.names ?? null;
+            baselineLegacy = parsed?.legacy === true;
+          } else {
+            const bstat = await fs.stat(baseFile);
+            // A baseline older than BASELINE_MAX_AGE_MS predates whatever has since drifted in the
+            // tree, so treating it as authoritative blames every staged change for pre-existing
+            // failures — and the refusal prevents the green landing that would refresh it. An
+            // unusable baseline already fails open (computeNewlyFailing(null, …) === []); reuse it.
+            if (Date.now() - bstat.mtimeMs <= BASELINE_MAX_AGE_MS) {
+              const parsed = parsePostLandBaseline(JSON.parse(await readFile(baseFile, "utf8")));
+              baseline = parsed?.names ?? null;
+              baselineLegacy = parsed?.legacy === true;
+            }
           }
-        } catch { baseline = null; }
-        if (precutoverBaselineForTests) baseline = await precutoverBaselineForTests(String(vessel_name));
+        } catch { baseline = null; baselineLegacy = false; }
+        if (precutoverBaselineForTests) { baseline = await precutoverBaselineForTests(String(vessel_name)); baselineLegacy = false; }
         let newlyFailing = computeNewlyFailing(baseline, failNow);
         // TRACKED RED IS NOT A REGRESSION (2026-09-30): subtract names an OPEN gap for this vessel
         // deliberately tracks as red (evidence_resolve.only_tests), never the landing gap's own, and
@@ -3343,15 +3375,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           newlyFailing = failAgain === null ? [] : await dropTrackedRed(computeNewlyFailing(baseline, failAgain));
         }
         // A CHECK-ONLY STAGING IS JUDGED AGAINST ITS PARENT, MEASURED NOW (isCheckOnlyStaging): the confirmed names that
-        // are red on the parent too are not this staging's regression. A staging that touches anything else is unchanged.
-        if (newlyFailing.length > 0 && isCheckOnlyStaging(stagedFiles)) {
+        // are red on the parent too are not this staging's regression. So is ANY staging whose baseline is LEGACY
+        // (parsePostLandBaseline: a capped list, so a name missing from it says nothing): the parent is re-measured at
+        // this tick for what the gate would refuse. A staging against a current baseline is unchanged.
+        if (newlyFailing.length > 0 && (isCheckOnlyStaging(stagedFiles) || baselineLegacy)) {
           const r = await dropRedOnBase(
             newlyFailing,
             async (lines) => (await runSuiteWith({ only_tests: lines.map((l) => l.replace(/^\s*\(fail\)\s*/, "").trim()), base_ref: "HEAD" })).failing,
           );
           if (r.note) operations.push({ op: "precutover_red_on_base", status: "warn", detail: r.note });
           if (r.red_on_base.length > 0) {
-            const msg = `precutover: check-only staging; ${r.red_on_base.length} confirmed failing test(s) also fail on the parent tree at this tick, not counted: ${r.red_on_base.join(" ; ").slice(0, 400)}`;
+            const msg = `precutover: ${baselineLegacy ? "legacy (capped) baseline" : "check-only staging"}; ${r.red_on_base.length} confirmed failing test(s) also fail on the parent tree at this tick, not counted: ${r.red_on_base.join(" ; ").slice(0, 400)}`;
             console.log(`[mitosis-cutover] ${msg}`);
             operations.push({ op: "precutover_red_on_base", status: "ok", detail: msg });
           }
@@ -4025,13 +4059,15 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     const _failNow: string[] = Array.isArray(sb.failingTests) ? (sb.failingTests as string[]).map(String) : [];
     const _baseDir = "/workspace/post-land-baseline";
     const _baseFile = `${_baseDir}/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
+    // A LEGACY (capped) baseline is not the failing set (parsePostLandBaseline): nothing is attributable against it, so it
+    // reads as no baseline here and is replaced by the full set below.
     let _prev: string[] | null = null;
-    try { _prev = JSON.parse(await readFile(_baseFile, "utf8")) as string[]; } catch { _prev = null; }
+    try { const p = parsePostLandBaseline(JSON.parse(await readFile(_baseFile, "utf8"))); _prev = p && !p.legacy ? p.names : null; } catch { _prev = null; }
     const _newlyFailing = computeNewlyFailing(_prev, _failNow);
     // Only a suite that ran to its summary is a baseline: a killed run lists only part of its failures.
     if (sb.ran === true) try {
       await mkdir(_baseDir, { recursive: true });
-      await writeFile(_baseFile, JSON.stringify(_failNow));
+      await writeFile(_baseFile, JSON.stringify({ format: POST_LAND_BASELINE_FORMAT, failing: _failNow }));
     } catch { /* baseline is best-effort; a missed write costs one noisy cycle, not correctness */ }
     if (_prev === null && sb.ran === true) {
       console.log(`[mitosis-cutover] post-land suite: no baseline for ${vessel_name} yet — recorded ${_failNow.length} failing test(s), filing nothing (nothing is attributable on first observation)`);

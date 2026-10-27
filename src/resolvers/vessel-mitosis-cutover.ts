@@ -3373,14 +3373,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           // artefact. Re-run only the named failures; keep as regressions only those that
           // still fail by themselves. Falls back to the old whole-suite confirmation when
           // no test name could be extracted, so an unparseable line cannot wave a real
-          // regression through.
+          // regression through. A "(fail) (unnamed)" line is one of those (2026-10-26): bun's placeholder for an error
+          // raised outside any test (a load error between tests), so its leaf is no test title, bun's name filter
+          // matches nothing, and an only_tests re-run of it measures nothing (failAgain null, refused below even
+          // when the error was transient). It takes the whole-suite confirmation instead.
           const isolatedNames = newlyFailing
             .map((line) => {
               const withoutPrefix = line.replace(/^\s*\(fail\)\s*/, "").trim();
               const segments = withoutPrefix.split(" > ");
               return (segments[segments.length - 1] ?? "").trim();
             })
-            .filter((n) => n.length > 0);
+            .filter((n) => n.length > 0 && n !== "(unnamed)");
           //
           // AN UNMEASURED CONFIRMATION IS NOT A PASS (2026-10-26). A confirmation run with no result (failAgain null: the
           // runner did not run, a shell or dispatch failure, a refused name list) used to clear newlyFailing, so the

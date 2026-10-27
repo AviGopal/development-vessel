@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { readTuningNumber } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -191,6 +192,54 @@ async function enforceCanonicalAnalyzePrompt(template: Record<string, unknown>):
     task["config"] = cfg;
     task["outputShapes"] = ["patch_proposal"];
   }
+}
+
+/**
+ * A LIST FETCH BOUND INTO AN LLM PROMPT IS PROJECTED, NOT PASSED RAW (law 8: the load-bearing fact is a summary).
+ * Measured: gap-closing variants fetched `execution-traces?limit=20` and bound the whole list into the analyze prompt
+ * through {{fetch_traces_content}} (the executor binds an object output uncapped), about 265-279k input tokens against
+ * the 200k ceiling, so every such run was refused. The composer now rewrites that fetch into a resolve, through
+ * discovery, of the existing read-only summary trace_failure_pattern_report (development-vessel; emit_gap false, so it
+ * writes nothing): the same window of traces, grouped into failure patterns (template, first failed task, task counts,
+ * failure-mode types, at most 3 example ids each), so the bound size is set by the number of patterns, not by trace
+ * bodies. The task is the summary's own shape as its resolver, which the executor routes through discovery to whichever
+ * vessel serves it (no pinned host or port). How many traces it scans is the tuning row below, read at registration
+ * (default when no row answers). A fetch whose output no llm task binds, any other URL, and every non-fetch task are
+ * left as they are. The resolver allow-list below admits this one read shape only in exactly that read-only form.
+ */
+export const GAP_CLOSING_TRACE_PROJECTION_LIMIT_ROW = "gap_closing.trace_projection_limit";
+export const GAP_CLOSING_TRACE_PROJECTION_LIMIT_DEFAULT = 20;
+export const GAP_CLOSING_TRACE_SUMMARY_SHAPE = "trace_failure_pattern_report";
+const TRACE_LIST_PATH = /\/v2\/activities\/execution-traces\/?(?:\?|$)/;
+
+function bindsTaskOutput(prompt: string, taskId: string): boolean {
+  const id = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\{\\{\\s*${id}(?:_[A-Za-z0-9_]+)?\\s*\\}\\}`).test(prompt);
+}
+
+export async function projectTraceListFetches(template: Record<string, unknown>): Promise<string[]> {
+  const tasks = Array.isArray(template["tasks"]) ? (template["tasks"] as Record<string, unknown>[]) : [];
+  const prompts = tasks
+    .filter((t) => String(t["resolver"]) === "llm_completion_dispatch")
+    .map((t) => String(((t["config"] ?? {}) as Record<string, unknown>)["prompt"] ?? ""));
+  const projected: string[] = [];
+  let limit: number | null = null;
+  for (const task of tasks) {
+    if (String(task["resolver"]) !== "http_fetch") continue;
+    const cfg = (task["config"] ?? {}) as Record<string, unknown>;
+    const method = String(cfg["method"] ?? "GET").toUpperCase();
+    if (method !== "GET" || !TRACE_LIST_PATH.test(String(cfg["url"] ?? ""))) continue;
+    const id = String(task["id"] ?? "");
+    if (!id || !prompts.some((p) => bindsTaskOutput(p, id))) continue;
+    if (limit === null) {
+      const row = await readTuningNumber(GAP_CLOSING_TRACE_PROJECTION_LIMIT_ROW);
+      limit = row !== null && row >= 1 ? Math.floor(row) : GAP_CLOSING_TRACE_PROJECTION_LIMIT_DEFAULT;
+    }
+    task["resolver"] = GAP_CLOSING_TRACE_SUMMARY_SHAPE;
+    task["config"] = { type: GAP_CLOSING_TRACE_SUMMARY_SHAPE, limit, min_occurrences: 1, emit_gap: false };
+    projected.push(id);
+  }
+  return projected;
 }
 
 export interface ActivityCreateVariantPointer {
@@ -699,6 +748,7 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       // schemas. This override forces TASK 3 back to the canonical patch_proposal
       // prompt so apply_proposal_as_patch can consume the output.
       await enforceCanonicalAnalyzePrompt(t);
+      await projectTraceListFetches(t);
       const tasks = Array.isArray(t["tasks"]) ? (t["tasks"] as Record<string, unknown>[]) : [];
       // json_path_extract removed from ALLOWED — too fragile and the prompt explicitly bans it.
       // LLM-drafted templates repeatedly use it for object navigation that breaks on schema variance;
@@ -711,7 +761,9 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
         const resolver = String(task["resolver"] ?? "");
         const cfg = (task["config"] ?? {}) as Record<string, unknown>;
 
-        if (!ALLOWED_RESOLVERS.has(resolver)) {
+        // The composer's own projection (projectTraceListFetches): the read-only summary, never one that files gaps.
+        const projection = resolver === GAP_CLOSING_TRACE_SUMMARY_SHAPE && cfg["emit_gap"] === false;
+        if (!ALLOWED_RESOLVERS.has(resolver) && !projection) {
           return { shape: "structuredError", body: {
             resolver: "activity_create_variant", failure_mode: "validation_rejected",
             detail: `Task '${task["id"]}' uses disallowed resolver '${resolver}'. Allowed: ${[...ALLOWED_RESOLVERS].join(",")}. Use llm_completion_dispatch to process JSON.`,

@@ -6,7 +6,9 @@
 // fix draft ran a missing file and was unjudged (81 of 99 armed own-check runs on one node, 2026-10-26). The arm now
 // reads the check at the clone's origin/dev (landedCheckSource), and each pass un-arms this node's armed check-supply
 // rows whose check is not there, but only when origin/dev is current (it contains this node's gated sha for the vessel,
-// originDevCurrent): a stale ref, or no marker, decides nothing.
+// originDevCurrent): a stale ref, or no marker, decides nothing. The marker is read where pull-sync writes it (the
+// volume's .pull-sync), not under WORKSPACE_ROOT, which live is the super-repo clone: read there, no marker was ever
+// found and no false arm was taken back. Here the volume is VOLUME (a temp dir), distinct from WORKSPACE_ROOT.
 //
 // Hermetic: a temp bare origin and a clone of it at VESSELS_CLONE_ROOT/<vessel>; the gap store, the rhythm and the
 // check runs are the in-process fixtures the other tick tests use. Fixture gap text from a five-word draw
@@ -25,6 +27,7 @@ const ROOT = join(tmpdir(), `gcs-landed-${Date.now()}-${Math.random().toString(3
 const CLONES = join(ROOT, "clones");
 const RUNTIME = join(ROOT, "runtime");
 const ORIGIN = join(ROOT, "origin.git");
+const VOLUME = join(ROOT, "volume");
 const ENV_KEYS = ["SUBSTRATE_NAME", "WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "SELF_RESOLVE_ENDPOINT"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
@@ -42,6 +45,9 @@ const supply = await import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 const { WORKSPACE_ROOT } = await import("../../src/config.js");
+// The seam is absent before the fix (the marker was read under WORKSPACE_ROOT): there the volume's marker goes unread.
+const setMarkerDir = (supply as Record<string, unknown>)["__setPullSyncMarkerDirForTests"] as ((d: string | null) => void) | undefined;
+setMarkerDir?.(join(VOLUME, ".pull-sync"));
 
 type Row = Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -115,6 +121,7 @@ afterAll(async () => {
   console.warn = origWarn;
   restoreCutoverExecModules();
   __resetDiscoveryForTests();
+  setMarkerDir?.(null);
   for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
@@ -153,13 +160,17 @@ const writeCheck = (id: string, title: string): void =>
 const land = (id: string): void => { git("add", "--", checkPathOf(id)); git("commit", "-q", "-m", `check ${id}`); git("push", "-q", "origin", "dev"); };
 /** The check taken off dev (and so off the clone, as the mirror's refresh does). */
 const unland = (id: string): void => { git("rm", "-q", "--", checkPathOf(id)); git("commit", "-q", "-m", `drop ${id}`); git("push", "-q", "origin", "dev"); };
-/** This node's pull-sync gate marker for the vessel (<workspace>/.pull-sync/<vessel>.gated-sha), or none. */
-const MARKER = join(WORKSPACE_ROOT, ".pull-sync", `${VESSEL}.gated-sha`);
-const setGated = (sha: string | null): void => {
+/** This node's pull-sync gate marker for the vessel (<volume>/.pull-sync/<vessel>.gated-sha, where pull-sync writes
+ * it), or none. Only there: a copy under WORKSPACE_ROOT (the clone) is removed, so a pass that reads it can't pass. */
+const MARKER = join(VOLUME, ".pull-sync", `${VESSEL}.gated-sha`);
+const CLONE_MARKER = join(WORKSPACE_ROOT, ".pull-sync", `${VESSEL}.gated-sha`);
+const setGated = (sha: string | null, at: string = MARKER): void => {
   if (!WORKSPACE_ROOT.startsWith(tmpdir()) && !WORKSPACE_ROOT.startsWith("/tmp/")) throw new Error(`workspace root ${WORKSPACE_ROOT} is not a temp dir`);
-  if (sha === null) { rmSync(MARKER, { force: true }); return; }
-  mkdirSync(join(WORKSPACE_ROOT, ".pull-sync"), { recursive: true });
-  writeFileSync(MARKER, `${sha}\n`);
+  if (!VOLUME.startsWith(tmpdir()) && !VOLUME.startsWith("/tmp/")) throw new Error(`volume ${VOLUME} is not a temp dir`);
+  for (const m of [MARKER, CLONE_MARKER]) rmSync(m, { force: true });
+  if (sha === null) return;
+  mkdirSync(join(at, ".."), { recursive: true });
+  writeFileSync(at, `${sha}\n`);
 };
 let clock = Date.now() + 5000 * 3600_000;
 const later = (): number => (clock += 30 * 3600_000);
@@ -257,6 +268,26 @@ describe("an arm on a check that is not at origin/dev is taken back", () => {
       expect(ledgerOf(row)["state"]).toBe("armed");
       expect(elig.composeEligibilitySkipReason(row!)).toBeNull();
     } finally { git("update-ref", "refs/remotes/origin/dev", landedAt); }
+  });
+
+  it("[MUST-FAIL] the marker read is the volume's, not WORKSPACE_ROOT's: with WORKSPACE_ROOT at another dir (the clone), a current marker under the volume un-arms", async () => {
+    expect(join(WORKSPACE_ROOT, ".pull-sync")).not.toBe(join(VOLUME, ".pull-sync"));
+    const id = await armedThenUnlanded("landed-volmarker");
+    setGated(git("rev-parse", "origin/dev"));
+    await tick(later());
+    const row = await stored(id);
+    expect(ledgerOf(row)["state"]).toBe("arm_refused");
+    expect(String(ledgerOf(row)["reason"] ?? "")).toContain("check_not_landed");
+    expect(elig.composeEligibilitySkipReason(row!)).toBe("unarmed");
+  });
+
+  it("[MUST-FAIL] a marker only under WORKSPACE_ROOT (the clone, where pull-sync writes none) is not read: the arm stays", async () => {
+    const id = await armedThenUnlanded("landed-clonemarker");
+    setGated(git("rev-parse", "origin/dev"), CLONE_MARKER);
+    await tick(later());
+    const row = await stored(id);
+    expect(ledgerOf(row)["state"]).toBe("armed");
+    expect(elig.composeEligibilitySkipReason(row!)).toBeNull();
   });
 
   it("[MUST-FAIL] a missing gated-sha marker decides nothing: the arm stays", async () => {

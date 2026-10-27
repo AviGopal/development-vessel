@@ -96,7 +96,7 @@ import { dispatchGoalOnPeer, placeCompose, placementArmKnobs, readPlacedDispatch
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
-import { METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
+import { METABOB_API_KEY, VOLUME_ROOT } from "../config.js";
 import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
 import { testChildEnv } from "../test-child-env.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
@@ -241,15 +241,21 @@ export function landedCheckSource(vessel: string, testFile: string, trees?: Map<
  * IS THIS CLONE'S origin/dev CURRENT ENOUGH TO SAY A CHECK IS NOT THERE? An "absent" read from a STALE ref (the mirror
  * did not move it, a fetch failed) would take back an arm on a check that did land. So an absent decides only when
  * origin/dev contains the sha this node's pull-sync gate last verified for the vessel (its marker
- * <workspace>/.pull-sync/<vessel>.gated-sha, the one pull-sync reads first). A missing or malformed marker, or a ref
+ * <volume>/.pull-sync/<vessel>.gated-sha, the one pull-sync reads first). A missing or malformed marker, or a ref
  * that does not contain it, is not current: nothing is decided. `cache` holds the answer per vessel for the tick.
+ * The marker is runtime state pull-sync writes (its MARKER_DIR), so it is read under VOLUME_ROOT, never WORKSPACE_ROOT:
+ * the env file points that at the super-repo clone, where no marker is, and every tick read "no readable gated-sha
+ * marker", so no false arm was ever taken back.
  */
+let pullSyncMarkerDir = join(VOLUME_ROOT, ".pull-sync");
+/** Tests point the marker dir at a temp dir (null restores the volume's); the vessel never calls it. */
+export function __setPullSyncMarkerDirForTests(dir: string | null): void { pullSyncMarkerDir = dir ?? join(VOLUME_ROOT, ".pull-sync"); }
 export function originDevCurrent(vessel: string, cache?: Map<string, { current: boolean; why: string }>): { current: boolean; why: string } {
   const hit = cache?.get(vessel);
   if (hit) return hit;
   let out: { current: boolean; why: string };
   let gated = "";
-  try { gated = readFileSync(join(WORKSPACE_ROOT, ".pull-sync", `${vessel}.gated-sha`), "utf-8").trim(); } catch { gated = ""; }
+  try { gated = readFileSync(join(pullSyncMarkerDir, `${vessel}.gated-sha`), "utf-8").trim(); } catch { gated = ""; }
   if (!/^[0-9a-f]{40}$/i.test(gated)) out = { current: false, why: `no readable gated-sha marker for ${vessel}` };
   else if (sweepGitOut(join(clonesRoot(), vessel), ["merge-base", "--is-ancestor", gated, "origin/dev"]) === null) out = { current: false, why: `origin/dev does not contain the gated sha ${gated.slice(0, 12)}` };
   else out = { current: true, why: "" };

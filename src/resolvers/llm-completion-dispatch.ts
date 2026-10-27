@@ -352,10 +352,27 @@ export async function resolveLlmCompletionDispatch(
   // federated peer, keeps its own ledger and would serve the same dispatch past the allowance, so
   // cascading would turn the refusal into a bypass. Stop and pass the refusal through (top-level on
   // a local answer, under content.body when it crossed the federation transport).
+  // A PROMPT-CEILING REFUSAL IS TERMINAL TOO. llm-resolver refuses a prompt over llmModelPolicy.max_input_tokens before
+  // any provider call, and a prompt too large for one arm is too large for every arm (it stops its own fallback walk on
+  // it). Measured: cascading past it re-sent a ~280k-token prompt to the remaining local endpoints and two federated
+  // arms, about 138 s per call before the same refusal came back. Passed through at once, like the budget refusal.
   const budgetRefusalOf = (c: unknown): ResolverResult | null => {
     if (!c || typeof c !== "object") return null;
     const top = c as Record<string, unknown>;
     const inner = top["content"] && typeof top["content"] === "object" ? (top["content"] as Record<string, unknown>)["body"] : undefined;
+    const ceiling = top["prompt_ceiling"] === true ? top
+      : inner && typeof inner === "object" && (inner as Record<string, unknown>)["prompt_ceiling"] === true ? inner as Record<string, unknown>
+      : null;
+    if (ceiling) {
+      return {
+        shape: "structuredError",
+        body: {
+          resolver: "llm_completion_dispatch",
+          detail: typeof ceiling["error"] === "string" ? ceiling["error"] : "prompt too large for the input-token ceiling",
+          failure_mode: "prompt_ceiling",
+        },
+      };
+    }
     const r = top["dispatch_budget_exhausted"] === true ? top
       : inner && typeof inner === "object" && (inner as Record<string, unknown>)["dispatch_budget_exhausted"] === true ? inner as Record<string, unknown>
       : null;

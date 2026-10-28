@@ -12,11 +12,12 @@ import { afterAll, describe, expect, it, mock } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-f9", { superRepo: true, who: "test/drafter-split/f9-attempt-drafter-record.test.ts" });
-const { createHarness, CORPUS } = await import("./harness.js");
+const { createHarness, CORPUS, installInlineDrafterWorker } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
+const restoreInlineWorker = installInlineDrafterWorker();
 const DRAFTER = "../../src/drafter/index.ts";
 const realDrafter = { ...(await import(DRAFTER)) };
-afterAll(() => { mock.module(DRAFTER, () => realDrafter); H.restore(); });
+afterAll(() => { mock.module(DRAFTER, () => realDrafter); restoreInlineWorker(); H.restore(); });
 
 const FX = CORPUS.find((f) => f.name === "directed / verify red")!;
 let seq = 0;

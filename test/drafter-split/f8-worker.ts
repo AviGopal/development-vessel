@@ -4,7 +4,7 @@ import { assembleDrafterContext, planDrafterReads } from "../../src/drafter/inde
 
 declare const self: Worker;
 self.onmessage = (ev: MessageEvent<{ fn: "planDrafterReads" | "assembleDrafterContext" | "__never"; facts: unknown }>) => {
-  if (ev.data.fn === "__never") return; // the control: a worker that never answers
+  if (ev.data.fn === "__never") { for (;;) { /* the control: a module that never returns */ } }
   const t0 = performance.now();
   try {
     const out = ev.data.fn === "planDrafterReads" ? planDrafterReads(ev.data.facts as never) : assembleDrafterContext(ev.data.facts as never);

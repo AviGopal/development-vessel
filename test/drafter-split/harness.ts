@@ -46,6 +46,43 @@ export interface Fixture {
   /** Other pool records the own pool producer holds, by shape (e.g. spendEnvelope for a landing compose). */
   pool?: Record<string, Row>;
 }
+
+/** In-process test adapter for module mocks. Production always uses the real terminable Worker; tests that replace a
+ * drafter module use this facade so Bun's mock.module applies in the test isolate. */
+export function installInlineDrafterWorker(): () => void {
+  const previous = globalThis.Worker;
+  type WireRequest = { variant: string; entry: "planDrafterReads" | "assembleDrafterContext"; facts: unknown };
+  type WireReply = { ok: true; value: unknown } | { ok: false; error: string };
+  class InlineDrafterWorker {
+    onmessage: ((this: Worker, ev: MessageEvent<WireReply>) => unknown) | null = null;
+    onerror: ((this: Worker, ev: ErrorEvent) => unknown) | null = null;
+    postMessage(raw: unknown): void {
+      void Promise.resolve().then(async () => {
+        const input = raw as WireRequest;
+        try {
+          if (input.variant !== "drafter-v1" && !/^drafter-v[0-9]+[a-z0-9-]*$/.test(input.variant)) throw new Error("variant id is outside the allowlist");
+          const specifier = input.variant === "drafter-v1" ? "../../src/drafter/index.ts" : `../../src/drafter/variants/${input.variant}/index.ts`;
+          let mod: Record<string, unknown>;
+          try { mod = await import(specifier) as Record<string, unknown>; }
+          catch (err) {
+            this.onmessage?.call(this as unknown as Worker, new MessageEvent<WireReply>("message", { data: { ok: false, error: `import_failed: ${String((err as Error)?.message ?? err)}` } }));
+            return;
+          }
+          const fn = mod[input.entry];
+          if (typeof fn !== "function") throw new Error(`module missing ${input.entry}`);
+          const value = await (fn as (facts: unknown) => unknown)(input.facts);
+          this.onmessage?.call(this as unknown as Worker, new MessageEvent<WireReply>("message", { data: { ok: true, value } }));
+        } catch (err) {
+          const stage = (raw as WireRequest)?.entry === "planDrafterReads" ? "plan_threw" : "assemble_threw";
+          this.onmessage?.call(this as unknown as Worker, new MessageEvent<WireReply>("message", { data: { ok: false, error: `${stage}: ${String((err as Error)?.message ?? err)}` } }));
+        }
+      });
+    }
+    terminate(): void {}
+  }
+  globalThis.Worker = InlineDrafterWorker as unknown as typeof Worker;
+  return () => { globalThis.Worker = previous; };
+}
 export interface Recording {
   name: string;
   verdict: unknown; stage: unknown; ok: unknown; error: string;

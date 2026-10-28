@@ -15,8 +15,9 @@ import { afterAll, describe, expect, it, mock } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-f10", { superRepo: true, who: "test/drafter-split/f10-variant-allowlist.test.ts" });
-const { createHarness, CORPUS } = await import("./harness.js");
+const { createHarness, CORPUS, installInlineDrafterWorker } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
+const restoreInlineWorker = installInlineDrafterWorker();
 const DRAFTER = "../../src/drafter/index.ts";
 const realDrafter = { ...(await import(DRAFTER)) };
 // A variant that exists only in this test (no variant ships with this change): it delegates to the shipped module and
@@ -30,7 +31,7 @@ const counting = (bump: () => void) => ({
 });
 mock.module(DRAFTER, () => counting(() => { defaultCalls++; }));
 for (const ext of ["ts", "js"]) mock.module(`../../src/drafter/variants/${FIXTURE_ID}/index.${ext}`, () => counting(() => { variantCalls++; }));
-afterAll(() => { mock.module(DRAFTER, () => realDrafter); H.restore(); });
+afterAll(() => { mock.module(DRAFTER, () => realDrafter); restoreInlineWorker(); H.restore(); });
 
 const FX = CORPUS.find((f) => f.name === "directed / pass / no region / no own check")!;
 let seq = 0;

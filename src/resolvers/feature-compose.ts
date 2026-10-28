@@ -6986,8 +6986,8 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
 // ── THE DRAFTER SPLIT: THE CLOSED SIDE (clamps, fact capture, the open-module call, the floor) ─────────────────
 //
 // What the drafter is SHOWN is assembled by an open, pure module (src/drafter/). Everything that gates an edit, a
-// write or a verdict stays here. The module is called once per compose, through one dynamic import inside
-// resolveFeatureComposeInner, after this file's own assembly (THE FLOOR: the grounding, feedback and lessons built
+// write or a verdict stays here. The module's two entry points run in a terminable Worker, and the one dynamic import
+// of src/drafter/ is in workers/drafter-module-worker.ts. This file's own assembly (THE FLOOR: the grounding, feedback and lessons built
 // above that call, unchanged) has run and every fact has been read:
 //   - the facts it gets are the values the floor computed or read, deep-frozen (targets, region, line hint, the
 //     listing and every file text the grounding read, the own check, the lineage lessons, the lesson recall);
@@ -6999,7 +6999,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
 //     REFUSED, never truncated: a cut prompt withholds information without saying so.
 // From the plan call on, the compose reads only closed values; the context only REPLACES the floor's grounding,
 // principles, lessons and feedback strings and the op budget (clamped to [min(4, C), C], C = pointer.max_ops ?? 24).
-// Phase 1 runs the module in-process: a hang is bounded only by the unit watchdog until it runs in a Worker.
+// Each entry point has a 2 s wall-clock cap; a timeout terminates the Worker and falls back to the closed floor.
 
 /** Bytes of one decompose (or refine) prompt built from an open context. Set from a measurement: the largest
  *  grounding a decompose carried in the journal window of node 1 and compose2 (80,054 chars, 2026-10-07..11) plus
@@ -7027,6 +7027,37 @@ export const DRAFTER_MIN_OPS = 4;
 
 const DRAFTER_CONTEXT_KEYS = ["grounding", "targetWindows", "priorFeedback", "principles", "composeLessons", "netNewTargets", "opBudgetHint", "journal", "version"] as const;
 const DRAFTER_PLAN_KEYS = ["reads", "lessonQueries", "ancestorDepth"] as const;
+/** Open drafter entry points are isolated from the composer so a bad variant cannot pin a compose forever. */
+export const DRAFTER_WORKER_TIMEOUT_MS = 2_000;
+type DrafterEntry = "planDrafterReads" | "assembleDrafterContext";
+type DrafterWorkerReply = { ok: true; value: unknown } | { ok: false; error: string };
+type DrafterWorkerFactory = (url: URL) => Worker;
+
+/** Run one open entry point in a terminable Worker. The parent is the only production caller and supplies a URL
+ * created from the closed variant choice; the Worker independently checks the same id before constructing an import. */
+function invokeDrafterWorker(variant: string, entry: DrafterEntry, facts: unknown, timeoutMs = DRAFTER_WORKER_TIMEOUT_MS, factory: DrafterWorkerFactory = (url) => new Worker(url)): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const worker = factory(new URL("../../workers/drafter-module-worker.ts", import.meta.url));
+    let settled = false;
+    const finish = (err?: Error, value?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate();
+      if (err) reject(err); else resolve(value);
+    };
+    const timer = setTimeout(() => finish(new Error("DRAFTER_WORKER_TIMEOUT")), timeoutMs);
+    worker.onmessage = (ev: MessageEvent<DrafterWorkerReply>) => {
+      const msg = ev.data;
+      if (!msg || typeof msg !== "object") return finish(new Error("drafter worker returned an invalid message"));
+      if (!msg.ok) return finish(new Error(msg.error));
+      finish(undefined, msg.value);
+    };
+    worker.onerror = (ev) => finish(new Error(`drafter worker error: ${String((ev as ErrorEvent).message ?? ev)}`));
+    try { worker.postMessage({ variant, entry, facts }); }
+    catch (err) { finish(err instanceof Error ? err : new Error(String(err))); }
+  });
+}
 
 export type DrafterGroundCapture = { listing: Record<string, string[]>; contents: Record<string, string> };
 export type DrafterLessonCapture = { source: "concept-db" | "jsonl" | "none"; query: string; rows: string[]; tail: string[] };
@@ -7275,7 +7306,11 @@ export type DrafterRun = {
   variant?: string;
   /** How the variant was chosen (drafterVariantChoice): "floor" and "unknown" draft with the floor and load nothing. */
   mode?: DrafterVariantChoice["mode"];
-  load: () => Promise<DrafterModule>;
+  /** Runtime callers set the closed variant id; direct unit probes may keep using load(). */
+  workerVariant?: string;
+  /** Test-only seam for asserting a silent worker is terminated at the production cap. */
+  workerFactory?: DrafterWorkerFactory;
+  load?: () => Promise<DrafterModule>;
 };
 
 /** Ancestor rows above `start`, to `depth`, cycle-safe; each row's lessons kept newest-first within the byte cap. */
@@ -7314,15 +7349,25 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   // The floor as a declared arm (no module loaded, not a fallback); an id off the allowlist drafts with the floor.
   if (run.mode === "floor") return { ctx: null, budget: run.floorBudget, record: { variant, version: null, fell_back: null, op_budget: run.floorBudget } };
   if (run.mode === "unknown") return floor("unknown_variant");
-  let mod: DrafterModule;
-  try {
-    mod = await run.load();
-    if (typeof mod?.planDrafterReads !== "function" || typeof mod?.assembleDrafterContext !== "function") return floor("module_shape: planDrafterReads / assembleDrafterContext missing");
-  } catch (err) { return floor(`import_failed: ${String((err as Error)?.message ?? err).slice(0, 200)}`); }
+  let mod: DrafterModule | null = null;
+  const invoke = async (entry: DrafterEntry, facts: unknown): Promise<unknown> => {
+    if (run.workerVariant) return invokeDrafterWorker(run.workerVariant, entry, facts, DRAFTER_WORKER_TIMEOUT_MS, run.workerFactory);
+    if (!mod) {
+      if (!run.load) throw new Error("drafter module has no Worker URL or test loader");
+      mod = await run.load();
+      if (typeof mod?.planDrafterReads !== "function" || typeof mod?.assembleDrafterContext !== "function") throw new Error("module_shape: planDrafterReads / assembleDrafterContext missing");
+    }
+    return mod[entry](facts);
+  };
   const facts = { ...run.facts } as Record<string, unknown>;
   let plan: ReturnType<typeof clampDrafterReadPlan>;
-  try { plan = clampDrafterReadPlan(mod.planDrafterReads(drafterDeepFreeze(facts)), run.scope); }
-  catch (err) { return floor(`plan_threw: ${String((err as Error)?.message ?? err).slice(0, 200)}`); }
+  try { plan = clampDrafterReadPlan(await invoke("planDrafterReads", drafterDeepFreeze(facts)), run.scope); }
+  catch (err) {
+    const message = String((err as Error)?.message ?? err);
+    if (message.includes("DRAFTER_WORKER_TIMEOUT")) return floor("timeout");
+    if (/^(import_failed|plan_threw|module_shape):/.test(message)) return floor(message.slice(0, 240));
+    return floor(`${run.workerVariant ? "worker_failed" : "plan_threw"}: ${message.slice(0, 200)}`);
+  }
   if (!plan.ok) return floor(`plan_refused: ${plan.why}`);
   const dropped = [...plan.dropped];
   const contents = { ...(facts.contents as Record<string, string>) };
@@ -7342,8 +7387,13 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   facts.lessonHits = hits;
   if (plan.ancestorDepth > 0 && run.ancestorStart) facts.ancestors = await drafterAncestors(run.ancestorStart, plan.ancestorDepth, run.selfId, run.readGapRow);
   let raw: unknown;
-  try { raw = mod.assembleDrafterContext(drafterDeepFreeze(facts)); }
-  catch (err) { return floor(`assemble_threw: ${String((err as Error)?.message ?? err).slice(0, 200)}`, null, dropped); }
+  try { raw = await invoke("assembleDrafterContext", drafterDeepFreeze(facts)); }
+  catch (err) {
+    const message = String((err as Error)?.message ?? err);
+    if (message.includes("DRAFTER_WORKER_TIMEOUT")) return floor("timeout", null, dropped);
+    if (/^(assemble_threw|module_shape):/.test(message)) return floor(message.slice(0, 240), null, dropped);
+    return floor(`assemble_threw: ${message.slice(0, 200)}`, null, dropped);
+  }
   // One read of the module's object: every later read (the clamp, the record's version) is of this plain copy.
   try { raw = structuredClone(raw); } catch { return floor(`context_refused: ${DRAFTER_CONTEXT_NOT_PLAIN}`, null, dropped); }
   const v = validateDrafterContext(raw, run.expect);
@@ -8123,13 +8173,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       selfId: String(pointer.gap?.id ?? ""),
       variant: variantChoice.variant,
       mode: variantChoice.mode,
-      load: async () => {
-        // ONE import site (F3): the shipped module (absent, or its own id "drafter-v1" named back, as a sampler that
-        // feeds the recorded id does), or an allowlisted variant under src/drafter/variants/.
-        const named = variantChoice.mode === "named" ? variantChoice.variant : null;
-        const { planDrafterReads, assembleDrafterContext } = await import(named === null || named === DRAFTER_DEFAULT_VARIANT ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);
-        return { planDrafterReads, assembleDrafterContext } as unknown as { planDrafterReads: (f: unknown) => unknown; assembleDrafterContext: (f: unknown) => unknown };
-      },
+      workerVariant: variantChoice.mode === "named" ? variantChoice.variant : DRAFTER_DEFAULT_VARIANT,
     });
     const holder = composeDrafterStore.getStore();
     if (holder) holder.record = drafted.record;

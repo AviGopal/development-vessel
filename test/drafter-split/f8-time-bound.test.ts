@@ -1,25 +1,25 @@
 // F8 (MUST-FAIL): EACH OPEN ENTRY POINT COMPLETES ON EVERY FIXTURE, INCLUDING ADVERSARIAL-SIZE INPUTS, WITHIN 2 s.
 //
-// The open module runs in the compose's own process (phase 1), so a module that never returns would hold the
-// compose until the unit's watchdog. This pin bounds that in the GATE: planDrafterReads and assembleDrafterContext
+// A module that never returns is isolated from the compose in a terminable Worker. This pin bounds
+// planDrafterReads and assembleDrafterContext
 // (the only two functions the core calls; every other open function runs under them) are each run, in a Worker the
 // test terminates at the bound, on
 //   - the facts every corpus fixture produced (captured through resolveFeatureCompose), and
 //   - adversarial-size facts built from them: a 256 KB spec of distinct identifiers, a 1 MB target dense with those
 //     identifiers, 400 listed files with 40 KB each, 500 lineage lessons, a 400-line lesson tail of 8 KB lines.
-// RUNTIME hangs remain bounded only by the unit watchdog until a phase-2 change runs the module in a Worker in the
-// compose itself; this pin catches a module that is slow or non-terminating on these inputs before it lands.
-// CONTROL: a worker that never returns is terminated at the bound and read as a failure (the bound is real).
+// RUNTIME hangs are bounded by the production Worker cap, separately pinned in f8-runtime-time-bound.test.ts.
+// This pin catches a module that is slow or non-terminating on these inputs before it lands.
+// CONTROL: a worker that spins forever is terminated at the bound and read as a failure (the bound is real).
 // MUTANT (seen red): a spin loop in assembleDrafterContext on a large spec.
-import { afterAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-f8", { superRepo: true, who: "test/drafter-split/f8-time-bound.test.ts" });
 const { createHarness, CORPUS } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
-const DRAFTER = "../../src/drafter/index.ts";
-const realDrafter = { ...(await import(DRAFTER)) };
-afterAll(() => { mock.module(DRAFTER, () => realDrafter); H.restore(); });
+const workerProto = Worker.prototype as unknown as { postMessage(this: Worker, message: unknown): void };
+const realPostMessage = workerProto.postMessage;
+afterAll(() => { workerProto.postMessage = realPostMessage; H.restore(); });
 
 const BOUND_MS = 2000;
 type Facts = Record<string, any>;
@@ -74,17 +74,18 @@ describe("F8: each open entry point completes within the bound on every fixture"
   it("captures the facts of every corpus fixture", async () => {
     H.install();
     let current = "";
-    mock.module(DRAFTER, () => ({
-      planDrafterReads: (f: Facts) => realDrafter.planDrafterReads(f),
-      assembleDrafterContext: (f: Facts) => { captured.push({ name: current, facts: structuredClone(f) }); return realDrafter.assembleDrafterContext(f); },
-    }));
+    workerProto.postMessage = function (message: unknown): void {
+      if (message && typeof message === "object" && (message as { entry?: unknown }).entry === "assembleDrafterContext") {
+        captured.push({ name: current, facts: structuredClone((message as { facts: Facts }).facts) });
+      }
+      return realPostMessage.call(this, message);
+    };
     let seq = 0;
     for (const fx of CORPUS) {
       current = fx.name;
       const fc = await import(`../../src/resolvers/feature-compose.ts?drafter-f8=${++seq}`);
       await H.run(fc, fx);
     }
-    mock.module(DRAFTER, () => realDrafter);
     expect(captured.length).toBe(CORPUS.length);
   }, 120_000);
   it("CONTROL: a worker that never answers is terminated at the bound and fails", async () => {

@@ -1,7 +1,7 @@
 // THE DRAFTER MODULE (OPEN): WHAT THE DRAFTER IS SHOWN.
 //
 // feature_compose's closed core (src/resolvers/feature-compose.ts) gathers every fact for a compose under its own
-// read allowlist and byte caps, then calls the two functions below through one dynamic import. This module is
+// read allowlist and byte caps, then calls the two functions below through the closed runtime Worker. This module is
 // PURE: facts in, a DrafterContext out; no I/O, no tools, no endpoints, no model choice, no environment.
 //
 //   planDrafterReads(facts)       which extra files to read, which lesson queries to run, how far up the ancestor

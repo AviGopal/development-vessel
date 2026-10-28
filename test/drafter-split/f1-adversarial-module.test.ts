@@ -18,8 +18,9 @@ import { afterAll, describe, expect, it, mock } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-f1", { superRepo: true, who: "test/drafter-split/f1-adversarial-module.test.ts" });
-const { createHarness, events, markEvent, VESSEL } = await import("./harness.js");
+const { createHarness, events, markEvent, VESSEL, installInlineDrafterWorker } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
+const restoreInlineWorker = installInlineDrafterWorker();
 
 const DRAFTER = "../../src/drafter/index.ts";
 const CUTOVER = "../../src/resolvers/vessel-mitosis-cutover.ts";
@@ -41,6 +42,7 @@ afterAll(() => {
   mock.module(DRAFTER, () => realDrafter);
   mock.module(CUTOVER, () => realCutover);
   mock.module(POLICY, () => realPolicy);
+  restoreInlineWorker();
   H.restore();
 });
 

@@ -328,7 +328,7 @@ export async function resolveLlmCompletionDispatch(
     failure_mode: "cascading",
   };
   let primaryRefusal: { detail: string } | null = null;
-  type FailureEntry = { endpoint: string; status?: number; detail: string; failure_mode: string; model?: string; requested_model?: string };
+  type FailureEntry = { endpoint: string; status?: number; detail: string; failure_mode: string; model?: string; requested_model?: string; attempt?: number; kind?: string; duration_ms?: number };
   const failures: FailureEntry[] = [];
   // Hoisted to function scope: both the local loop and the lazy federated loop
   // below need it, and a failure envelope looks the same wherever it comes from.
@@ -458,109 +458,150 @@ export async function resolveLlmCompletionDispatch(
     };
   };
 
-  for (const endpoint of endpoints) {
-    let res: Response;
+  // ONE LINE PER ENDPOINT ATTEMPT (routing locality, step 1: measure before reordering). Measured once by inference
+  // only: a prompt-ceiling cascade spent ~138 s in the remaining local endpoints before the federated arms answered in
+  // under 1 s, and nothing said which endpoint took the time. Every attempt, local or federated, logs its index, phase,
+  // kind (local_http: a loopback resolver; libp2p: the local federation transport; direct_host: any other host;
+  // federated: the lazy egress fallback), the endpoint, its wall time and its outcome. The same duration, index and
+  // kind are stamped on the attempt's entry in `failures`, the per-endpoint record a failed dispatch already returns.
+  // Measurement only: the order, the timeouts and the result are unchanged.
+  let attemptSeq = 0;
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+  const endpointKind = (u: string, phase: "local" | "federated"): string => {
+    if (phase === "federated") return "federated";
     try {
-      res = await fetch(endpoint, {
-        method: "POST",
-        // An endpoint may be the local federation transport (a hub arm mirrored into local
-        // discovery): it then carries this vessel's key as a header, never in requestBody.
-        headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
-        body: JSON.stringify(requestBody),
-        signal: callSignal(),
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      failures.push({ endpoint, detail: msg, failure_mode: "cascading" });
-      if (!primaryRefusal) lastFailure = { detail: msg, failure_mode: "cascading" };
-      continue;
-    }
+      const url = new URL(u);
+      if (url.origin === new URL(FED_TRANSPORT_EGRESS).origin) return "libp2p";
+      return loopbackHosts.has(url.hostname) ? "local_http" : "direct_host";
+    } catch { return "unparsed"; }
+  };
+  const noteAttempt = (endpoint: string, phase: "local" | "federated", started: number, failuresBefore: number, won: boolean, terminal?: string): void => {
+    const attempt = attemptSeq++;
+    const duration_ms = Math.round(performance.now() - started);
+    const kind = endpointKind(endpoint, phase);
+    const f = failures.length > failuresBefore ? failures[failures.length - 1] : undefined;
+    const outcome = won ? "ok"
+      : terminal ? terminal
+      : !f ? "unclassified"
+      : f.detail.startsWith("empty_completion") ? "empty_completion"
+      : f.detail.startsWith("routing integrity") ? "routing_integrity"
+      : typeof f.status === "number" ? `http_${f.status}`
+      : f.failure_mode === "cascading" ? "transport_error"
+      : "refused";
+    for (let i = failuresBefore; i < failures.length; i++) Object.assign(failures[i]!, { attempt, kind, duration_ms });
+    console.log(`[llm-completion-dispatch] endpoint attempt=${attempt} phase=${phase} kind=${kind} duration_ms=${duration_ms} outcome=${outcome} endpoint=${endpoint}`);
+  };
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
-      if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
-      continue;
-    }
-
-    const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
-    // A FEDERATED FAILURE NESTS ITS ERROR, AND THE TOP-LEVEL CHECK COULD NOT SEE IT.
-    //
-    // The guard below used to read only candidate.error / .resolved / .success. Every one of
-    // those is TOP-LEVEL, and a failure that crossed the federation transport carries its error
-    // one or two levels down. Both envelopes observed live on 2026-08-18:
-    //
-    //   {"content":{"error":"ingress proxy failed: ... NO_RESERVATION"}}
-    //   {"content":{"body":{"resolved":false,"error":"no llm arm is currently servable ..."}}}
-    //
-    // Neither sets a top-level error/resolved/success, so the guard PASSED, the loop treated a
-    // failed call as the winner and BROKE — never trying the remaining endpoints. The cascade
-    // existed and could not fire, which is worse than having no cascade: the code reads as
-    // fault-tolerant while stopping at the first broken arm.
-    //
-    // MEASURED COST. A third substrate (spoke-739b76f1, on neither this host nor the hub) had
-    // joined the federation advertising llm_completion arms it could not serve. Its rows sorted
-    // ahead of the hub's, so EVERY llm call stopped there: the ReAct floor logged
-    // "dispatch FAILED http=500" on all 8 iterations and four ordinary human goals — chemical
-    // symbol for gold, violin strings, marathon distance, The Starry Night — failed while three
-    // working arms sat on the hub one endpoint later in the list.
-    // ROUTING INTEGRITY: THE ANSWER MUST COME FROM THE VESSEL WE ASKED FOR.
-    //
-    // Measured 2026-08-18: a request target-pinned to the HUB's circuit, naming
-    // `llm-resolver-google@syzygy-hub`, was answered by
-    // `llm-resolver-google@federation-transport-vessel@spoke-739b76f1` — a substrate on neither
-    // this host nor the hub, which had joined through the public relay and registered vessels
-    // whose names COLLIDE with the hub's own. By-name lookup then resolved to it, and the
-    // egress's live-circuit "repair" path substituted its circuit for the one we asked for.
-    //
-    // A wrong-but-plausible answer from an unrequested vessel is the dangerous case, not the
-    // error we happened to get: the same substitution would have silently served content from
-    // an unknown peer under the identity of a fleet vessel. Treat a substrate mismatch as a
-    // failure and cascade, so provenance is enforced rather than assumed.
-    const requestedSubstrate = (() => {
-      const e = /[?&]expect_substrate=([^&]+)/.exec(endpoint);
-      if (e?.[1]) return decodeURIComponent(e[1]);
-      const m = /[?&]vessel=([^&]+)/.exec(endpoint);
-      const v = m?.[1] ? decodeURIComponent(m[1]) : "";
-      return v.includes("@") ? v.split("@").pop() ?? "" : "";
-    })();
-    const producedBy = (() => {
-      const c = (candidate as unknown as Record<string, unknown> | null)?.["content"];
-      const p = c && typeof c === "object" ? (c as Record<string, unknown>)["produced_by"] : undefined;
-      return typeof p === "string" ? p : "";
-    })();
-    if (requestedSubstrate && producedBy && !producedBy.endsWith(`@${requestedSubstrate}`)) {
-      failures.push({ endpoint, detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`, failure_mode: "verifier_negative" });
-      if (!primaryRefusal) primaryRefusal = { detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}` };
-      lastFailure = {
-        detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`,
-        failure_mode: "verifier_negative",
-      };
-      continue;
-    }
-    const refusedLocal = budgetRefusalOf(candidate);
-    if (refusedLocal) return refusedLocal;
-    const nested = federatedError(candidate);
-    if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
-      recordEmpty(candidate, endpoint);
-      continue;
-    }
-    if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
-      {
-        const d = candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false";
-        failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
-        if (!primaryRefusal) primaryRefusal = { detail: d };
-        lastFailure = { detail: d, failure_mode: "verifier_negative" };
+  for (const endpoint of endpoints) {
+    const attemptStart = performance.now();
+    const failuresBefore = failures.length;
+    let terminal: string | undefined;
+    try {
+      let res: Response;
+      try {
+        res = await fetch(endpoint, {
+          method: "POST",
+          // An endpoint may be the local federation transport (a hub arm mirrored into local
+          // discovery): it then carries this vessel's key as a header, never in requestBody.
+          headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
+          body: JSON.stringify(requestBody),
+          signal: callSignal(),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        failures.push({ endpoint, detail: msg, failure_mode: "cascading" });
+        if (!primaryRefusal) lastFailure = { detail: msg, failure_mode: "cascading" };
+        continue;
       }
-      continue;
-    }
-    if (isEmptyCompletion(candidate)) {
-      recordEmpty(candidate, endpoint);
-      continue;
-    }
 
-    result = candidate;
-    break;
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
+        if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+        continue;
+      }
+
+      const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
+      // A FEDERATED FAILURE NESTS ITS ERROR, AND THE TOP-LEVEL CHECK COULD NOT SEE IT.
+      //
+      // The guard below used to read only candidate.error / .resolved / .success. Every one of
+      // those is TOP-LEVEL, and a failure that crossed the federation transport carries its error
+      // one or two levels down. Both envelopes observed live on 2026-08-18:
+      //
+      //   {"content":{"error":"ingress proxy failed: ... NO_RESERVATION"}}
+      //   {"content":{"body":{"resolved":false,"error":"no llm arm is currently servable ..."}}}
+      //
+      // Neither sets a top-level error/resolved/success, so the guard PASSED, the loop treated a
+      // failed call as the winner and BROKE — never trying the remaining endpoints. The cascade
+      // existed and could not fire, which is worse than having no cascade: the code reads as
+      // fault-tolerant while stopping at the first broken arm.
+      //
+      // MEASURED COST. A third substrate (spoke-739b76f1, on neither this host nor the hub) had
+      // joined the federation advertising llm_completion arms it could not serve. Its rows sorted
+      // ahead of the hub's, so EVERY llm call stopped there: the ReAct floor logged
+      // "dispatch FAILED http=500" on all 8 iterations and four ordinary human goals — chemical
+      // symbol for gold, violin strings, marathon distance, The Starry Night — failed while three
+      // working arms sat on the hub one endpoint later in the list.
+      // ROUTING INTEGRITY: THE ANSWER MUST COME FROM THE VESSEL WE ASKED FOR.
+      //
+      // Measured 2026-08-18: a request target-pinned to the HUB's circuit, naming
+      // `llm-resolver-google@syzygy-hub`, was answered by
+      // `llm-resolver-google@federation-transport-vessel@spoke-739b76f1` — a substrate on neither
+      // this host nor the hub, which had joined through the public relay and registered vessels
+      // whose names COLLIDE with the hub's own. By-name lookup then resolved to it, and the
+      // egress's live-circuit "repair" path substituted its circuit for the one we asked for.
+      //
+      // A wrong-but-plausible answer from an unrequested vessel is the dangerous case, not the
+      // error we happened to get: the same substitution would have silently served content from
+      // an unknown peer under the identity of a fleet vessel. Treat a substrate mismatch as a
+      // failure and cascade, so provenance is enforced rather than assumed.
+      const requestedSubstrate = (() => {
+        const e = /[?&]expect_substrate=([^&]+)/.exec(endpoint);
+        if (e?.[1]) return decodeURIComponent(e[1]);
+        const m = /[?&]vessel=([^&]+)/.exec(endpoint);
+        const v = m?.[1] ? decodeURIComponent(m[1]) : "";
+        return v.includes("@") ? v.split("@").pop() ?? "" : "";
+      })();
+      const producedBy = (() => {
+        const c = (candidate as unknown as Record<string, unknown> | null)?.["content"];
+        const p = c && typeof c === "object" ? (c as Record<string, unknown>)["produced_by"] : undefined;
+        return typeof p === "string" ? p : "";
+      })();
+      if (requestedSubstrate && producedBy && !producedBy.endsWith(`@${requestedSubstrate}`)) {
+        failures.push({ endpoint, detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`, failure_mode: "verifier_negative" });
+        if (!primaryRefusal) primaryRefusal = { detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}` };
+        lastFailure = {
+          detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`,
+          failure_mode: "verifier_negative",
+        };
+        continue;
+      }
+      const refusedLocal = budgetRefusalOf(candidate);
+      if (refusedLocal) { terminal = String((refusedLocal.body as { failure_mode?: unknown }).failure_mode); return refusedLocal; }
+      const nested = federatedError(candidate);
+      if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
+        recordEmpty(candidate, endpoint);
+        continue;
+      }
+      if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
+        {
+          const d = candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false";
+          failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+          if (!primaryRefusal) primaryRefusal = { detail: d };
+          lastFailure = { detail: d, failure_mode: "verifier_negative" };
+        }
+        continue;
+      }
+      if (isEmptyCompletion(candidate)) {
+        recordEmpty(candidate, endpoint);
+        continue;
+      }
+
+      result = candidate;
+      break;
+    } finally {
+      noteAttempt(endpoint, "local", attemptStart, failuresBefore, result !== null, terminal);
+    }
   }
 
   // LAZY FEDERATED FALLBACK: every local arm has failed. Only now is a discovery round-trip
@@ -571,48 +612,55 @@ export async function resolveLlmCompletionDispatch(
     if (fed.length > 0) {
       console.error(`[llm-completion-dispatch] local arms exhausted — trying ${fed.length} target-pinned federated arm(s); reason: ${String(lastFailure.detail ?? "")}`);
       for (const endpoint of fed) {
-        let res: Response;
+        const attemptStart = performance.now();
+        const failuresBefore = failures.length;
+        let terminal: string | undefined;
         try {
-          res = await fetch(endpoint, {
-            method: "POST",
-            headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
-            body: JSON.stringify(requestBody),
-            signal: callSignal(),
-          });
-        } catch (err) {
-          failures.push({ endpoint, detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" });
-          if (!primaryRefusal) lastFailure = { detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" };
-          continue;
-        }
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
-          if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
-          continue;
-        }
-        const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
-        const refusedFed = budgetRefusalOf(candidate);
-        if (refusedFed) return refusedFed;
-        const nested = federatedError(candidate);
-        if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
-          recordEmpty(candidate, endpoint);
-          continue;
-        }
-        if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
-          {
-            const d = candidate?.error ?? nested ?? "federated arm returned error";
-            failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
-            if (!primaryRefusal) primaryRefusal = { detail: d };
-            lastFailure = { detail: d, failure_mode: "verifier_negative" };
+          let res: Response;
+          try {
+            res = await fetch(endpoint, {
+              method: "POST",
+              headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
+              body: JSON.stringify(requestBody),
+              signal: callSignal(),
+            });
+          } catch (err) {
+            failures.push({ endpoint, detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" });
+            if (!primaryRefusal) lastFailure = { detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" };
+            continue;
           }
-          continue;
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
+            if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+            continue;
+          }
+          const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
+          const refusedFed = budgetRefusalOf(candidate);
+          if (refusedFed) { terminal = String((refusedFed.body as { failure_mode?: unknown }).failure_mode); return refusedFed; }
+          const nested = federatedError(candidate);
+          if (candidate && (isEmptyCompletionError(candidate.error) || (!candidate.error && isEmptyCompletionError(nested)))) {
+            recordEmpty(candidate, endpoint);
+            continue;
+          }
+          if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
+            {
+              const d = candidate?.error ?? nested ?? "federated arm returned error";
+              failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+              if (!primaryRefusal) primaryRefusal = { detail: d };
+              lastFailure = { detail: d, failure_mode: "verifier_negative" };
+            }
+            continue;
+          }
+          if (isEmptyCompletion(candidate)) {
+            recordEmpty(candidate, endpoint);
+            continue;
+          }
+          result = candidate;
+          break;
+        } finally {
+          noteAttempt(endpoint, "federated", attemptStart, failuresBefore, result !== null, terminal);
         }
-        if (isEmptyCompletion(candidate)) {
-          recordEmpty(candidate, endpoint);
-          continue;
-        }
-        result = candidate;
-        break;
       }
     }
   }

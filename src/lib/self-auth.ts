@@ -16,6 +16,7 @@
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
+import { producerHeaders } from "./call-credential.js";
 
 /**
  * `{ Authorization: "ApiKey <key>" }` when `url` is exactly `selfUrl`, otherwise `{}`. The key is the
@@ -25,7 +26,10 @@ import { networkInterfaces } from "node:os";
  */
 export function selfAuthHeaders(url: string, selfUrl: string, callerKey?: string): Record<string, string> {
   const key = selfAuthKey(url, selfUrl, callerKey);
-  return key ? { Authorization: `ApiKey ${key}` } : {};
+  // A self-call also carries the execution that produced it (lib/call-credential.ts, the producer context), so a gap it files names that
+  // execution. Self-calls only, like the key; nothing is added outside a producer context.
+  const producer = url === selfUrl ? producerHeaders() : {};
+  return key ? { Authorization: `ApiKey ${key}`, ...producer } : { ...producer };
 }
 
 /** The key itself, for helpers that build their own header: the same rule as selfAuthHeaders, "" when none. */

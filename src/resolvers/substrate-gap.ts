@@ -35,7 +35,7 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType, credentialSendRefusal } from "../lib/caller-credential.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
-import { currentCallCredential, runWithoutCallCredential } from "../lib/call-credential.js";
+import { currentCallCredential, currentProducer, producerFromPointer, PRODUCER_EXECUTION_FIELD, PRODUCER_TEMPLATE_FIELD, runWithoutCallCredential } from "../lib/call-credential.js";
 import { bumpQueuedAttempt, deadLetterQueued, enqueueGapWrite, queuedFiles, readQueued, removeQueued } from "../lib/gap-forward-queue.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -2656,6 +2656,9 @@ export async function resolveSubstrateGapWrite(
   },
 ): Promise<ResolverResult> {
   const marker = operatorMarkerOf(pointer);
+  // THE PRODUCER TRAVELS WITH THE WRITE (lib/call-credential.ts, the producer context): a write made inside a producer context names it at
+  // pointer level, so the holder stamps it even when this node forwards the write. A pointer's own stamp is kept.
+  { const pr = currentProducer(); const pp = pointer as Record<string, unknown>; if (pr && !producerFromPointer(pp)) { pp[PRODUCER_EXECUTION_FIELD] = pr.execution_id; if (pr.template_id) pp[PRODUCER_TEMPLATE_FIELD] = pr.template_id; } }
   const audit: GapWriteAudit = {};
   let r: ResolverResult | undefined;
   try {
@@ -2872,6 +2875,17 @@ async function resolveSubstrateGapWriteInner(
     ...(unbound(incoming.first_detected_at) ? { first_detected_at: undefined } : {}),
     ...(unbound(incoming.closed_at) ? { closed_at: undefined } : {}),
   };
+  // THE PRODUCER IS STAMPED, NEVER WRITTEN (lib/call-credential.ts, the producer context). producer_execution_id / producer_template_id in
+  // the incoming metadata are dropped: only the producer this write ran under is recorded, on a row that has none yet
+  // (the carry-forward keeps a stored row's own). No producer, no fields: the write is otherwise unchanged.
+  const writeProducer = producerFromPointer(pointer as Record<string, unknown>);
+  if (gap.classification_metadata && typeof gap.classification_metadata === "object" && (PRODUCER_EXECUTION_FIELD in gap.classification_metadata || PRODUCER_TEMPLATE_FIELD in gap.classification_metadata)) {
+    const { [PRODUCER_EXECUTION_FIELD]: _pe, [PRODUCER_TEMPLATE_FIELD]: _pt, ...kept } = gap.classification_metadata as Record<string, unknown>;
+    gap.classification_metadata = kept;
+  }
+  const producerMeta = (m: Record<string, unknown>): Record<string, unknown> => writeProducer && m[PRODUCER_EXECUTION_FIELD] === undefined
+    ? { ...m, [PRODUCER_EXECUTION_FIELD]: writeProducer.execution_id, ...(writeProducer.template_id ? { [PRODUCER_TEMPLATE_FIELD]: writeProducer.template_id } : {}) }
+    : m;
 
   // Serialize the ENTIRE read-modify-write: load, dedup/gate decisions, lineage
   // stamping and save all run inside one critical section (see withGapLock), so
@@ -3200,6 +3214,8 @@ async function resolveSubstrateGapWriteInner(
     for (const k of Object.keys(exMeta)) {
       if (!(k in inMeta)) inMeta[k] = exMeta[k];
     }
+    // An open row filed before producers were stamped takes the first producer that re-files it (never a later one).
+    if (gap.status === "open" && inMeta[PRODUCER_EXECUTION_FIELD] === undefined) Object.assign(inMeta, producerMeta(inMeta));
     // demand_goals HAS TWO WRITERS (lib/demand-goals.ts). goal-host fileCapabilityGap rewrites the
     // whole array as strings only (its reader drops objects), so a plain key overwrite would erase
     // every goal_reach linkage entry on the next capability-gap re-emission. Carry those forward;
@@ -3288,6 +3304,7 @@ async function resolveSubstrateGapWriteInner(
     gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
     delete gap.reopened_at; // a new row has never been reopened, whatever the writer sent
     if (origin) gap.classification_metadata = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>), origin_dispatch_id: origin };
+    if (writeProducer) gap.classification_metadata = producerMeta((gap.classification_metadata ?? {}) as Record<string, unknown>);
     if (demandGoalAppends.length > 0) {
       const meta = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>) };
       for (const e of demandGoalAppends) meta["demand_goals"] = mergeDemandGoal(meta["demand_goals"], e);

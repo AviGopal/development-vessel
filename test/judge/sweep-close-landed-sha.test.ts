@@ -20,10 +20,12 @@ describe("landing closes carry landed_sha", () => {
 
 describe("closeLandedGap pays a landing's credit once per (gap, landing)", () => {
   const fn = src.slice(src.indexOf("export async function closeLandedGap"), src.indexOf("export async function closeLandedGap") + 12000);
-  test("[MUST-FAIL] the class posterior and the detector closure credit are gated on joinDecisionOutcome's result", () => {
+  test("[MUST-FAIL] the class posterior is gated on joinDecisionOutcome's result", () => {
     expect(fn).toMatch(/const credited = joinDecisionOutcome\(meta,/);
     // I4a: the credit is gated on `credited` AND names its landing (the reference the holder resolves).
     expect(fn).toMatch(/if \(credited\) updateClassPosterior\(gapClassOf\(gap\), true, \{ gap_id: id, event_id: land\.commit_sha \? `sha:\$\{land\.commit_sha\}`/);
-    expect(fn).toMatch(/if \(credited\) try \{/);
+  });
+  test("[CONTROL] the filing detector is not credited here: the gap writer credits the filing execution on every settle", () => {
+    expect(fn).not.toContain('table: "detector_credit"');
   });
 });

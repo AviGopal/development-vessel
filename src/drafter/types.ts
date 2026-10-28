@@ -54,6 +54,8 @@ export type DrafterFacts = Readonly<{
   principles: string;
   /** Return-contract facts requested through codeIntrospectResult; key is `<path>#<fn>`, null when open. */
   contractFacts?: Readonly<Record<string, Readonly<{ shapes: readonly string[]; bodyKeys: readonly string[]; kinds: readonly string[] }> | null>>;
+  /** Selected priors requested by this variant; the core admits their ids for credit only if the final prompt shows them. */
+  priorQueries?: readonly Readonly<{ query: string; rows: readonly Readonly<{ id: string; source_type: string; name: string | null; content: string }>[] }>[];
   contracts: string;
   existingSymbols: string;
   symbolDecls: string;
@@ -63,7 +65,7 @@ export type DrafterFacts = Readonly<{
   opCeilingDeclared: boolean;
 }>;
 
-export type ReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string };
+export type ReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string } | { kind: "priorQueries"; query: string; sourceTypes: string[]; budgetTokens: number };
 export type LessonQuery = { query: string; limit: number };
 export type DrafterReadPlan = { reads: ReadRequest[]; lessonQueries: LessonQuery[]; ancestorDepth: number };
 

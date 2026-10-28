@@ -3977,32 +3977,41 @@ export function appliedConceptIds(plan: Record<string, unknown> | null, rendered
   const shown = new Set(rendered);
   return { applied: [...new Set(cited.filter((id) => shown.has(id)))], dropped: [...new Set(cited.filter((id) => !shown.has(id)))].slice(0, 20) };
 }
-/** Ask concept_select_for_prompt for the priors of this change. `block` is "" and `ids` empty when it fails open. */
-export async function conceptPriorsBlock(spec: string, editSite: string | null): Promise<{ block: string; ids: string[]; why?: string }> {
+/** Resolve structured priors through the existing selector; callers decide how to render them. */
+export async function selectConceptPriorRows(query: string, budgetTokens: number, sourceTypes?: readonly string[]): Promise<{ rows: ConceptPrior[]; why?: string }> {
   try {
-    const query = `${editSite ? `${editSite} ` : ""}${String(spec ?? "")}`.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_QUERY_CHARS);
-    if (!query) return { block: "", ids: [], why: "empty query" };
+    if (!query.trim()) return { rows: [], why: "empty query" };
     const target = await ownConceptDbResolveUrl("concept_select_for_prompt");
-    if (!target.url) return { block: "", ids: [], why: target.why };
+    if (!target.url) return { rows: [], why: target.why };
+    const pointer: Record<string, unknown> = { type: "concept_select_for_prompt", query, budget_tokens: budgetTokens };
+    if (sourceTypes && sourceTypes.length > 0) pointer["prior_source_types"] = [...sourceTypes];
     const res = await fetch(target.url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
-      body: JSON.stringify({ impulse: { pointer: { type: "concept_select_for_prompt", query, budget_tokens: CONCEPT_PRIOR_BUDGET_TOKENS } } }),
+      body: JSON.stringify({ impulse: { pointer } }),
       signal: AbortSignal.timeout(8_000),
     });
-    if (!res.ok) return { block: "", ids: [], why: `HTTP ${res.status}` };
+    if (!res.ok) return { rows: [], why: `HTTP ${res.status}` };
     const j = (await res.json()) as { body?: { selected?: unknown }; content?: { selected?: unknown } };
     const raw = (j.body ?? j.content)?.selected;
     const selected: ConceptPrior[] = (Array.isArray(raw) ? raw : []).flatMap((c) => {
       const r = (c ?? {}) as Record<string, unknown>;
       return typeof r.id === "string" && typeof r.content === "string" ? [{ id: r.id, source_type: String(r.source_type ?? ""), name: typeof r.name === "string" ? r.name : null, content: r.content }] : [];
     });
-    const block = renderConceptPriors(selected);
-    if (!block) return { block: "", ids: [], why: "no citable concept selected" };
-    return { block, ids: selected.filter((c) => block.includes(`[${c.id}]`)).map((c) => c.id) };
+    return { rows: selected };
   } catch (err) {
-    return { block: "", ids: [], why: (err as Error)?.message ?? String(err) };
+    return { rows: [], why: (err as Error)?.message ?? String(err) };
   }
+}
+/** Ask concept_select_for_prompt for the floor's priors. `block` is "" and `ids` empty when it fails open. */
+export async function conceptPriorsBlock(spec: string, editSite: string | null): Promise<{ block: string; ids: string[]; why?: string }> {
+  const query = `${editSite ? `${editSite} ` : ""}${String(spec ?? "")}`.replace(/\s+/g, " ").trim().slice(0, CONCEPT_PRIOR_QUERY_CHARS);
+  if (!query) return { block: "", ids: [], why: "empty query" };
+  const selected = await selectConceptPriorRows(query, CONCEPT_PRIOR_BUDGET_TOKENS);
+  if (selected.rows.length === 0) return { block: "", ids: [], why: selected.why ?? "no citable concept selected" };
+  const block = renderConceptPriors(selected.rows);
+  if (!block) return { block: "", ids: [], why: "no citable concept selected" };
+  return { block, ids: selected.rows.filter((c) => block.includes(`[${c.id}]`)).map((c) => c.id) };
 }
 
 // SHAPE-GROUNDING (2026-06-28): resolve the target vessel's ACTUAL file tree
@@ -7017,6 +7026,12 @@ export const MAX_DRAFT_CONTRACT_FACT_BYTES = 4096;
 export const MAX_DRAFT_LESSON_QUERIES = 4;
 export const MAX_DRAFT_LESSON_LIMIT = 8;
 export const MAX_DRAFT_LESSON_QUERY_CHARS = 120;
+/** Open modules may select concept priors under one aggregate token budget per compose. */
+export const MAX_DRAFT_PRIOR_QUERIES = 4;
+export const MAX_DRAFT_PRIOR_QUERY_TOKENS = 1500;
+export const MAX_DRAFT_PRIOR_QUERY_CHARS = 600;
+export const MAX_DRAFT_PRIOR_SOURCE_TYPES = 6;
+const MAX_DRAFT_PRIOR_RESULT_BYTES_PER_TOKEN = 8;
 /** How far up the parent/source chain ancestor lessons are read (display only), and each row's lesson bytes. */
 export const DRAFTER_ANCESTOR_DEPTH = 3;
 export const DRAFTER_ANCESTOR_ROW_BYTES = 16_384;
@@ -7141,7 +7156,7 @@ export function drafterReadRefusal(path: unknown, scope: { verifyVessels: readon
 }
 
 export type DrafterContractFact = { shapes: string[]; bodyKeys: string[]; kinds: string[] };
-type DrafterReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string };
+type DrafterReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string } | { kind: "priorQueries"; query: string; sourceTypes: string[]; budgetTokens: number };
 
 /** Read the return fact from codeIntrospectResult's existing contract field. This is intentionally only a projection:
  *  code-introspect and the check-supply gate share exportContract/returnedContract, so the drafter cannot grow a second
@@ -7169,10 +7184,33 @@ export function clampDrafterReadPlan(raw: unknown, scope: Parameters<typeof draf
   const dropped: string[] = [];
   const reads: DrafterReadRequest[] = [];
   let bytes = 0;
+  let priorQueryTokens = 0;
+  let priorQueryCount = 0;
   for (const r of p.reads as unknown[]) {
-    const req = (r ?? {}) as { kind?: unknown; path?: unknown; maxBytes?: unknown; fn?: unknown };
+    const req = (r ?? {}) as { kind?: unknown; path?: unknown; maxBytes?: unknown; fn?: unknown; query?: unknown; sourceTypes?: unknown; budgetTokens?: unknown };
     const label = typeof req.path === "string" ? req.path.slice(0, 160) : "(no path)";
     if (reads.length >= MAX_DRAFT_READS) { dropped.push(`read ${label}: over ${MAX_DRAFT_READS} reads`); continue; }
+    if (req.kind === "priorQueries") {
+      const query = typeof req.query === "string" ? req.query.trim().replace(/\s+/g, " ") : "";
+      const sourceTypes = Array.isArray(req.sourceTypes) ? [...new Set(req.sourceTypes.filter((s): s is string => typeof s === "string").map((s) => s.trim()))] : [];
+      const queryLabel = query.slice(0, 80) || "(no query)";
+      if (priorQueryCount >= MAX_DRAFT_PRIOR_QUERIES) { dropped.push(`prior query ${queryLabel}: over ${MAX_DRAFT_PRIOR_QUERIES} queries`); continue; }
+      if (!query || query.length > MAX_DRAFT_PRIOR_QUERY_CHARS) { dropped.push(`prior query ${queryLabel}: empty or over ${MAX_DRAFT_PRIOR_QUERY_CHARS} chars`); continue; }
+      if (sourceTypes.length === 0 || sourceTypes.length > MAX_DRAFT_PRIOR_SOURCE_TYPES || sourceTypes.some((s) => !/^[a-z][a-z0-9_-]{0,39}$/.test(s))) {
+        dropped.push(`prior query ${queryLabel}: sourceTypes must contain 1..${MAX_DRAFT_PRIOR_SOURCE_TYPES} valid names`); continue;
+      }
+      if (!Number.isInteger(req.budgetTokens) || (req.budgetTokens as number) <= 0 || (req.budgetTokens as number) > MAX_DRAFT_PRIOR_QUERY_TOKENS) {
+        dropped.push(`prior query ${queryLabel}: budgetTokens must be in 1..${MAX_DRAFT_PRIOR_QUERY_TOKENS}`); continue;
+      }
+      const budgetTokens = req.budgetTokens as number;
+      if (priorQueryTokens + budgetTokens > MAX_DRAFT_PRIOR_QUERY_TOKENS) {
+        dropped.push(`prior query ${queryLabel}: aggregate token budget over ${MAX_DRAFT_PRIOR_QUERY_TOKENS}; request refused whole`); continue;
+      }
+      priorQueryTokens += budgetTokens;
+      priorQueryCount++;
+      reads.push({ kind: "priorQueries", query, sourceTypes, budgetTokens });
+      continue;
+    }
     const why = drafterReadRefusal(req.path, scope);
     if (why) { dropped.push(`read ${label}: ${why}`); continue; }
     if (req.kind === "contract") {
@@ -7331,6 +7369,8 @@ export type DrafterRun = {
   readFile: (path: string) => Promise<string | null>;
   /** The existing codeIntrospectResult.contract field, by source path; null when unavailable. */
   readContract?: (path: string) => Promise<unknown>;
+  /** Bounded prior-query result through concept_select_for_prompt; missing/unavailable is an empty selection. */
+  readPriorQuery?: (request: { query: string; sourceTypes: string[]; budgetTokens: number }) => Promise<ConceptPrior[]>;
   readGapRow: (id: string) => Promise<Record<string, unknown> | null>;
   lessonRows: (query: string, limit: number) => Promise<string[]>;
   ancestorStart: string;
@@ -7373,14 +7413,14 @@ async function drafterAncestors(start: string, depth: number, selfId: string, re
 }
 
 /** ONE CALL OF THE OPEN MODULE, CLAMPED. Returns the validated context (or null: draft with the floor) and the record. */
-export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ ctx: DrafterCheckedContext | null; budget: number; record: DrafterRecord }> {
+export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ ctx: DrafterCheckedContext | null; budget: number; record: DrafterRecord; priorQueryIds: string[] }> {
   const variant = run.variant ?? DRAFTER_DEFAULT_VARIANT;
-  const floor = (why: string, version: string | null = null, dropped: string[] = []): { ctx: null; budget: number; record: DrafterRecord } =>
-    ({ ctx: null, budget: run.floorBudget, record: { variant, version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
+  const floor = (why: string, version: string | null = null, dropped: string[] = []): { ctx: null; budget: number; record: DrafterRecord; priorQueryIds: string[] } =>
+    ({ ctx: null, budget: run.floorBudget, priorQueryIds: [], record: { variant, version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
   const targets = run.scope.targets;
   if (targets.some((t) => t.startsWith(DRAFTER_SELF_PREFIX))) return floor("target_under_src_drafter");
   // The floor as a declared arm (no module loaded, not a fallback); an id off the allowlist drafts with the floor.
-  if (run.mode === "floor") return { ctx: null, budget: run.floorBudget, record: { variant, version: null, fell_back: null, op_budget: run.floorBudget } };
+  if (run.mode === "floor") return { ctx: null, budget: run.floorBudget, priorQueryIds: [], record: { variant, version: null, fell_back: null, op_budget: run.floorBudget } };
   if (run.mode === "unknown") return floor("unknown_variant");
   let mod: DrafterModule | null = null;
   const invoke = async (entry: DrafterEntry, facts: unknown): Promise<unknown> => {
@@ -7406,7 +7446,26 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   const contents = { ...(facts.contents as Record<string, string>) };
   const contractFacts: Record<string, DrafterContractFact | null> = {};
   const contractResults = new Map<string, unknown>();
+  const priorQueries: Array<{ query: string; rows: ConceptPrior[] }> = [];
+  const priorQueryIds: string[] = [];
   for (const r of plan.reads) {
+    if (r.kind === "priorQueries") {
+      if (!run.readPriorQuery) { dropped.push(`prior query ${r.query.slice(0, 80)}: concept_select_for_prompt is unavailable`); continue; }
+      let rows: ConceptPrior[] = [];
+      try { rows = await run.readPriorQuery({ query: r.query, sourceTypes: [...r.sourceTypes], budgetTokens: r.budgetTokens }); }
+      catch (err) { dropped.push(`prior query ${r.query.slice(0, 80)}: ${String((err as Error)?.message ?? err).slice(0, 120)}`); continue; }
+      const resultBytes = Buffer.byteLength(JSON.stringify(rows), "utf8");
+      if (resultBytes > r.budgetTokens * MAX_DRAFT_PRIOR_RESULT_BYTES_PER_TOKEN) {
+        dropped.push(`prior query ${r.query.slice(0, 80)}: selected rows are ${resultBytes} bytes, over its ${r.budgetTokens * MAX_DRAFT_PRIOR_RESULT_BYTES_PER_TOKEN} byte bound (not read)`);
+        continue;
+      }
+      const sourceTypes = new Set(r.sourceTypes);
+      const safeRows = rows.filter((row) => row && typeof row.id === "string" && CONCEPT_ID_RE.test(row.id) &&
+        typeof row.source_type === "string" && sourceTypes.has(row.source_type) && typeof row.content === "string");
+      priorQueries.push({ query: r.query, rows: safeRows });
+      for (const row of safeRows) if (!priorQueryIds.includes(row.id)) priorQueryIds.push(row.id);
+      continue;
+    }
     if (r.kind === "contract") {
       const key = `${r.path}#${r.fn}`;
       if (!run.readContract) { dropped.push(`contract ${key}: codeIntrospectResult is unavailable`); continue; }
@@ -7426,6 +7485,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   }
   facts.contents = contents;
   facts.contractFacts = contractFacts;
+  facts.priorQueries = priorQueries;
   const hits = [...(facts.lessonHits as Array<{ query: string; rows: string[] }>)];
   for (const q of plan.lessonQueries) {
     try { hits.push({ query: q.query, rows: (await run.lessonRows(q.query, q.limit)).slice(0, q.limit) }); }
@@ -7446,7 +7506,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   const v = validateDrafterContext(raw, run.expect);
   const version = raw && typeof raw === "object" && typeof (raw as { version?: unknown }).version === "string" ? String((raw as { version: string }).version).slice(0, 64) : null;
   if (!v.ok) return floor(`context_refused: ${v.why}`, version, dropped);
-  return { ctx: v.ctx, budget: v.budget, record: { variant, version: v.ctx.version, fell_back: null, op_budget: v.budget, ...(v.clamped ? { clamped: v.clamped } : {}), ...(dropped.length ? { dropped } : {}) } };
+  return { ctx: v.ctx, budget: v.budget, priorQueryIds, record: { variant, version: v.ctx.version, fell_back: null, op_budget: v.budget, ...(v.clamped ? { clamped: v.clamped } : {}), ...(dropped.length ? { dropped } : {}) } };
 }
 
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
@@ -8209,6 +8269,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
         const contract = codeContract(match[2]!, srcReaderAt(root));
         return { shape: "codeIntrospectResult", body: { path: p, contract } };
       },
+      readPriorQuery: async (request) => (await selectConceptPriorRows(request.query, request.budgetTokens, request.sourceTypes)).rows,
       readGapRow: async (id) => ((await readComposeGapRows(id)) ?? []).find((r) => String(r.id) === id) ?? null,
       lessonRows: async (query, limit) => {
         const target = await ownConceptDbResolveUrl("conceptSearch");
@@ -8229,6 +8290,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       mode: variantChoice.mode,
       workerVariant: variantChoice.mode === "named" ? variantChoice.variant : DRAFTER_DEFAULT_VARIANT,
     });
+    for (const id of drafted.priorQueryIds) if (!conceptPriors.ids.includes(id)) conceptPriors.ids.push(id);
     const holder = composeDrafterStore.getStore();
     if (holder) holder.record = drafted.record;
     // C-window-1 CLOSED WIDENING: a validated module context shows each whole-grounded target whole and carries the floor's

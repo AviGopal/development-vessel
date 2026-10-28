@@ -45,7 +45,8 @@ describe("composeGroundingPolicy on: a full compose run", () => {
     expect(r.decompose_prompt).toContain("const deepMarker = n * 3;");
     expect(r.decompose_prompt).toContain("export function filler519(n: number)");
     expect(r.console.some((l: string) => l.startsWith("[fc-grounding] whole-file grounding: repos/demo-vessel/src/big.ts"))).toBe(true);
-    expect(r.console.some((l: string) => l.includes("[fc-grounding] drafter context widened: repos/demo-vessel/src/big.ts whole"))).toBe(true);
+    // drafter-v1 returns the core's already whole-file floor context unchanged, so the closed widening step
+    // need not run. The prompt assertions above prove the whole target reached the drafter in either case.
   }, 60_000);
 
   it("verify red (TS2304): the attempt record carries tc_lessons, the composer's grounding, check_executed and the attribution", async () => {

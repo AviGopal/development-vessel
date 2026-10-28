@@ -9,6 +9,8 @@ export type LessonRecord = Readonly<Record<string, unknown>>;
 
 /** Everything the closed core gathered for one compose. Deep-frozen; the module reads it and returns a context. */
 export type DrafterFacts = Readonly<{
+  /** The one closed-core floor assembly; the shipped drafter-v1 returns it unchanged. */
+  floorContext: DrafterContext;
   spec: string;
   gapSummary: string;
   directed: boolean;

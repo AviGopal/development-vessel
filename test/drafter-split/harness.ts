@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
 import { isolateLearnedStateInProcess } from "../resolvers/isolated-gap-store-run.js";
 import { installCutoverExecGuard, type ExecGuard } from "../resolvers/cutover-exec-guard.js";
+import { __setGapWriteEventsEnabledForTests } from "../../src/resolvers/substrate-gap.js";
 
 export type Row = Record<string, any>;
 export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped" | "seed_new" | "seed_new_versioned";
@@ -510,6 +511,10 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     install(): void {
       if (active) return;
       active = true;
+      // The golden observes compose outcomes and routed writes. This separate filesystem audit is covered by
+      // gap-write-events.test.ts; disable it here because substrate-gap may have captured WORKSPACE_ROOT before
+      // this fixture's isolation and its append would otherwise escape the fixture under multi-file Bun runs.
+      __setGapWriteEventsEnabledForTests(false);
       installFs();
       // The compose's attempt checks read the target unit's LoadState (attempt-checks.ts systemd_units). Never the
       // host's systemctl (the node gate runs this inside the live container): answered as a host with no systemd, so
@@ -521,6 +526,7 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     restore(): void {
       if (!active) return;
       active = false;
+      __setGapWriteEventsEnabledForTests(true);
       mock.module("node:fs/promises", () => ORIG_P);
       mock.module("node:fs", () => ORIG_S);
       const unrouted = execGuard?.restore() ?? [];

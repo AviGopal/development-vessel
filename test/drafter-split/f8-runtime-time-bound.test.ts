@@ -10,6 +10,7 @@ const ex: Parameters<typeof fc.validateDrafterContext>[1] = {
 };
 const facts = { contents: {}, lessonHits: [] };
 const completeFacts = {
+  floorContext: { grounding: "", targetWindows: {}, priorFeedback: "", principles: "", composeLessons: "", netNewTargets: [], opBudgetHint: 24, journal: [], version: "drafter-v1" },
   spec: "", gapSummary: "", directed: false, gapMeta: {}, regionHint: "", lineHint: null,
   targets: { files: [], ownCheckAdded: [], ownCheckReadonly: [], netNew: [] },
   verifyVessels: [], listing: {}, contents: {}, ownCheck: null, lineageLessons: [], ancestors: [], parentCheck: null,

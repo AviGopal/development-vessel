@@ -31,8 +31,11 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
   assertInAnyWorkspace(path, workspaceRoot);
 }
 
-export async function resolveCodeIntrospect(pointer: CodeIntrospectPointer): Promise<ResolverResult> {
-  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+export async function resolveCodeIntrospect(
+  pointer: CodeIntrospectPointer,
+  options: { workspaceRoot?: string } = {},
+): Promise<ResolverResult> {
+  const workspaceRoot = options.workspaceRoot ?? process.env["WORKSPACE_ROOT"] ?? process.cwd();
   assertInWorkspace(pointer.path, workspaceRoot);
 
   const file = Bun.file(pointer.path);

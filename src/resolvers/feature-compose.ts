@@ -4348,6 +4348,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
             // and the composer records what it showed; a non-target keeps the shared-budget window.
             const tg = target ? targetGrounding(`repos/${vRel}/${f}`, content, effBudget, focusHints, primaryProbe, fileHint, editSite) : null;
             const sliced = tg ? tg.sliced : focusedSlice(content, effBudget, focusHints, primaryProbe, fileHint);
+            if (target && capture) capture.targetWindows[`repos/${vRel}/${f}`] = sliced.slice;
             if (tg && groundingOut) groundingOut.push(tg.entry);
             contentBudget -= sliced.slice.length;
             contentParts.push(groundingFileBlock(`repos/${vRel}/${f}`, content, sliced, target));
@@ -7078,7 +7079,7 @@ function invokeDrafterWorker(variant: string, entry: DrafterEntry, facts: unknow
   });
 }
 
-export type DrafterGroundCapture = { listing: Record<string, string[]>; contents: Record<string, string> };
+export type DrafterGroundCapture = { listing: Record<string, string[]>; contents: Record<string, string>; targetWindows: Record<string, string> };
 export type DrafterLessonCapture = { source: "concept-db" | "jsonl" | "none"; query: string; rows: string[]; tail: string[] };
 export type DrafterCheckedContext = {
   grounding: string; targetWindows: Record<string, string>; priorFeedback: string; principles: string; composeLessons: string;
@@ -7423,18 +7424,20 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   if (run.mode === "floor") return { ctx: null, budget: run.floorBudget, priorQueryIds: [], record: { variant, version: null, fell_back: null, op_budget: run.floorBudget } };
   if (run.mode === "unknown") return floor("unknown_variant");
   let mod: DrafterModule | null = null;
-  const invoke = async (entry: DrafterEntry, facts: unknown): Promise<unknown> => {
-    if (run.workerVariant) return invokeDrafterWorker(run.workerVariant, entry, facts, DRAFTER_WORKER_TIMEOUT_MS, run.workerFactory);
+  // Box direct module results before returning from this async helper. Promise resolution probes a returned
+  // object's `then` property; an adversarial Proxy can throw there before the closed clone/refusal boundary sees it.
+  const invoke = async (entry: DrafterEntry, facts: unknown): Promise<{ value: unknown }> => {
+    if (run.workerVariant) return { value: await invokeDrafterWorker(run.workerVariant, entry, facts, DRAFTER_WORKER_TIMEOUT_MS, run.workerFactory) };
     if (!mod) {
       if (!run.load) throw new Error("drafter module has no Worker URL or test loader");
       mod = await run.load();
       if (typeof mod?.planDrafterReads !== "function" || typeof mod?.assembleDrafterContext !== "function") throw new Error("module_shape: planDrafterReads / assembleDrafterContext missing");
     }
-    return mod[entry](facts);
+    return { value: mod[entry](facts) };
   };
   const facts = { ...run.facts } as Record<string, unknown>;
   let plan: ReturnType<typeof clampDrafterReadPlan>;
-  try { plan = clampDrafterReadPlan(await invoke("planDrafterReads", drafterDeepFreeze(facts)), run.scope); }
+  try { plan = clampDrafterReadPlan((await invoke("planDrafterReads", drafterDeepFreeze(facts))).value, run.scope); }
   catch (err) {
     const message = String((err as Error)?.message ?? err);
     if (message.includes("DRAFTER_WORKER_TIMEOUT")) return floor("timeout");
@@ -7494,7 +7497,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   facts.lessonHits = hits;
   if (plan.ancestorDepth > 0 && run.ancestorStart) facts.ancestors = await drafterAncestors(run.ancestorStart, plan.ancestorDepth, run.selfId, run.readGapRow);
   let raw: unknown;
-  try { raw = await invoke("assembleDrafterContext", drafterDeepFreeze(facts)); }
+  try { raw = (await invoke("assembleDrafterContext", drafterDeepFreeze(facts))).value; }
   catch (err) {
     const message = String((err as Error)?.message ?? err);
     if (message.includes("DRAFTER_WORKER_TIMEOUT")) return floor("timeout", null, dropped);
@@ -7798,7 +7801,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   let grounding = "";
   let anchorsSuppliedBytes = 0;
   // The drafter split's facts: what the grounding below lists and reads (the open module renders from these).
-  const drafterGround: DrafterGroundCapture = { listing: {}, contents: {} };
+  const drafterGround: DrafterGroundCapture = { listing: {}, contents: {}, targetWindows: {} };
   if (verifyVessels.length > 0) {
     // The explicit region literal first, then identifiers mined from the request. Both
     // legacy sources of a region are inert in practice (0 of 402 gaps set
@@ -8239,6 +8242,17 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       safeAnchors: anchorsPart,
       opCeiling: ceiling,
       opCeilingDeclared: pointer.max_ops != null,
+      floorContext: {
+        grounding,
+        targetWindows: { ...drafterGround.targetWindows },
+        priorFeedback,
+        principles,
+        composeLessons,
+        netNewTargets: [...netNewTargets],
+        opBudgetHint: maxOps,
+        journal: lineageLocksNow.lessons.length > 0 ? [`source gap record shown: ${lineageLocksNow.lessons.length} lesson(s)`] : [],
+        version: DRAFTER_DEFAULT_VARIANT,
+      },
     };
     const targetContents: Record<string, string> = {};
     for (const t of targetFiles) if (typeof drafterGround.contents[t] === "string") targetContents[t] = drafterGround.contents[t]!;

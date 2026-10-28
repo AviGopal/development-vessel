@@ -2,12 +2,14 @@
 // existing codeIntrospectResult field; the closed core clamps and fulfills it.
 import { afterAll, describe, expect, it } from "bun:test";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { codeContract, resolveCodeIntrospect } from "../../src/resolvers/code-introspect.js";
 import { classifyCheckRun } from "../../src/resolvers/retry-evidence.js";
 
 const fc = await import("../../src/resolvers/feature-compose.ts");
 const path = join(import.meta.dir, "contract-read-fixture.ts");
+const workspaceRoot = resolve(import.meta.dir, "../..");
+const introspectFixture = (pointer: Parameters<typeof resolveCodeIntrospect>[0]) => resolveCodeIntrospect(pointer, { workspaceRoot });
 const source = `export function answer(): { shape: string; body: { count: number } } { return { shape: "Answer", body: { count: 42 } }; }\n`;
 afterAll(() => { try { unlinkSync(path); } catch {} });
 
@@ -28,7 +30,7 @@ describe("drafter contract read request (checklist 2.1)", () => {
 
   it("returns shapes, body keys, and kinds from codeIntrospectResult's shared contract", async () => {
     writeFileSync(path, source);
-    const result = await resolveCodeIntrospect({ type: "code_introspect", path, include_contract: true });
+    const result = await introspectFixture({ type: "code_introspect", path, include_contract: true });
     expect(fc.drafterContractFactFromResult(result, "answer")).toEqual({
       shapes: ["Answer"], bodyKeys: ["count"], kinds: ["object"],
     });
@@ -37,13 +39,13 @@ describe("drafter contract read request (checklist 2.1)", () => {
 
   it("a partly open return is reported as null rather than inventing a contract", async () => {
     writeFileSync(path, `export function answer(value: unknown) { return value; }\n`);
-    const result = await resolveCodeIntrospect({ type: "code_introspect", path, include_contract: true });
+    const result = await introspectFixture({ type: "code_introspect", path, include_contract: true });
     expect(fc.drafterContractFactFromResult(result, "answer")).toBeNull();
   });
 
   it("fulfills the bounded request into the facts passed to the assembler", async () => {
     writeFileSync(path, source);
-    const factResult = await resolveCodeIntrospect({ type: "code_introspect", path, include_contract: true });
+    const factResult = await introspectFixture({ type: "code_introspect", path, include_contract: true });
     const requestedPath = "repos/development-vessel/src/example.ts";
     let shown: unknown;
     const emptyContext = {

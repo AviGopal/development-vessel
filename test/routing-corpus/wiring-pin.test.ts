@@ -4,7 +4,7 @@
 //   - the admission block builds the composeAdmission record and asks compose-admission-core's composeAdmission, and a
 //     refusal is rendered by the core and returned;
 //   - it does so after the stored row and its hold are read, and before the spend envelope, the slot, the landing lease
-//     and any drafting (the drafter's context assembly);
+//     and the drafter Worker call;
 //   - the floor's inline refusals (now the core's floor and renderer) are gone from feature-compose.ts.
 // Every anchor must be FOUND: a missing anchor is red, never vacuous. Each assertion is shown red on a mutant.
 import { describe, expect, test } from "bun:test";
@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const FC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts"), "utf8");
+const DRAFTER_WORKER = readFileSync(join(import.meta.dir, "..", "..", "workers", "drafter-module-worker.ts"), "utf8");
 
 const ANCHORS = {
   held: "const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;",
@@ -22,8 +23,9 @@ const ANCHORS = {
   render: "const r = renderAdmissionRefusal(admissionInput, admission.refusal);",
   lease: "      landingLeaseGap = _gapIdForSlot;\n      admittedCapture = (draftingStarted) => admissionCapture(",
   envelope: 'const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");',
-  drafter: 'const { planDrafterReads, assembleDrafterContext } = await import(named === null || named === DRAFTER_DEFAULT_VARIANT ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(named)}/index.js`);',
+  worker: 'workerVariant: variantChoice.mode === "named" ? variantChoice.variant : DRAFTER_DEFAULT_VARIANT,',
 };
+const WORKER_IMPORT = 'const { planDrafterReads, assembleDrafterContext } = await import(variant === "drafter-v1" ? "../src/drafter/index.js" : `../src/drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`);';
 /** The floor's refusals as they were inline. None may come back as a local copy beside the core. */
 const MOVED = [
   "is under operator_hold`);",
@@ -43,14 +45,18 @@ export function wiringOffences(text: string): string[] {
     else if (text.indexOf(a, at[k]! + 1) >= 0 && k !== "envelope") bad.push(`anchor not unique: ${k}`);
   }
   for (const m of MOVED) if (text.includes(m)) bad.push(`moved refusal back in feature-compose.ts: ${m}`);
-  const order = ["held", "record", "load", "ask", "branch", "render", "lease", "envelope", "drafter"];
+  const order = ["held", "record", "load", "ask", "branch", "render", "lease", "envelope", "worker"];
   for (let i = 1; i < order.length; i++) if (!(at[order[i - 1]!]! < at[order[i]!]!)) bad.push(`${order[i - 1]} is not before ${order[i]}`);
   if (at.branch! - at.ask! > 200 || at.render! - at.branch! > 200) bad.push("the refusal branch does not immediately follow the admission");
   return bad;
 }
 
 describe("wiring pin: feature_compose admits through compose-admission-core", () => {
-  test("every anchor found, in order, no moved refusal left", () => { expect(wiringOffences(FC)).toEqual([]); });
+  test("every anchor found, in order, no moved refusal left", () => {
+    expect(wiringOffences(FC)).toEqual([]);
+    expect(DRAFTER_WORKER).toContain(WORKER_IMPORT);
+    expect(FC).not.toContain("await import(named === null || named === DRAFTER_DEFAULT_VARIANT");
+  });
   test("MUTANT the decision skipped is red", () => {
     expect(wiringOffences(FC.replace(ANCHORS.ask, "const admission = { admit: true, refusal: null };")).length).toBeGreaterThan(0);
   });

@@ -19,8 +19,9 @@ import { join } from "node:path";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-golden", { superRepo: true, who: "test/drafter-split/verdict-diff.golden.test.ts" });
-const { createHarness, CORPUS } = await import("./harness.js");
+const { createHarness, CORPUS, installInlineDrafterWorker } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
+const restoreInlineWorker = installInlineDrafterWorker();
 
 const DRAFTER = "../../src/drafter/index.ts";
 // A spread snapshot: mock.module re-points the namespace's own bindings, so restoring from it would restore the stand-in.
@@ -29,6 +30,7 @@ const SPLIT_LINE = /^\[(?:fc-)?drafter\] /;
 
 afterAll(() => {
   if (realDrafter) mock.module(DRAFTER, () => realDrafter);
+  restoreInlineWorker();
   H.restore();
 });
 

@@ -15,13 +15,14 @@ import { join } from "node:path";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("drafter-f4", { superRepo: true, who: "test/drafter-split/f4-clamps.test.ts" });
-const { createHarness, CORPUS, VESSEL } = await import("./harness.js");
+const { createHarness, CORPUS, VESSEL, installInlineDrafterWorker } = await import("./harness.js");
 const H = createHarness(ROOT, RUNTIME);
+const restoreInlineWorker = installInlineDrafterWorker();
 const fc = await import("../../src/resolvers/feature-compose.ts");
 const { REFUSAL_JOURNAL_GREP, CONSTRAINT_PARK_GREP } = await import("../../src/resolvers/retry-evidence.ts");
 const DRAFTER = "../../src/drafter/index.ts";
 const realDrafter = { ...(await import(DRAFTER)) };
-afterAll(() => { mock.module(DRAFTER, () => realDrafter); H.restore(); });
+afterAll(() => { mock.module(DRAFTER, () => realDrafter); restoreInlineWorker(); H.restore(); });
 const GOLDEN = JSON.parse(readFileSync(join(import.meta.dir, "verdict-diff.golden.json"), "utf8")) as Array<{ name: string; decompose_prompt: string; prompts: Array<{ kind: string; sha256: string }> }>;
 
 const T = `repos/${VESSEL}/src/compute.ts`;

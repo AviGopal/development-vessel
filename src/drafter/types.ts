@@ -52,6 +52,8 @@ export type DrafterFacts = Readonly<{
   fileLessonsTail: readonly string[];
   /** Text the closed core rendered from its own reads, exactly as the floor appends it. */
   principles: string;
+  /** Return-contract facts requested through codeIntrospectResult; key is `<path>#<fn>`, null when open. */
+  contractFacts?: Readonly<Record<string, Readonly<{ shapes: readonly string[]; bodyKeys: readonly string[]; kinds: readonly string[] }> | null>>;
   contracts: string;
   existingSymbols: string;
   symbolDecls: string;
@@ -61,7 +63,7 @@ export type DrafterFacts = Readonly<{
   opCeilingDeclared: boolean;
 }>;
 
-export type ReadRequest = { path: string; maxBytes: number };
+export type ReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string };
 export type LessonQuery = { query: string; limit: number };
 export type DrafterReadPlan = { reads: ReadRequest[]; lessonQueries: LessonQuery[]; ancestorDepth: number };
 

@@ -166,6 +166,8 @@ import { posix as floorPosix } from "node:path";
 import { stampComposeProgress } from "../lib/compose-progress.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 import { bindDraftedAnchor, lineMatchesDrafted, renderControlBytes, renderWindowForDrafter } from "../control-bytes.js";
+import { codeContract } from "./code-introspect.js";
+import { srcReaderAt } from "./check-supply-admission.js";
 
 // COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
 // returns `usage` on every completion and llmCall used to drop it, so every compose report
@@ -7009,6 +7011,8 @@ export const MAX_DRAFT_PROMPT_BYTES = 262_144;
  *  check windows). The files the floor's own grounding read are facts already and do not count. */
 export const MAX_DRAFT_READS = 64;
 export const MAX_DRAFT_READ_BYTES = 26_000 + 4 * 6000 + 2 * 6000;
+/** A single structured callable contract returned to an open drafter, and the aggregate reserved for them. */
+export const MAX_DRAFT_CONTRACT_FACT_BYTES = 4096;
 /** Lesson queries an open module may ask for: count, rows per query, query length. */
 export const MAX_DRAFT_LESSON_QUERIES = 4;
 export const MAX_DRAFT_LESSON_LIMIT = 8;
@@ -7136,26 +7140,53 @@ export function drafterReadRefusal(path: unknown, scope: { verifyVessels: readon
   return "not src/**/*.ts(x) or a build config of a verify vessel";
 }
 
+export type DrafterContractFact = { shapes: string[]; bodyKeys: string[]; kinds: string[] };
+type DrafterReadRequest = { path: string; maxBytes: number; kind?: "file" } | { kind: "contract"; path: string; fn: string };
+
+/** Read the return fact from codeIntrospectResult's existing contract field. This is intentionally only a projection:
+ *  code-introspect and the check-supply gate share exportContract/returnedContract, so the drafter cannot grow a second
+ *  parser that disagrees with the deterministic refusal. Open, missing or partially open contracts are unknown. */
+export function drafterContractFactFromResult(raw: unknown, fn: string): DrafterContractFact | null {
+  if (!raw || typeof raw !== "object") return null;
+  const result = raw as { shape?: unknown; body?: { contract?: unknown } };
+  if (result.shape !== "codeIntrospectResult" || !result.body || !result.body.contract || typeof result.body.contract !== "object") return null;
+  const contract = result.body.contract as { open?: unknown; exports?: unknown; unavailable?: unknown };
+  if (contract.unavailable || contract.open !== null || !Array.isArray(contract.exports)) return null;
+  const entry = (contract.exports as Array<{ name?: unknown; returned?: unknown }>).find((e) => e?.name === fn);
+  if (!entry || !entry.returned || typeof entry.returned !== "object") return null;
+  const returned = entry.returned as { shapes?: unknown; body_keys?: unknown; kinds?: unknown };
+  if (![returned.shapes, returned.body_keys, returned.kinds].every((v) => Array.isArray(v) && v.every((x) => typeof x === "string"))) return null;
+  return { shapes: returned.shapes as string[], bodyKeys: returned.body_keys as string[], kinds: returned.kinds as string[] };
+}
+
 /** The clamped read plan; `refused` when the plan's shape is wrong (the compose then drafts with the floor). */
-export function clampDrafterReadPlan(raw: unknown, scope: Parameters<typeof drafterReadRefusal>[1]): { ok: true; reads: Array<{ path: string; maxBytes: number }>; lessonQueries: Array<{ query: string; limit: number }>; ancestorDepth: number; dropped: string[] } | { ok: false; why: string } {
+export function clampDrafterReadPlan(raw: unknown, scope: Parameters<typeof drafterReadRefusal>[1]): { ok: true; reads: DrafterReadRequest[]; lessonQueries: Array<{ query: string; limit: number }>; ancestorDepth: number; dropped: string[] } | { ok: false; why: string } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, why: "read plan is not an object" };
   const extra = Object.keys(raw).filter((k) => !(DRAFTER_PLAN_KEYS as readonly string[]).includes(k));
   if (extra.length > 0) return { ok: false, why: `read plan has key(s) outside the schema: ${extra.join(", ")}` };
   const p = raw as { reads?: unknown; lessonQueries?: unknown; ancestorDepth?: unknown };
   if (!Array.isArray(p.reads) || !Array.isArray(p.lessonQueries) || typeof p.ancestorDepth !== "number") return { ok: false, why: "read plan fields have the wrong types" };
   const dropped: string[] = [];
-  const reads: Array<{ path: string; maxBytes: number }> = [];
+  const reads: DrafterReadRequest[] = [];
   let bytes = 0;
   for (const r of p.reads as unknown[]) {
-    const req = (r ?? {}) as { path?: unknown; maxBytes?: unknown };
+    const req = (r ?? {}) as { kind?: unknown; path?: unknown; maxBytes?: unknown; fn?: unknown };
     const label = typeof req.path === "string" ? req.path.slice(0, 160) : "(no path)";
     if (reads.length >= MAX_DRAFT_READS) { dropped.push(`read ${label}: over ${MAX_DRAFT_READS} reads`); continue; }
     const why = drafterReadRefusal(req.path, scope);
     if (why) { dropped.push(`read ${label}: ${why}`); continue; }
+    if (req.kind === "contract") {
+      if (typeof req.fn !== "string" || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(req.fn)) { dropped.push(`contract ${label}: fn is not an identifier`); continue; }
+      if (bytes + MAX_DRAFT_CONTRACT_FACT_BYTES > MAX_DRAFT_READ_BYTES) { dropped.push(`contract ${label}#${req.fn}: over ${MAX_DRAFT_READ_BYTES} read bytes`); continue; }
+      bytes += MAX_DRAFT_CONTRACT_FACT_BYTES;
+      reads.push({ kind: "contract", path: req.path as string, fn: req.fn });
+      continue;
+    }
+    if (req.kind !== undefined && req.kind !== "file") { dropped.push(`read ${label}: unknown read kind ${String(req.kind).slice(0, 40)}`); continue; }
     if (!Number.isInteger(req.maxBytes) || (req.maxBytes as number) <= 0) { dropped.push(`read ${label}: maxBytes is not a positive integer`); continue; }
     if (bytes + (req.maxBytes as number) > MAX_DRAFT_READ_BYTES) { dropped.push(`read ${label}: over ${MAX_DRAFT_READ_BYTES} read bytes`); continue; }
     bytes += req.maxBytes as number;
-    reads.push({ path: req.path as string, maxBytes: req.maxBytes as number });
+    reads.push({ path: req.path as string, maxBytes: req.maxBytes as number, ...(req.kind === "file" ? { kind: "file" as const } : {}) });
   }
   const lessonQueries: Array<{ query: string; limit: number }> = [];
   for (const q of p.lessonQueries as unknown[]) {
@@ -7298,6 +7329,8 @@ export type DrafterRun = {
   floorBudget: number;
   /** The closed readers the module's requests are fulfilled through. */
   readFile: (path: string) => Promise<string | null>;
+  /** The existing codeIntrospectResult.contract field, by source path; null when unavailable. */
+  readContract?: (path: string) => Promise<unknown>;
   readGapRow: (id: string) => Promise<Record<string, unknown> | null>;
   lessonRows: (query: string, limit: number) => Promise<string[]>;
   ancestorStart: string;
@@ -7371,7 +7404,20 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   if (!plan.ok) return floor(`plan_refused: ${plan.why}`);
   const dropped = [...plan.dropped];
   const contents = { ...(facts.contents as Record<string, string>) };
+  const contractFacts: Record<string, DrafterContractFact | null> = {};
+  const contractResults = new Map<string, unknown>();
   for (const r of plan.reads) {
+    if (r.kind === "contract") {
+      const key = `${r.path}#${r.fn}`;
+      if (!run.readContract) { dropped.push(`contract ${key}: codeIntrospectResult is unavailable`); continue; }
+      if (!contractResults.has(r.path)) contractResults.set(r.path, await run.readContract(r.path).catch(() => null));
+      const fact = drafterContractFactFromResult(contractResults.get(r.path), r.fn);
+      if (!fact) { contractFacts[key] = null; dropped.push(`contract ${key}: open or unavailable`); continue; }
+      const factBytes = Buffer.byteLength(JSON.stringify(fact), "utf8");
+      if (factBytes > MAX_DRAFT_CONTRACT_FACT_BYTES) { contractFacts[key] = null; dropped.push(`contract ${key}: ${factBytes} bytes, over ${MAX_DRAFT_CONTRACT_FACT_BYTES} (not read)`); continue; }
+      contractFacts[key] = fact;
+      continue;
+    }
     if (typeof contents[r.path] === "string") continue;
     const text = await run.readFile(r.path).catch(() => null);
     if (typeof text !== "string") { dropped.push(`read ${r.path}: unreadable`); continue; }
@@ -7379,6 +7425,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     contents[r.path] = text;
   }
   facts.contents = contents;
+  facts.contractFacts = contractFacts;
   const hits = [...(facts.lessonHits as Array<{ query: string; rows: string[] }>)];
   for (const q of plan.lessonQueries) {
     try { hits.push({ query: q.query, rows: (await run.lessonRows(q.query, q.limit)).slice(0, q.limit) }); }
@@ -8154,6 +8201,13 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
         const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${p.replace(/^repos\//, "")}` });
         const c = (rd.body as { content?: unknown })?.content;
         return rd.ok && typeof c === "string" ? c : null;
+      },
+      readContract: async (p) => {
+        const match = /^repos\/([^/]+)\/(.+)$/.exec(p);
+        if (!match) return null;
+        const root = vesselRoot(`repos/${match[1]}`);
+        const contract = codeContract(match[2]!, srcReaderAt(root));
+        return { shape: "codeIntrospectResult", body: { path: p, contract } };
       },
       readGapRow: async (id) => ((await readComposeGapRows(id)) ?? []).find((r) => String(r.id) === id) ?? null,
       lessonRows: async (query, limit) => {

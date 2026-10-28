@@ -82,8 +82,20 @@ export async function isolateRuntimeRoot(prefix: string, opts: { superRepo?: boo
   const superRepo = opts.superRepo ? join(root, "no-super-repo") : undefined;
   process.env["MITOSIS_RUNTIME_DIR"] = runtime;
   process.env["MITOSIS_REPO_ROOT"] = runtime;
+  // WORKSPACE_ROOT is captured by config.ts and substrate-gap.ts at import time. Keep their
+  // gap-store and other workspace writes inside this fixture before shape-vocabulary imports config.
+  process.env["WORKSPACE_ROOT"] = root;
   if (superRepo) process.env["MITOSIS_SUPER_REPO_DIR"] = superRepo;
   const expected: RootBindings = { RUNTIME_ROOT: runtime, REPO_ROOT: runtime, ...(superRepo ? { SUPER_REPO_ROOT: superRepo } : {}) };
+
+  const configPath = join(import.meta.dir, "..", "..", "src", "config.ts");
+  const config = (await import(configPath)) as Record<string, unknown>;
+  if (config["WORKSPACE_ROOT"] !== root) {
+    const real = { ...config };
+    mock.module(configPath, () => ({ ...real, WORKSPACE_ROOT: root }));
+  }
+  const effectiveConfig = (await import(configPath)) as Record<string, unknown>;
+  if (effectiveConfig["WORKSPACE_ROOT"] !== root) throw new Error(`isolateRuntimeRoot: WORKSPACE_ROOT=${String(effectiveConfig["WORKSPACE_ROOT"])} (expected ${root})`);
 
   const sv = (await import(SHAPE_VOCABULARY)) as Record<string, unknown>;
   const frozen = (k: keyof RootBindings) => sv[k] !== expected[k] && expected[k] !== undefined;

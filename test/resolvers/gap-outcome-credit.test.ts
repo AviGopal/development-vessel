@@ -106,6 +106,50 @@ describe("a settled gap credits the execution that filed it, through the existin
     expect(posted).toHaveLength(1);
   });
 
+  // RULING (b) (qa, 2026-10-28): the consumer credit is paid once per (gap, landing sha), as the class posterior is.
+  const reopen = (id: string) =>
+    resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "substrate_detected", summary: `the campsite trace self-tweet ${id}`, detected_at: AT, status: "open", classification_metadata: {} } } as never, { vocabulary: null } as never) as Promise<{ shape: string }>;
+  const storedMeta = (id: string) => ((JSON.parse(readFileSync(STORE, "utf8")) as Array<Record<string, unknown>>).find((g) => g["id"] === id)?.["classification_metadata"] ?? {}) as Record<string, unknown>;
+
+  it("[MUST-FAIL] a gap reopened and settled again on the SAME landing sha is credited once", async () => {
+    seed("campsite-tweet-7", PRODUCER);
+    await settle("campsite-tweet-7", "closed", { closed_reason: "landed_verified", landed_sha: "abc1234" });
+    const r = await reopen("campsite-tweet-7");
+    expect(r.shape).toBe("substrateGapWriteResult");
+    expect(String((JSON.parse(readFileSync(STORE, "utf8")) as Array<Record<string, unknown>>).find((g) => g["id"] === "campsite-tweet-7")?.["status"])).toBe("open");
+    await settle("campsite-tweet-7", "closed", { closed_reason: "landed_verified", landed_sha: "abc1234" });
+    await flush();
+    expect(posted).toHaveLength(1);
+    expect(storedMeta("campsite-tweet-7")["producer_outcome_paid"]).toEqual(["alpha:sha:abc1234"]);
+  });
+
+  it("[CONTROL] a reopened gap settled on a DIFFERENT landing sha is credited again", async () => {
+    seed("campsite-tweet-8", PRODUCER);
+    await settle("campsite-tweet-8", "closed", { closed_reason: "landed_verified", landed_sha: "abc1234" });
+    await reopen("campsite-tweet-8");
+    await settle("campsite-tweet-8", "closed", { closed_reason: "landed_verified", landed_sha: "def5678" });
+    await flush();
+    expect(posted).toHaveLength(2);
+  });
+
+  it("[CONTROL] a write cannot clear the paid landings: a reopen sending an empty list keeps them", async () => {
+    seed("campsite-tweet-9", PRODUCER);
+    await settle("campsite-tweet-9", "closed", { closed_reason: "landed_verified", landed_sha: "abc1234" });
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: "campsite-tweet-9", category: "systematic_failure", source: "substrate_detected", summary: "the campsite trace self-tweet campsite-tweet-9", detected_at: AT, status: "open", classification_metadata: { producer_outcome_paid: [] } } } as never, { vocabulary: null } as never);
+    await settle("campsite-tweet-9", "closed", { closed_reason: "landed_verified", landed_sha: "abc1234", producer_outcome_paid: [] });
+    await flush();
+    expect(posted).toHaveLength(1);
+  });
+
+  it("[CONTROL] a settle with no landing sha is not deduped (an expiry after a reopen charges again)", async () => {
+    seed("campsite-tweet-10", PRODUCER);
+    await settle("campsite-tweet-10", "closed", { closed_reason: "expired_not_redetected", closed_by: "gap_lifecycle_scan" });
+    await reopen("campsite-tweet-10");
+    await settle("campsite-tweet-10", "closed", { closed_reason: "expired_not_redetected", closed_by: "gap_lifecycle_scan" });
+    await flush();
+    expect(posted.map((t) => t["success"])).toEqual([false, false]);
+  });
+
   it("[CONTROL] the name-keyed closure ledger is gone: a landed close no longer writes detector_credit", () => {
     const src = readFileSync(join(import.meta.dir, "..", "..", "src", "judge", "gap-landing-verdict.ts"), "utf8");
     expect(src).not.toContain('table: "detector_credit"');

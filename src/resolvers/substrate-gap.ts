@@ -2639,7 +2639,7 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
  * Every call, marked or not, also appends one gap-write event (see GAP-WRITE EVENTS). `stored` is the row the
  * write was gated against (null: no row), `id` and `changed` are set only when the write is saved here.
  */
-type GapWriteAudit = { from?: string; stored?: SubstrateGap | null; id?: string; changed?: string[] };
+type GapWriteAudit = { from?: string; stored?: SubstrateGap | null; id?: string; changed?: string[]; outcomeCreditPaid?: boolean };
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -3295,6 +3295,20 @@ async function resolveSubstrateGapWriteInner(
     } catch (err) {
       console.warn(`[expectation-calibration] credit skipped for ${gap.id}: ${String(err).slice(0, 200)}`);
     }
+    // GAP OUTCOME CREDIT IS PAID ONCE PER (gap, landing sha), as the class posterior is (see GAP OUTCOME CREDIT below).
+    // The landings already paid are kept on the row (GAP_OUTCOME_PAID_FIELD, carried across a reopen like any other
+    // key and never taken from the incoming write); a reopened row that settles again on a paid landing posts nothing.
+    {
+      const m = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>) };
+      const paid = Array.isArray(exMeta[GAP_OUTCOME_PAID_FIELD]) ? (exMeta[GAP_OUTCOME_PAID_FIELD] as unknown[]).map(String) : [];
+      if (paid.length > 0) m[GAP_OUTCOME_PAID_FIELD] = paid; else delete m[GAP_OUTCOME_PAID_FIELD];
+      if (String(existing.status ?? "open") === "open" && (gap.status === "closed" || gap.status === "rejected")) {
+        const key = gapOutcomeCreditKey({ ...gap, classification_metadata: m });
+        if (key !== null && paid.includes(key)) audit.outcomeCreditPaid = true;
+        else if (key !== null) m[GAP_OUTCOME_PAID_FIELD] = [...paid, key].slice(-20);
+      }
+      gap.classification_metadata = m;
+    }
     gaps[existingIdx] = gap;
     action = "updated";
   } else {
@@ -3660,7 +3674,7 @@ async function resolveSubstrateGapWriteInner(
   }
 
   // GAP OUTCOME CREDIT (see below): a close or reject of a row a producer filed credits or charges that producer.
-  if (audit.from === "open" && (gap.status === "closed" || gap.status === "rejected")) void creditGapOutcome(gap);
+  if (audit.from === "open" && !audit.outcomeCreditPaid && (gap.status === "closed" || gap.status === "rejected")) void creditGapOutcome(gap);
 
   const publishRefused = isScratchGapStoreRoot(workspaceRoot()) && !gapEventPublishFromScratchAllowed;
   if (publishRefused && !gapEventPublishRefusalLogged) {
@@ -3744,6 +3758,19 @@ export function gapOutcomeVerdict(gap: { status?: unknown; classification_metada
   if (GAP_OUTCOME_ALPHA_CLOSES.has(r)) return { credit: "alpha", reason: `closed:${r}` };
   if (GAP_OUTCOME_BETA_CLOSES.has(r)) return { credit: "beta", reason: `closed:${r}` };
   return { credit: null, reason: `closed:${r || "unstated"} (says nothing about the producer)` };
+}
+
+/** The row field holding the landings whose outcome credit was already paid ("<alpha|beta>:sha:<sha>"). */
+export const GAP_OUTCOME_PAID_FIELD = "producer_outcome_paid";
+/** The once-per-(gap, landing) key of a settled gap's outcome credit, or null when it credits nothing or names no landing
+ *  (an expiry, a reject, a close with no landed sha: each settle of those counts, as before). */
+export function gapOutcomeCreditKey(gap: { status?: unknown; classification_metadata?: unknown }): string | null {
+  const m = (gap.classification_metadata && typeof gap.classification_metadata === "object" ? gap.classification_metadata : {}) as Record<string, unknown>;
+  if (!producerFromPointer(m)) return null;
+  const v = gapOutcomeVerdict(gap);
+  if (v.credit === null) return null;
+  const sha = typeof m["landed_sha"] === "string" && m["landed_sha"] ? m["landed_sha"] : typeof m["landed_commit"] === "string" && m["landed_commit"] ? m["landed_commit"] : null;
+  return sha ? `${v.credit}:sha:${String(sha)}` : null;
 }
 
 /** The consumer trace for a settled gap a producer filed, or null when it names no producer or credits nothing. */

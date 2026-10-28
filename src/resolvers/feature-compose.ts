@@ -11556,6 +11556,10 @@ const earlyAttempt = await Promise.race([
     const executionTrace = { executionId };
     const metabobEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
     const traceKey = process.env["METABOB_API_KEY"] ?? "";
+    // Keep the selected strategy on the durable execution itself: the ribosome needs this
+    // provenance to extract the floor family, and the grader must charge a failed fallback
+    // to the selected arm rather than to the floor that handled it.
+    const drafterTrace = composeDrafterStore.getStore()?.record;
     const landedVessels = (cutovers as Array<Record<string, unknown>>)
       .filter((c) => String(((c?.result as Record<string, unknown> | undefined)?.new_git_sha) ?? "").length > 0)
       .map((c) => String(c.vessel ?? ""))
@@ -11573,6 +11577,7 @@ const earlyAttempt = await Promise.race([
         metadata: {
           // This run's accumulated LLM spend ({input_tokens, output_tokens, calls, cost_usd}).
           llm_usage: composeUsageStore.getStore() ?? null,
+          ...(drafterTrace ? { drafter_variant: drafterTrace.variant } : {}),
           gap_id: pointer.gap?.id ?? "adhoc",
           // Gated route vs the patch_with_tools escalation lane — the distinction that took a
           // manual bisect over commit trailers and gap-id prefixes to establish by hand.

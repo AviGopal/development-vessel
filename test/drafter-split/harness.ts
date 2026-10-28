@@ -205,6 +205,7 @@ export const markEvent = (e: string): void => { events.push(e); };
 // ── the harness ──────────────────────────────────────────────────────────────────────────────────────────────
 export function createHarness(ROOT: string, RUNTIME: string) {
   let execGuard: ExecGuard | null = null;
+  let executionObserver: ((body: Row) => void) | undefined;
   const CLONES = join(ROOT, "clones");
   const norm = (s: string): string => s
     .split(RUNTIME).join("<RUNTIME>")
@@ -341,6 +342,9 @@ export function createHarness(ROOT: string, RUNTIME: string) {
     const ptr = (body?.impulse?.pointer ?? body?.pointer ?? body?.impulse ?? {}) as Row;
     const type = String(ptr.type ?? "");
     const tag = (extra = "") => rec.fetches.push(norm(`${url} ${type}${extra}`).slice(0, 240));
+    if (url.endsWith("/v2/activities/executions")) {
+      executionObserver?.(body);
+    }
     if (url === TOOLS) {
       const command = typeof ptr.command === "string" ? ptr.command : "";
       tag(` ${type === "shell" ? command : String(ptr.path ?? "")}`);
@@ -534,8 +538,9 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       if (unrouted.length > 0) throw new Error(`drafter-split harness: blocked host spawn(s) with no route: ${unrouted.join("; ")}`);
     },
     /** Run one fixture through `fc.resolveFeatureCompose` and return its recording. */
-    async run(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Row }> }, fixture: Fixture, onBody?: (body: Row) => void): Promise<Recording> {
+    async run(fc: { resolveFeatureCompose: (p: unknown) => Promise<{ body: Row }> }, fixture: Fixture, onBody?: (body: Row) => void, onExecution?: (body: Row) => void): Promise<Recording> {
       fx = fixture;
+      executionObserver = onExecution;
       events.length = 0;
       rec = { name: fixture.name, verdict: null, stage: null, ok: null, error: "", ops: [], applied: [], prompts: [], decompose_prompt: "", fetches: [], gap_writes: [], fs_writes: [], console: [] };
       storeRows = structuredClone(fixture.store ?? []);
@@ -577,6 +582,7 @@ export function createHarness(ROOT: string, RUNTIME: string) {
         const ops = Array.isArray(b.ops) ? b.ops : Array.isArray(b.plan?.ops) ? b.plan.ops : [];
         rec.ops = (ops as Row[]).map((o) => ({ kind: o?.kind ?? null, path: o?.path ?? null, old: norm(String(o?.old_string ?? "")).slice(0, 80) }));
       } finally {
+        executionObserver = undefined;
         globalThis.fetch = originalFetch;
         console.log = ORIGINAL.log; console.warn = ORIGINAL.warn; console.error = ORIGINAL.error;
         Math.random = ORIGINAL.random;

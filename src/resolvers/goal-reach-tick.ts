@@ -514,6 +514,15 @@ export function askAddressee(rec: Pick<GoalReachRecord, "origin" | "origin_opera
 
 const gapClosedAt = (g: GapView): number => (typeof g.closed_at === "string" ? Date.parse(g.closed_at) : NaN);
 const gapLandedAt = (g: GapView): number => (typeof g.landed_at === "string" && g.landed_sha ? Date.parse(g.landed_at) : NaN);
+/**
+ * THE ONE CLOSURE RULE FOR A RE-RUN: a linked gap (present in the store) closed for a REPAIR reason after the goal's last
+ * attempt. The decider (nextAction) re-dispatches on it and the grader (gradeTick) calls a goal missed only on it, so the
+ * grade cannot disagree with the decision. The grader used to count ANY close, so every tick was graded failure for
+ * correctly not re-running goals whose linked gaps had closed by expiry.
+ */
+export function closedForRepairSince(linked: readonly GapView[], lastAttempt: number): boolean {
+  return linked.some((g) => gapClosedAt(g) > lastAttempt && REALLY_FIXED_REASONS.has(String(g.closed_reason ?? "")));
+}
 
 export function nextAction(
   rec: GoalReachRecord,
@@ -553,7 +562,7 @@ export function nextAction(
   // indistinguishable from "we stopped looking"; churned_unlandable; persistent_compose_failure; walk_artifact) is not
   // evidence the condition is gone, and a reach after it would be scored reached_without_hands, the headline measure
   // (81% of 487 closes in 10 days were such reasons, 2026-10-16). One "really fixed" rule: detector-yield-registry's.
-  if (landedSince.length === 0 && !linked.some((g) => gapClosedAt(g) > lastAttempt && REALLY_FIXED_REASONS.has(String(g.closed_reason ?? "")))) return { kind: "none", reason: "no_new_closure" };
+  if (landedSince.length === 0 && !closedForRepairSince(linked, lastAttempt)) return { kind: "none", reason: "no_new_closure" };
 
   const unkeyed = rec.landed_write_shapes.filter((w) => !IDEMPOTENT_BY_KEY_WRITE_SHAPES.has(w));
   if (rec.origin !== "autonomous" && unkeyed.length > 0) {
@@ -791,8 +800,8 @@ export type TickGrade = { verdict: "success" | "neutral" | "failure"; reasons: s
  *     whose "closed" gap the next tick sees open WITHOUT a reopen since (the action read stale state);
  *     two actions on one goal; a duplicate (goal_hash, dispatch_id) link on a gap; an eligible goal the
  *     tick decided on but did not act on; or a goal that per the observed state was already eligible
- *     at the previous tick (every linked gap closed before it, after the goal's last attempt) and got
- *     no action.
+ *     at the previous tick (every linked gap closed before it, one of them for a repair reason after the
+ *     goal's last attempt: closedForRepairSince, the decider's rule) and got no action.
  *   success: at least one action and no failure. neutral: nothing done and nothing missed.
  * Dry-run would-actions are graded identically, so the posterior is earned before going live.
  */
@@ -832,7 +841,8 @@ export function gradeTick(prev: TickLedger | null, observed: { records: GoalReac
     const closes = linked.map((g) => Date.parse(String(g.closed_at ?? ""))).filter(Number.isFinite);
     if (closes.length !== linked.length) continue;
     const lastAttempt = Math.max(0, ...r.dispatches.filter((e) => e.startedAt < prev.at).map((e) => e.startedAt));
-    if (Math.max(...closes) < prev.at && closes.some((c) => c > lastAttempt)) reasons.push(`missed_eligible:${r.goal_hash}:all linked gaps closed before the tick`);
+    // the decider's own closure rule (closedForRepairSince): an expiry or give-up close is correctly not acted on
+    if (Math.max(...closes) < prev.at && closedForRepairSince(linked, lastAttempt)) reasons.push(`missed_eligible:${r.goal_hash}:all linked gaps closed before the tick`);
   }
   if (reasons.length > 0) return { verdict: "failure", reasons };
   return prev.actions.length > 0 ? { verdict: "success", reasons: [`${prev.actions.length} correct action(s)`] } : { verdict: "neutral", reasons: ["nothing eligible, nothing done"] };

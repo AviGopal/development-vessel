@@ -50,7 +50,7 @@ export async function escalateComposeRefusal(escalate: () => Promise<string>): P
 }
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
-import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
+import { seedDeliveryLesson, seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
@@ -8169,7 +8169,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   const successCriterion = criterionLines.length > 0 ? `\n\nSUCCESS CRITERION (the gap's machine-checkable falsifier; the landing is judged by exactly this):\n${criterionLines.join("\n")}\n` : "";
   const drafterLessons: DrafterLessonCapture = { source: "none", query: "", rows: [], tail: [] };
   const drafterFileLessons: string[] = [];
-  let composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined), drafterLessons)) + (await fileLessonsBlock(pointer.spec, drafterFileLessons)) + successCriterion;
+  let composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined), drafterLessons)) + (await fileLessonsBlock(pointer.spec, drafterFileLessons)) + successCriterion + seedDeliveryLesson([String(((pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>).edit_site ?? ""), ...targetFiles]);
   let spec = pointer.spec;
   // Ground the spec against the REAL target file UNCONDITIONALLY (law 8 — information
   // at use time). The specs most likely to carry SCHEMATIC anchors are exactly the ones

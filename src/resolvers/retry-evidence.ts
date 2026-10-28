@@ -54,6 +54,10 @@ export interface OwnCheckFailure {
   diff?: string;
 }
 
+/** Closed provenance for the drafter which produced an attempt. Nulls distinguish an explicit unknown from
+ *  legacy records where the whole field is absent. The compose core is the only production source. */
+export type DrafterAttribution = { variant: string | null; version: string | null; fell_back: string | null };
+
 export interface AttemptRecord {
   stage: FailStage | null;
   edited_spans: EditedSpan[];
@@ -89,7 +93,7 @@ export interface AttemptRecord {
    * activities 1.1): the variant asked for, the version its context declared, and why the floor drafted instead
    * (null: the variant itself drafted). Absent: the compose stopped before the drafter ran.
    */
-  drafter?: { variant: string | null; version: string | null; fell_back: string | null };
+  drafter?: DrafterAttribution;
 }
 
 /**

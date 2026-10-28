@@ -1374,7 +1374,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   const attemptId = sweepGitOut(cloneDir, ["log", "-1", "--format=%(trailers:key=Attempt-Id,valueonly)", sha]) ?? "";
   if (!attemptId) return "not_applicable";
   const { readRecords, appendRecord } = await import("../resolvers/attempt-ledger.js");
-  const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown; decision_id?: unknown } | null;
+  const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown; decision_id?: unknown; drafter?: unknown } | null;
   if (!intent || intent.directed !== false) return "not_applicable";
   const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
   // Through the auto-revert seam (systemctl show in production), so a fixture can say when the unit restarted.
@@ -1393,7 +1393,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   if (!alreadySettled) {
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
-    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
+    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, ...(intent.drafter ? { drafter: intent.drafter } : {}), verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
     await gradeLandingExecution(meta, sha, false, `falsified_after_restart gap ${String(g.id)}`, attemptId);
   }
   console.warn(`[gap-sweep] FALSIFIED autonomous landing gap=${String(g.id)} sha=${sha.slice(0, 12)} vessel=${vessel} attempt=${attemptId} — its predicate still reports the defect after ${vessel} restarted onto it; recorded regressed_by, held from re-pick until reverted`);
@@ -1413,14 +1413,14 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   if (String(rb.by ?? "").startsWith("gap-sweep")) return false;
   const attemptId = String(rb.attempt_id);
   const { readRecords, appendRecord } = await import("../resolvers/attempt-ledger.js");
-  const regIntent = (await readRecords("attemptIntent", { key: attemptId }))[0]?.record as { decision_id?: unknown } | undefined;
+  const regIntent = (await readRecords("attemptIntent", { key: attemptId }))[0]?.record as { decision_id?: unknown; drafter?: unknown } | undefined;
   if (!regIntent) return false;
   const at = new Date().toISOString();
   const sha = String(rb.sha ?? "");
   if ((await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length === 0) {
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
-    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
+    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, ...(regIntent.drafter ? { drafter: regIntent.drafter } : {}), verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
     await gradeLandingExecution(meta, sha, false, `operator_revert gap ${String(g.id)}`, attemptId);
   }
   const lessons = Array.isArray(meta.failure_lessons) ? [...(meta.failure_lessons as unknown[])] : [];

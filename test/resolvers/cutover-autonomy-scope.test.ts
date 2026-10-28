@@ -278,6 +278,24 @@ async function registerCompose(gap: string, files: string[], directed: boolean, 
 }
 const intentOf = (attemptId: string) => readRecords("attemptIntent", { key: attemptId })[0]?.record as Record<string, unknown> | undefined;
 
+describe("attempt intent drafter provenance", () => {
+  it("durably records the closed drafter identity, keeps the first value on retry, and leaves legacy attempts neutral", async () => {
+    const attempt_id = "att-drafter-attribution-fixture";
+    const drafter = { variant: "drafter-v2-contract", version: "contract-2", fell_back: null };
+    const base = { route: "feature_compose", repo: "/workspace/git/vessels/development-vessel", touched_files: ["src/resolvers/target.ts"], gap_id: "gap-drafter-attribution", attempt_id };
+    const first = await registerAttempt({ ...base, drafter });
+    expect(first).toMatchObject({ attempt_id, registered: true });
+    expect(intentOf(attempt_id)?.["drafter"]).toEqual(drafter);
+
+    const retry = await registerAttempt({ ...base, drafter: { variant: "floor", version: null, fell_back: "timeout" } });
+    expect(retry).toMatchObject({ attempt_id, registered: false });
+    expect(intentOf(attempt_id)?.["drafter"]).toEqual(drafter);
+
+    const legacy = await registerAttempt({ ...base, attempt_id: `${attempt_id}-legacy` });
+    expect(intentOf(legacy.attempt_id!)?.["drafter"]).toBeUndefined();
+  });
+});
+
 const bodyOf = (r: { body?: unknown }) => (r.body ?? {}) as Record<string, unknown>;
 const headSubject = (s: Fixture) => git(s.hostRepoRoot, "log", "-1", "--format=%s");
 

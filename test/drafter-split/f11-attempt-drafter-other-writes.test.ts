@@ -22,6 +22,8 @@ const DRAFTER = "../../src/drafter/index.ts";
 const realDrafter = { ...(await import(DRAFTER)) };
 afterAll(() => { mock.module(DRAFTER, () => realDrafter); H.restore(); });
 const CORE = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts"), "utf8");
+const ATTEMPT_REGISTER = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "attempt-register.ts"), "utf8");
+const LANDING_VERDICT = readFileSync(join(import.meta.dir, "..", "..", "src", "judge", "gap-landing-verdict.ts"), "utf8");
 
 const FX = CORPUS.find((f) => f.name === "directed / off-target edit")!;
 
@@ -51,5 +53,17 @@ describe("F11: the no-effect attempt write carries the drafter record", () => {
     expect(at).toBeGreaterThan(0);
     const call = CORE.slice(at, CORE.indexOf("\n", at));
     expect(call).toContain("{ stage: \"apply\", edited_spans: [], ...refusalEvidence, ...attemptDrafterField(composeDrafterStore.getStore()?.record) }");
+  });
+});
+
+describe("F11: successful landing settlement keeps the drafter from the closed compose record", () => {
+  it("the feature-compose registration sources the record internally and #1 outcomes/settlements plus #2 regressions preserve it", () => {
+    const at = CORE.indexOf("registerAttempt({");
+    expect(at).toBeGreaterThan(0);
+    const registration = CORE.slice(at, CORE.indexOf(".catch(", at));
+    expect(registration).toContain("attemptDrafterField(composeDrafterStore.getStore()?.record).drafter");
+    expect(ATTEMPT_REGISTER).toContain("...(input.drafter ? { drafter: { variant: input.drafter.variant, version: input.drafter.version, fell_back: input.drafter.fell_back } } : {})");
+    expect(ATTEMPT_REGISTER.match(/\.\.\.\(intent\.drafter \? \{ drafter: intent\.drafter \} : \{\}\)/g)?.length).toBe(2);
+    expect(LANDING_VERDICT.match(/\.\.\.\((?:intent|regIntent)\.drafter \? \{ drafter: (?:intent|regIntent)\.drafter \} : \{\}\)/g)?.length).toBe(2);
   });
 });

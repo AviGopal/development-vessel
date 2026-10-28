@@ -7,6 +7,7 @@ import { invariantSelect, takeSnapshot, type CheckResult } from "./attempt-check
 import { resolveUnaccountedLandingScan } from "./unaccounted-landing-scan.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import type { ResolverResult } from "./types.js";
+import type { DrafterAttribution } from "./retry-evidence.js";
 
 export const CHECK_DEFINITION_FILES = ["src/resolvers/attempt-checks.ts", "src/resolvers/attempt-register.ts", "src/resolvers/systemd-unit-health-observer.ts", "src/resolvers/gate-self-probe.ts", "src/fixtures/attempt-ledger-canary.json"];
 
@@ -132,7 +133,7 @@ export function verifyDirectedIntentStamp(key: string | undefined, intent: Recor
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
-export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; decision_id?: string | null; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
+export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; decision_id?: string | null; prediction?: Partial<Prediction>; drafter?: DrafterAttribution }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
   try {
     const attempt_id = input.attempt_id ?? `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -180,6 +181,9 @@ export async function registerAttempt(input: { route: string; repo: string; touc
         expect_pass: input.prediction?.expect_pass ?? [],
         expect_change: input.prediction?.expect_change ?? [],
       },
+      // Only the closed feature-compose caller supplies this field. The public register action deliberately does
+      // not forward a pointer-supplied drafter, so callers cannot self-assign posterior attribution.
+      ...(input.drafter ? { drafter: { variant: input.drafter.variant, version: input.drafter.version, fell_back: input.drafter.fell_back } } : {}),
       pre_snapshot_id,
       registered_at: new Date().toISOString(),
     };
@@ -384,6 +388,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
 
           const outcomeRecord = {
             attempt_id,
+              ...(intent.drafter ? { drafter: intent.drafter } : {}),
             authoring_execution_id: intent.authoring_execution_id,
             shas: landedShas,
             post_snapshot_id,
@@ -424,6 +429,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
             const settlementRecord = {
               attempt_id,
               settlement_seq: 1,
+              ...(intent.drafter ? { drafter: intent.drafter } : {}),
               node: (intent as { node?: string | null }).node ?? null,
               authoring_execution_id: intent.authoring_execution_id,
               shas: landedShas,

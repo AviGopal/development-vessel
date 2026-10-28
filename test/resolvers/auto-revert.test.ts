@@ -542,7 +542,8 @@ describe("auto-revert: a regressed lane landing is reverted once, by the lane, a
     const att = "att-mm0aaaa-landing";
     const L = await land(1, att);
     await publish();
-    intent(att, { directed: false });
+    const drafter = { variant: "drafter-v2-contract", version: "contract-2", fell_back: null };
+    intent(att, { directed: false, drafter });
     const committedAt = Number(git(clone(), "log", "-1", "--format=%ct", L));
     const g = { id: GAP, category: "other", source: "substrate_detected", summary: "fixture", status: "open", classification_metadata: {} };
     useDeps(stubCutover(PUSHED), { unitStartedAt: () => committedAt - 10 });
@@ -553,7 +554,7 @@ describe("auto-revert: a regressed lane landing is reverted once, by the lane, a
     expect(await gtf.__recordFalsifiedAutonomousLandingForTests(g, {}, L)).toBe("recorded");
     const rows = ledger.readRecords("attemptSettlement", { key: `${att}#2` });
     expect(rows.length).toBe(1);
-    expect(rows[0]!.record).toMatchObject({ verdict: "regressed", source: "falsified_after_restart", shas: [L], gap_id: GAP });
+    expect(rows[0]!.record).toMatchObject({ verdict: "regressed", source: "falsified_after_restart", shas: [L], gap_id: GAP, drafter });
     expect(gapWrites.at(-1)?.["classification_metadata"]?.["regressed_by"]).toMatchObject({ sha: L, attempt_id: att, vessel: VESSEL, revert_sha: null, by: "gap-sweep:falsified_after_restart" });
   });
 });

@@ -67,10 +67,8 @@ describe("the learning credit tables are read from the holder", () => {
     expect(r.false_closes).toBe(0);
   });
 
-  it("[MUST-FAIL] detector closure credit has a reader, and it reads the holder's ledger", async () => {
-    expect(typeof verdict["readDetectorClosureCredit"]).toBe("function");
-    await credit.refreshHeldCalibration();
-    expect(verdict.readDetectorClosureCredit()["D"]?.closures).toBe(7);
+  it("detector closure credit is not a name-keyed ledger any more: the gap writer credits the producing execution (GAP OUTCOME CREDIT)", () => {
+    expect(verdict["readDetectorClosureCredit"]).toBeUndefined();
   });
 
   it("[CONTROL] the holder unreachable: each reader uses its local file, logged, never a silent empty table", async () => {
@@ -78,7 +76,6 @@ describe("the learning credit tables are read from the holder", () => {
     await credit.refreshHeldCalibration();
     expect(credit.readClassPosteriors()["X"]).toEqual({ alpha: 1, beta: 9 });
     expect(verdict.closeOracleReliability("measured").closes).toBe(1);
-    expect(verdict.readDetectorClosureCredit()["D"]?.closures).toBe(1);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("[learning-credit] no held class_posteriors"))).toBe(true);
   });
 
@@ -135,7 +132,6 @@ describe("the held read is PURE, and the holder reads its own files (I4 repair, 
     const journal = join(ROOT, "learning-credit-journal.json");
     await credit.refreshHeldCalibration();
     expect(credit.readClassPosteriors()["X"]).toEqual({ alpha: 1, beta: 9 });
-    expect(verdict.readDetectorClosureCredit()["D"]?.closures).toBe(1);
     expect(existsSync(journal)).toBe(false);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("[learning-credit] no held"))).toBe(false);
   });
@@ -152,7 +148,6 @@ describe("held OR local, never summed, and the source is visible (qa conditions 
     await credit.refreshHeldCalibration();
     expect(credit.readClassPosteriors()["X"]).toEqual({ alpha: 9, beta: 1 });
     expect(verdict.closeOracleReliability("measured").closes).toBe(20);
-    expect(verdict.readDetectorClosureCredit()["D"]?.closures).toBe(7);
   });
   it("[MUST-FAIL] SOURCE VISIBLE: a read from the held table says 'held'; with the holder down it says 'local_fallback'", async () => {
     await credit.refreshHeldCalibration();

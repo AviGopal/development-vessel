@@ -3659,6 +3659,9 @@ async function resolveSubstrateGapWriteInner(
     console.log("[substrate-gap-mirror] pool mirror failed (non-fatal):", err);
   }
 
+  // GAP OUTCOME CREDIT (see below): a close or reject of a row a producer filed credits or charges that producer.
+  if (audit.from === "open" && (gap.status === "closed" || gap.status === "rejected")) void creditGapOutcome(gap);
+
   const publishRefused = isScratchGapStoreRoot(workspaceRoot()) && !gapEventPublishFromScratchAllowed;
   if (publishRefused && !gapEventPublishRefusalLogged) {
     gapEventPublishRefusalLogged = true;
@@ -3705,6 +3708,104 @@ async function resolveSubstrateGapWriteInner(
       ...(dedupeReason ? { reason: dedupeReason } : {}),
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP OUTCOME CREDIT (findings agf_hrgaf1yd89kr / agf_zuaa6xsh4b28, "detectors scored by consumption").
+//
+// A detector tick's posterior moved on its own run status: every traced tick graded reached because it ran, so its
+// posterior said nothing about whether what it filed was worth anything. The consumer of what a detector files is
+// whoever settles the gap: a landing, a falsifier, the lifecycle scan's expiry, a rejection. So when a row that names
+// its producer (producer_execution_id, stamped by this writer from the tick's producer context) moves from open to
+// closed or rejected, this posts ONE consumer trace to activity-api through the existing trace insert, with the
+// producer as its only composition_chain ancestor and its task's consumed_provenance naming the gap. activity-api's
+// chain credit (posterior-update.ts propagateCreditAlongChain, declared data flow) then gives the producer the
+// consumer's outcome: alpha on a close that verified the gap was real and acted on, beta on a reject, an expiry the
+// lifecycle scan could not re-detect, or a rescan that could not reproduce it. Any other close (condition gone, already
+// resolved, churned, unlandable, an unknown reason) credits nothing either way: it says nothing about the detector.
+// The consumer trace's own task is deterministic, so its own arm is not moved (activity-api's all_deterministic skip);
+// it is the record of the outcome. No producer on the row: nothing is posted. A scratch store posts nothing.
+// This replaces the name-keyed detector_credit closure ledger (gap-landing-verdict.ts), which only a landed close wrote
+// and nothing ever read.
+// ─────────────────────────────────────────────────────────────────────────────
+export const GAP_OUTCOME_CREDIT_ACTIVITY = "development-vessel:gap-outcome-credit";
+const GAP_OUTCOME_ALPHA_CLOSES: ReadonlySet<string> = new Set([
+  "landed_verified", "doc_fix_landed", "fixed_elsewhere", "producer_now_exists", "predicate_verified_by_detector",
+  "closed_via_parent", "closed_via_child",
+]);
+const GAP_OUTCOME_BETA_CLOSES: ReadonlySet<string> = new Set(["expired_not_redetected", "violation_not_reproduced_on_rescan"]);
+
+/** What a settled gap says about its producer: "alpha", "beta", or null (no credit either way). */
+export function gapOutcomeVerdict(gap: { status?: unknown; classification_metadata?: unknown }): { credit: "alpha" | "beta" | null; reason: string } {
+  const m = (gap.classification_metadata && typeof gap.classification_metadata === "object" ? gap.classification_metadata : {}) as Record<string, unknown>;
+  if (gap.status === "rejected") return { credit: "beta", reason: `rejected:${String(m["rejected_reason"] ?? "unstated")}` };
+  if (gap.status !== "closed") return { credit: null, reason: `not settled (${String(gap.status)})` };
+  const r = typeof m["closed_reason"] === "string" ? (m["closed_reason"] as string) : "";
+  if (GAP_OUTCOME_ALPHA_CLOSES.has(r)) return { credit: "alpha", reason: `closed:${r}` };
+  if (GAP_OUTCOME_BETA_CLOSES.has(r)) return { credit: "beta", reason: `closed:${r}` };
+  return { credit: null, reason: `closed:${r || "unstated"} (says nothing about the producer)` };
+}
+
+/** The consumer trace for a settled gap a producer filed, or null when it names no producer or credits nothing. */
+export function gapOutcomeTrace(gap: SubstrateGap, nowIso: string): Record<string, unknown> | null {
+  const m = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+  const producer = producerFromPointer(m);
+  if (!producer) return null;
+  const v = gapOutcomeVerdict(gap);
+  if (v.credit === null) return null;
+  const ok = v.credit === "alpha";
+  const settledAt = String(gap.closed_at ?? gap.updated_at ?? nowIso);
+  return {
+    execution_id: `gap-outcome-${String(gap.id).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80)}-${Date.parse(settledAt) || Date.parse(nowIso)}`,
+    template_id: GAP_OUTCOME_CREDIT_ACTIVITY,
+    activity_id: GAP_OUTCOME_CREDIT_ACTIVITY,
+    activity_variant_id: GAP_OUTCOME_CREDIT_ACTIVITY,
+    status: ok ? "completed" : "failed",
+    success: ok,
+    ...(ok ? {} : { failure_mode: { type: "verifier_negative", reason: `the gap its producer filed settled ${v.reason}` } }),
+    started_at: nowIso,
+    duration_ms: 0,
+    composition_chain: [producer.execution_id],
+    tasks: [{
+      id: "settle-gap",
+      resolver_id: "substrateGap_write",
+      resolver_tier: "deterministic",
+      success: ok,
+      input_impulse_ids: [String(gap.id)],
+      output_impulse_ids: [],
+      consumed_provenance: [{ impulse_id: String(gap.id), producer_execution_id: producer.execution_id, origin: "ancestor" }],
+    }],
+    tags: [ok ? "reached:true" : "reached:false", `gap_outcome:${v.credit}`],
+    metadata: { gap_id: gap.id, gap_outcome: v.reason, producer_execution_id: producer.execution_id, producer_template_id: producer.template_id },
+  };
+}
+
+let gapOutcomeSink: ((trace: Record<string, unknown>) => Promise<void> | void) | null = null;
+/** Tests only: capture the consumer trace instead of posting it (a scratch store posts nothing otherwise). */
+export function __setGapOutcomeSinkForTests(fn: ((trace: Record<string, unknown>) => Promise<void> | void) | null): void { gapOutcomeSink = fn; }
+
+/** Post a settled gap's outcome to activity-api as a consumer of its producer. Best effort: never throws, never blocks. */
+async function creditGapOutcome(gap: SubstrateGap): Promise<void> {
+  try {
+    const trace = gapOutcomeTrace(gap, new Date().toISOString());
+    if (!trace) return;
+    if (gapOutcomeSink) { await gapOutcomeSink(trace); return; }
+    if (isScratchGapStoreRoot(workspaceRoot())) return;
+    const key = process.env["SUBSTRATE_API_KEY"] || process.env["METABOB_API_KEY"] || process.env["API_KEY"] || "";
+    if (!key) { console.warn(`[gap-outcome-credit] ${gap.id}: no key; outcome not posted`); return; }
+    const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
+    const r = await fetch(`${activityApiUrl}/v2/activities/execution-traces`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+      body: JSON.stringify(trace),
+      signal: AbortSignal.timeout(5_000),
+    });
+    try { await r.body?.cancel(); } catch { /* swallow */ }
+    const md = trace["metadata"] as Record<string, unknown>;
+    console.log(`[gap-outcome-credit] ${gap.id}: ${String(md["gap_outcome"])} -> producer ${String(md["producer_execution_id"])} (${String(md["producer_template_id"])}) http=${r.status}`);
+  } catch (err) {
+    console.warn(`[gap-outcome-credit] ${gap.id}: outcome not posted (non-fatal): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

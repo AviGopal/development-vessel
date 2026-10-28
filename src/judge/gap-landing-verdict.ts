@@ -252,20 +252,8 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     if (landedCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
     if (credited) updateClassPosterior(gapClassOf(gap), true, { gap_id: id, event_id: land.commit_sha ? `sha:${land.commit_sha}` : null, ...(land.vessel ? { repo: land.vessel } : {}) });
-    // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing), once per (gap, landing).
-    // Best-effort — never throw; wrapped in its own try/catch.
-    if (credited) try {
-      const detectorName: unknown = (gap as Record<string, unknown>).classification_metadata &&
-        typeof (gap as Record<string, unknown>).classification_metadata === "object"
-        ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).detector
-        : undefined;
-      if (typeof detectorName === "string" && detectorName.length > 0) {
-        // I4a: written through to the holder, referenced by the landing sha (the same once-per-(gap, landing) credit).
-        void creditLearning({ table: "detector_credit", key: detectorName, outcome: "closure", gap_id: id, event_id: land.commit_sha ? `sha:${land.commit_sha}` : null, ...(land.vessel ? { repo: land.vessel } : {}) });
-      }
-    } catch {
-      // best-effort ledger write — never propagate
-    }
+    // The filing detector is credited by the close itself: the gap writer posts the gap's outcome as a consumer of the
+    // execution that filed it (substrate-gap.ts GAP OUTCOME CREDIT), on every close and reject path, not only a landing.
     return { closed: true };
   } catch (e) {
     return { closed: false, error: (e as Error).message };
@@ -2430,14 +2418,6 @@ export function recordOperatorEngagement(evidenceClass: string, solicitationId: 
   // I4a: written through to the holder, referenced by the answered solicitation (one count per solicitation).
   const gapId = solicitationId.startsWith("reland-needs-human-") ? solicitationId.slice("reland-needs-human-".length) : "";
   void creditLearning({ table: "close_oracle", key: evidenceClass || "unknown", outcome: "operator_engaged", gap_id: gapId, event_id: gapId ? `engagement:${solicitationId}` : null });
-}
-/** I4: detector closure credit, the first reader of the ledger closeLandedGap writes: the holder's table first, else
- *  the local ledger (logged). {detector: {closures, last_closed_at}}. */
-export function readDetectorClosureCredit(): Record<string, { closures: number; last_closed_at: string }> {
-  const held = heldLearningTable("detector_credit");
-  if (held) return held as Record<string, { closures: number; last_closed_at: string }>;
-  try { const p = process.env.DETECTOR_CLOSURE_LEDGER_PATH ?? "/workspace/detector-closure-credit.json"; return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {}; }
-  catch { return {}; }
 }
 /** Beta-mean reliability of the close-oracle at an evidence class: P(a close of this class holds). */
 export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number; operator_engaged: number } {

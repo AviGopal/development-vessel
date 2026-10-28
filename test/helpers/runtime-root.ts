@@ -76,26 +76,28 @@ export interface IsolatedRuntimeRoot {
  * Give this test file its own temp runtime root (see the header). Options:
  *   superRepo: also isolate SUPER_REPO_ROOT (a path under the temp root that does not exist).
  */
-export async function isolateRuntimeRoot(prefix: string, opts: { superRepo?: boolean; who?: string } = {}): Promise<IsolatedRuntimeRoot> {
+export async function isolateRuntimeRoot(prefix: string, opts: { superRepo?: boolean; who?: string; workspaceRoot?: string } = {}): Promise<IsolatedRuntimeRoot> {
   const root = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const runtime = join(root, "runtime");
+  const workspaceRoot = opts.workspaceRoot ?? root;
+  if (!isUnderTmp(workspaceRoot)) throw new Error(`isolateRuntimeRoot: WORKSPACE_ROOT=${workspaceRoot} is not under ${tmpdir()}`);
   const superRepo = opts.superRepo ? join(root, "no-super-repo") : undefined;
   process.env["MITOSIS_RUNTIME_DIR"] = runtime;
   process.env["MITOSIS_REPO_ROOT"] = runtime;
   // WORKSPACE_ROOT is captured by config.ts and substrate-gap.ts at import time. Keep their
   // gap-store and other workspace writes inside this fixture before shape-vocabulary imports config.
-  process.env["WORKSPACE_ROOT"] = root;
+  process.env["WORKSPACE_ROOT"] = workspaceRoot;
   if (superRepo) process.env["MITOSIS_SUPER_REPO_DIR"] = superRepo;
   const expected: RootBindings = { RUNTIME_ROOT: runtime, REPO_ROOT: runtime, ...(superRepo ? { SUPER_REPO_ROOT: superRepo } : {}) };
 
   const configPath = join(import.meta.dir, "..", "..", "src", "config.ts");
   const config = (await import(configPath)) as Record<string, unknown>;
-  if (config["WORKSPACE_ROOT"] !== root) {
+  if (config["WORKSPACE_ROOT"] !== workspaceRoot) {
     const real = { ...config };
-    mock.module(configPath, () => ({ ...real, WORKSPACE_ROOT: root }));
+    mock.module(configPath, () => ({ ...real, WORKSPACE_ROOT: workspaceRoot }));
   }
   const effectiveConfig = (await import(configPath)) as Record<string, unknown>;
-  if (effectiveConfig["WORKSPACE_ROOT"] !== root) throw new Error(`isolateRuntimeRoot: WORKSPACE_ROOT=${String(effectiveConfig["WORKSPACE_ROOT"])} (expected ${root})`);
+  if (effectiveConfig["WORKSPACE_ROOT"] !== workspaceRoot) throw new Error(`isolateRuntimeRoot: WORKSPACE_ROOT=${String(effectiveConfig["WORKSPACE_ROOT"])} (expected ${workspaceRoot})`);
 
   const sv = (await import(SHAPE_VOCABULARY)) as Record<string, unknown>;
   const frozen = (k: keyof RootBindings) => sv[k] !== expected[k] && expected[k] !== undefined;

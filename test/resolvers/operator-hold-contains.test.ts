@@ -57,7 +57,7 @@ isolateLearnedStateInProcess(ROOT); // learned state (posteriors, calibration, c
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 // This file drives feature_compose: give it its own temp runtime root whatever loaded the module first
 // (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.
-await isolateRuntimeRoot("operator-hold-contains", { who: "operator-hold-contains.test.ts" });
+await isolateRuntimeRoot("operator-hold-contains", { workspaceRoot: ROOT, who: "operator-hold-contains.test.ts" });
 const sg = await import(`../../src/resolvers/substrate-gap.js?${"operator-hold-isolated"}`);
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;
 const { resolveSubstrateGap, resolveSubstrateGapWrite, gapStoreRootForTest } = sg;

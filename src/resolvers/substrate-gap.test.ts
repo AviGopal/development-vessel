@@ -45,7 +45,15 @@ function readStore(): Array<Record<string, unknown>> {
   return JSON.parse(readFileSync(gapsPath, "utf-8"));
 }
 
+// THIS SUITE TESTS THE LOCAL STORE. A node (or the gate's scrubbed env) with GAP_STORE_ENDPOINT set forwards every gap
+// read and write to the holder (gapStoreIsLocal, read at call time), so the writes here never reached gapsPath and the
+// assertions read an empty file. Cleared for each case and restored after the suite, as
+// test/judge/learning-credit-held-read.test.ts saves and restores the same key.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 beforeEach(() => {
+  delete process.env["GAP_STORE_ENDPOINT"];
   mkdirSync(join(mod.gapStoreRootForTest(), "gaps"), { recursive: true });
   writeFileSync(gapsPath, "[]");
 });

@@ -26,7 +26,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease
 import { resolveTestSuite, ONLY_TESTS_MAX_NAMES } from "./test-suite.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
-import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
+import { resolveMaintenanceLease, resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 import { armingOnlyLanding, OUT_OF_SUITE_CHECK_RE } from "./check-supply-admission.js";
@@ -3095,7 +3095,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // that way (cited_checks=["bun run typecheck"], cited_traces=0). So re-run the gap's own
   // test_suite check (evidence_resolve.input: test_file + only_tests) here, where the clone's
   // working tree holds exactly the staged content, and require it to PASS — every requested test
-  // passing, none failing, NONE SKIPPED. Not fail-open, and not behind CUTOVER_PRECHECK_SUITE:
+  // passing, none failing, NONE SKIPPED. Not fail-open, and not paused by a precutover_suite hold:
   //   • measured and not passing → refuse (the reason is recorded; the pending lock is discarded
   //     by the exit clear, so no later tick re-evaluates this tree on typecheck alone);
   //   • not measurable (no summary, no shell producer, a different tree measured) → refuse too —
@@ -3111,6 +3111,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //     is unknown, and a landing gate fails closed. The pending lock is preserved
   //     (preserve_pending) so the next tick retries this same tree once the store answers.
   let landedUnverifiedReason: string | null = null;
+  // Whether the gap's own class-2 check RAN and PASSED on this staged tree (read by the pre-cutover gate below).
+  let ownCheckPassed = false;
   // SEMANTIC DISSENT: feature_compose landed this draft over an advisory semantic-gate addresses:false
   // (its gap's armed own check went red->green; see semanticGateDisposition). The own check passing is
   // not enough on its own here: the landing is landed_unverified until the post-land by-effect check
@@ -3215,6 +3217,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       }
       operations.push({ op: "own_check", status: "ok", detail: `${citation}: ${verdict.reason}` });
       countOwnCheck("own_check_passed", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${citation}`);
+      ownCheckPassed = true;
     }
     // LANDING ADMISSIBILITY (staged-mitosis-gate.ts landingAdmissible: ONE rule for every route that lands, read HERE,
     // at cutover time, so a hold set after staging still refuses). Both feature_compose and apply_proposal_as_patch ->
@@ -3299,10 +3302,31 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //   • REVERSIBLE worst case: a wrongful refusal defers ONE cutover (the gap stays open and is
   //     re-composed later); it does not halt the system. There is no path here that permanently
   //     stops autonomy.
-  //   • KILL SWITCH: CUTOVER_PRECHECK_SUITE=0 disables it entirely (law 1 — a shaped/env override).
+  //   • PAUSE: only a SHAPED hold pauses it, a held maintenanceLease "precutover_suite" read here at
+  //     dispatch through the maintenance-lease resolver (law 1: no env kill switch; the old
+  //     CUTOVER_PRECHECK_SUITE=0 is no longer read). A paused suite did not run, so it is not a
+  //     measurement: the landing then rests on the gap's own check having passed above, and with no
+  //     such check it is refused (no_measurement_available). An unreadable lease runs the suite.
   // Closes cutover-suite-observes-but-does-not-gate. End-to-end gating is verified on the next
   // real cutover; the decision primitive and the fail-open paths are unit-covered now.
-  if (process.env["CUTOVER_PRECHECK_SUITE"] !== "0") {
+  let suiteHold: { held: boolean; holder: string } = { held: false, holder: "" };
+  try {
+    const lr = (await resolveMaintenanceLease({ type: "maintenanceLease", name: "precutover_suite" })) as { body?: { held?: unknown; holder?: unknown } };
+    if (lr?.body?.held === true) suiteHold = { held: true, holder: String(lr.body.holder ?? "unknown") };
+  } catch { /* an unreadable hold pauses nothing: the suite runs */ }
+  if (suiteHold.held) {
+    const pausedWhy = `maintenanceLease "precutover_suite" held by ${suiteHold.holder}`;
+    console.log(`[mitosis-cutover] pre-cutover suite PAUSED: ${pausedWhy}; ${revertOf ? "a revert proceeds (it restores a landed tree)" : ownCheckPassed ? "the landing rests on the gap's own check, which passed" : "no own check passed, so nothing measured this landing"}`);
+    operations.push({ op: "precutover_suite", status: "held", detail: `paused: ${pausedWhy}` });
+    if (!revertOf && !ownCheckPassed) {
+      const precutoverGapId = await cutoverGapIdOf(pointer, mitosis_version_id);
+      await unstage("no_measurement_available");
+      return softRefuse(
+        `no_measurement_available: the pre-cutover suite is paused (${pausedWhy}) and the gap carries no own check that passed on this staged tree, so nothing measured this landing; a paused suite is not a measurement. Refusing; the gap stays open and is recomposed.`,
+        { kind: "no_measurement_available", refuse_class: "no_measurement_available", precutover_suite: "held", vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, operations },
+      );
+    }
+  } else {
     // UNDIRECTED LANDINGS CANNOT FAIL OPEN ON "DID NOT RUN" (2026-10-25, qa ruling agf_ytya7u5gdmqf,
     // confirmed by the coordinator after 8e54fb68: an own-check PASS can itself be gamed, so it is not
     // a defense against a suite that matches nothing — this gate must hold regardless of the own-check

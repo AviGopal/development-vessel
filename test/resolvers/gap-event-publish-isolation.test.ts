@@ -8,11 +8,19 @@
 // Two layers: (1) the resolver refuses to publish when its gap store root is a scratch (temp) root, unless a test
 // opts in; (2) the test files that write gaps stub the publish URL. The listener here stands in for the bus at the
 // same address the resolver uses (ACTIVITY_API_ENDPOINT, read at publish time).
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, beforeEach } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateLearnedStateInProcess, isolatedChildEnv } from "./isolated-gap-store-run.js";
+
+// THE LOCAL GAP STORE, WHATEVER THE RUNNER SET. This file reads and writes the local gap store; with GAP_STORE_ENDPOINT
+// set (the gate's scrubbed env points it at an unroutable address) every gap read and write is forwarded instead
+// (gapStoreIsLocal, read at call time), so the cases never reach their assertions when the file runs alone. Cleared for
+// each case and restored after the file, as src/resolvers/substrate-gap.test.ts does.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+beforeEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; });
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
 
 let publishes: string[] = [];
 const server = Bun.serve({

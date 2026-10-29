@@ -6,11 +6,19 @@
 // to the bus and the trace store. activity-api removes it next; this caller has to authenticate first: Authorization:
 // ApiKey <this vessel's key>, read at use time, and with no key nothing is published (counted), never a literal.
 // Harness: gap-event-publish-isolation.test.ts (a listener at the address the resolver uses, the scratch opt-in).
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, beforeEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+
+// THE LOCAL GAP STORE, WHATEVER THE RUNNER SET. This file reads and writes the local gap store; with GAP_STORE_ENDPOINT
+// set (the gate's scrubbed env points it at an unroutable address) every gap read and write is forwarded instead
+// (gapStoreIsLocal, read at call time), so the cases never reach their assertions when the file runs alone. Cleared for
+// each case and restored after the file, as src/resolvers/substrate-gap.test.ts does.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+beforeEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; });
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
 
 let seen: Array<Record<string, string>> = [];
 const server = Bun.serve({

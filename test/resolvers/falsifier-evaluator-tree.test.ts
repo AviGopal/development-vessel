@@ -17,6 +17,14 @@ import { join } from "node:path";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
 
+// THE LOCAL GAP STORE, WHATEVER THE RUNNER SET. This file reads and writes the local gap store; with GAP_STORE_ENDPOINT
+// set (the gate's scrubbed env points it at an unroutable address) every gap read and write is forwarded instead
+// (gapStoreIsLocal, read at call time), so the cases never reach their assertions when the file runs alone. Cleared for
+// each case and restored after the file, as src/resolvers/substrate-gap.test.ts does.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+beforeEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; });
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
+
 const gapEventPublishStub = stubGapEventPublish();
 
 const WS = mkdtempSync(join(tmpdir(), "c1-tree-ws-"));

@@ -12,12 +12,20 @@
 // wrong structure, and the failure looks like the caller's fault. This is deliberately a test
 // that CAN disagree — it builds the payload from the declared `required` list and calls the real
 // resolver, rather than asserting the declaration against itself.
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, beforeEach } from "bun:test";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+
+// THE LOCAL GAP STORE, WHATEVER THE RUNNER SET. This file reads and writes the local gap store; with GAP_STORE_ENDPOINT
+// set (the gate's scrubbed env points it at an unroutable address) every gap read and write is forwarded instead
+// (gapStoreIsLocal, read at call time), so the cases never reach their assertions when the file runs alone. Cleared for
+// each case and restored after the file, as src/resolvers/substrate-gap.test.ts does.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+beforeEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; });
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
 
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
 const gapEventPublishStub = stubGapEventPublish();

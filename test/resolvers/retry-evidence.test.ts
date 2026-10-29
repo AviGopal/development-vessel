@@ -6,7 +6,7 @@
 // no store metadata at all. Each behaviour below is pinned against injected inputs; the bun output fixtures are
 // real captures (bun 1.3.14, env -i, not a TTY) with the path rewritten.
 
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, afterAll, beforeEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,14 @@ import {
 import { composeLessonClass, composeAttemptEvidence, focusedSlice, priorAttemptFeedbackBlock, type VerifyResult } from "../../src/resolvers/feature-compose.js";
 import { specFromGap } from "../../src/resolvers/gap-to-feature.js";
 import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+
+// THE LOCAL GAP STORE, WHATEVER THE RUNNER SET. This file reads and writes the local gap store; with GAP_STORE_ENDPOINT
+// set (the gate's scrubbed env points it at an unroutable address) every gap read and write is forwarded instead
+// (gapStoreIsLocal, read at call time), so the cases never reach their assertions when the file runs alone. Cleared for
+// each case and restored after the file, as src/resolvers/substrate-gap.test.ts does.
+const savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+beforeEach(() => { delete process.env["GAP_STORE_ENDPOINT"]; });
+afterAll(() => { if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint; });
 // These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
 useUngatedRowsSource();
 

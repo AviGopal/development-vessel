@@ -176,6 +176,9 @@ export interface SelfFactRow {
   site_pattern?: string; pathspecs?: string[];
   /** typed_seam_sites: a repo whose origin/dev was last fetched or moved longer ago than this reads unobserved (default 6). */
   max_ref_age_hours?: number; super_repo_pathspecs?: string[]; exclude_repos?: string[]; seam_files?: string[];
+  /** typed_seam_sites: the line the must-fail control plants (one site of THIS row's pattern); absent = the
+   *  discovery-lookup line, which only the discovery row's pattern matches. */
+  canary_site?: string;
   /** pool_record_pin: the pool shape whose newest open record is pinned, and the operator-seeded value per node
    *  (thisNode()). A node's value is either a string array (compared as a set of endpoints with `body_field`), or an
    *  object of body fields, each compared on its own: an array as a set of exact strings, anything else by equality.
@@ -410,14 +413,18 @@ export function refAgeHours(repoDir: string, ref = "refs/remotes/origin/dev", no
   return newest > 0 ? (nowMs - newest) / 3_600_000 : null;
 }
 /** The must-fail control: a scratch repo holding exactly one planted site, plus a test file and a .js twin that
- *  both carry one too and must NOT count. Counted by the same countSites with the row's own pattern and pathspecs. */
-export function scratchSiteCount(sitePattern: string, pathspecs: readonly string[]): number | null {
+ *  both carry one too and must NOT count. Counted by the same countSites with the row's own pattern and pathspecs.
+ *  `canarySite` is the row's own planted line (canary_site); without it the discovery-lookup line is planted, which
+ *  a row counting another site class never matches, so such a row could never observe its own canary. */
+export function scratchSiteCount(sitePattern: string, pathspecs: readonly string[], canarySite?: string): number | null {
   const dir = mkdtempSync(join(tmpdir(), "self-fact-seam-canary-"));
   try {
     mkdirSync(join(dir, "src"), { recursive: true });
     // Built at runtime so this file's own source never matches the site pattern: the canary is a planted
     // copy for the counter to find, not a lookup this vessel makes (it once read as the 66th site).
-    const site = `await fetch(url, { body: JSON.stringify({ pointer: { type: "${"vessel" + "Capability"}", shape } }) });\n`;
+    const site = typeof canarySite === "string" && canarySite.trim().length > 0
+      ? (canarySite.endsWith("\n") ? canarySite : `${canarySite}\n`)
+      : `await fetch(url, { body: JSON.stringify({ pointer: { type: "${"vessel" + "Capability"}", shape } }) });\n`;
     writeFileSync(join(dir, "src", "planted.ts"), site);
     writeFileSync(join(dir, "src", "planted.test.ts"), site);
     writeFileSync(join(dir, "src", "planted.js"), site);
@@ -1760,7 +1767,7 @@ const FACTS: Record<string, FactFn> = {
     if (count > max) out.push({ fact, key: "over-ceiling", source: `git grep origin/dev (${refs.length} repos)`, copy: `ceiling ${max}`, detail: `${count} discovery lookup site(s) outside the typed ias seam, above the ceiling ${max}: a copy was added or restored. Sites: ${sites.join(" ").slice(0, 900)}`, canary: false });
     if (count > 0) out.push({ fact, key: "sites-remaining", source: `git grep origin/dev (${refs.length} repos)`, copy: "done at 0", detail: `${count} discovery lookup site(s) remain outside the typed ias seam`, canary: false, file: false });
     if (canary) {
-      const planted = scratchSiteCount(sitePattern, pathspecs);
+      const planted = scratchSiteCount(sitePattern, pathspecs, typeof row.canary_site === "string" ? row.canary_site : undefined);
       if (planted === 1) out.push({ fact, key: `${row.id}-canary`, source: "scratch repo with one planted site", copy: "count 1", detail: "must-fail control: the planted site raised the count by exactly one", canary: true });
     }
     return { fact, source_read: true, copies_read: refs.length, divergences: out, note: `${count} site(s), ceiling ${max}${count < max ? ` (the ceiling can be lowered to ${count})` : ""}; refs ${refs.join(" ")}` };

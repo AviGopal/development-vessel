@@ -179,10 +179,13 @@ function askHumanUnmeasurableLanding(row: Record<string, unknown>, sha: string):
 export async function stampPendingLand(a: {
   gapId: string; newSha: string; appliedAt: string; vessel_name: string; hostRepoRoot: string; gitCmd: string;
   landedUnverifiedReason: string | null;
+  /** A CHECK-ONLY landing (isCheckOnlyStaging) whose gap has no own check: its outcome is check_landing. */
+  checkLandingReason?: string | null;
   /** The landing's changed files (vessel-relative), when the caller knows them. */
   stagedFiles?: readonly string[];
 }): Promise<void> {
   const { gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason, stagedFiles } = a;
+  const checkLandingReason = a.checkLandingReason ?? null;
   try {
     const stampRead = await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 });
     const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
@@ -257,7 +260,12 @@ export async function stampPendingLand(a: {
               // forward, so an earlier landing's flag would otherwise downgrade a later verified close.
               ...(landedUnverifiedReason !== null
                 ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason, landed_unverified_sha: newSha }
-                : { landed_unverified: false, landed_unverified_reason: "", landed_unverified_sha: "" }),
+                : checkLandingReason !== null
+                  // A check landing verified nothing either: it keeps the unverified credit guard, and says what it was.
+                  ? { landed_unverified: true, landed_unverified_reason: `check_landing: ${checkLandingReason}`, landed_unverified_sha: newSha }
+                  : { landed_unverified: false, landed_unverified_reason: "", landed_unverified_sha: "" }),
+              // Bound to this landing like the triple above (the store carries omitted keys forward).
+              check_landing: checkLandingReason !== null && landedUnverifiedReason === null ? newSha : "",
               // Cleared on a measurable landing: the store carries omitted keys forward.
               pending_unmeasurable: unmeasurable ?? "",
               // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
@@ -304,7 +312,8 @@ export type OwnCheckOutcome =
   | "landing_family_hold"
   | "landing_green_on_parent"
   | "unanchored_src_landing"
-  | "parent_unmeasured";
+  | "parent_unmeasured"
+  | "check_landing";
 const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   own_check_passed: 0,
   own_check_failed: 0,
@@ -316,6 +325,7 @@ const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   landing_green_on_parent: 0,
   unanchored_src_landing: 0,
   parent_unmeasured: 0,
+  check_landing: 0,
 };
 export function getOwnCheckCounters(): Record<OwnCheckOutcome, number> {
   return { ...ownCheckCounts };
@@ -3111,6 +3121,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //     is unknown, and a landing gate fails closed. The pending lock is preserved
   //     (preserve_pending) so the next tick retries this same tree once the store answers.
   let landedUnverifiedReason: string | null = null;
+  // CHECK LANDING: a check-only staging (isCheckOnlyStaging: out-of-suite check files only) for a gap with no own check
+  // verifies nothing in src and claims nothing; its outcome is check_landing, not landed_unverified (accounting only).
+  let checkLandingReason: string | null = null;
   // Whether the gap's own class-2 check RAN and PASSED on this staged tree (read by the pre-cutover gate below).
   let ownCheckPassed = false;
   // SEMANTIC DISSENT: feature_compose landed this draft over an advisory semantic-gate addresses:false
@@ -3171,6 +3184,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         `own_check_under_repair: gap ${ownGapId}'s own class-2 check was demoted as broken after ${OWN_CHECK_UNMEASURABLE_ESCALATE_AT} unmeasurable runs and has not been re-derived; refusing to land a change for it on typecheck alone.`,
         { kind: "own_check_under_repair", refuse_class: "own_check_under_repair", vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
       );
+    } else if (load.status === "none" && landedUnverifiedReason === null && isCheckOnlyStaging(stagedFiles)) {
+      checkLandingReason = load.why;
+      operations.push({ op: "own_check", status: "skipped", detail: `no own check re-run: ${load.why}; a check-only staging (no src) — landing stamped check_landing` });
     } else if (load.status === "none") {
       // Keep a dissent stamp set above: both reasons hold.
       landedUnverifiedReason = landedUnverifiedReason !== null ? `${landedUnverifiedReason}; ${load.why}` : load.why;
@@ -4079,7 +4095,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     ...(revertOf && revertDone ? { revert_of: { ...revertOf, subject: revertDone.subject } } : {}),
     ...(landedUnverifiedReason !== null
       ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason }
-      : { own_check_verified: true }),
+      : checkLandingReason !== null
+        ? { check_landing: true, check_landing_reason: checkLandingReason }
+        : { own_check_verified: true }),
     // Where this landing went and under which push-scope regime, so a trace
     // answers "which owner's branch did this reach, and on what authority".
     push_scope: {
@@ -4092,6 +4110,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   };
   if (landedUnverifiedReason !== null) {
     countOwnCheck("landed_unverified", `vessel=${vessel_name} mitosis=${mitosis_version_id} sha=${String(newSha).slice(0, 12)} gap=${gapId}: ${landedUnverifiedReason}`);
+  } else if (checkLandingReason !== null) {
+    countOwnCheck("check_landing", `vessel=${vessel_name} mitosis=${mitosis_version_id} sha=${String(newSha).slice(0, 12)} gap=${gapId}: ${checkLandingReason}`);
   }
   // Threaded to the pending-land stamp below: a landing that newly broke a test in its vessel's
   // post-land suite must NOT earn landed_verified credit. Stays false when the suite does not run
@@ -4221,7 +4241,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
   if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld && !revertOf) {
-    await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason, stagedFiles });
+    await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason, checkLandingReason, stagedFiles });
   }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const logPath =

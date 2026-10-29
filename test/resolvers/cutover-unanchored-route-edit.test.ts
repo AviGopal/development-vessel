@@ -28,9 +28,11 @@ const routeEditUnarmedWhy = (gateMod as unknown as { routeEditUnarmedWhy: (row: 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
 const RED_ON_PARENT = { shape: "test_suite", body: { verified_root: "/tmp/test-suite-base-fixture", ran: true, total: 1, pass: 0, fail: 1, skip: 0, requested_not_passing: 1, failingTests: ["(parent)"] } };
-const setDeps = (d: Deps | null): void => {
+const GREEN_ON_PARENT = { shape: "test_suite", body: { verified_root: "/tmp/test-suite-base-fixture", ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [] } };
+/** The parent (base_ref) run answers RED by default; a case that needs it GREEN or unmeasured passes `parent`. */
+const setDeps = (d: Deps | null, parent: unknown = RED_ON_PARENT): void => {
   const run = d?.runSuite;
-  const wrapped: Deps | null = d && run ? { ...d, runSuite: async (p) => (p["base_ref"] ? RED_ON_PARENT : run(p)) } : d;
+  const wrapped: Deps | null = d && run ? { ...d, runSuite: async (p) => (p["base_ref"] ? parent : run(p)) } : d;
   (cutoverMod as unknown as { __setOwnCheckDepsForTests?: (d: Deps | null) => void }).__setOwnCheckDepsForTests?.(wrapped);
 };
 
@@ -323,6 +325,34 @@ describe("controls", () => {
     const r = await resolveVesselMitosisCutover(pointerOf(s) as never);
     expect(r.shape).toBe("cutoverApplied");
     expect(JSON.stringify(bodyOf(r)["operations"] ?? [])).toContain("admitted: no own check");
+  });
+});
+
+describe("malformed or stale arm records (controls: the strict reads already refuse them)", () => {
+  for (const [name, meta] of [
+    ["check_supply as a string", { ...ARMED, check_supply: "armed" }],
+    ["check_supply null", { ...ARMED, check_supply: null }],
+    ["red_at_head as the string \"true\"", { ...ARMED, check_supply: { ...ARMED.check_supply, red_at_head: "true" } }],
+    ["state armed with last_verdict missing", { ...ARMED, check_supply: { state: "armed", armed_at: "2026-10-28T05:00:00.000Z", red_at_head: true } }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    it(`[CONTROL] a malformed arm record (${name}) cannot authorize a route-edit src landing`, async () => {
+      const s = await setup();
+      const st = store([routeEditRow(meta)]);
+      setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: passing(s) });
+      const r = await resolveVesselMitosisCutover(pointerOf(s) as never);
+      expect(bodyOf(r)["refuse_class"], name).toBe("unanchored_src_landing");
+      expect(ownRuns, name).toBe(0);
+      expect(headSubjectSync(s.hostRepoRoot), name).toBe("baseline");
+    });
+  }
+
+  it("[CONTROL] a STALE arm (armed at an older base) whose check is GREEN on the current parent is refused green_on_parent: armed is re-verified red on the current parent", async () => {
+    const s = await setup();
+    const st = store([routeEditRow(ARMED)]);
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: passing(s) }, GREEN_ON_PARENT);
+    const r = await resolveVesselMitosisCutover(pointerOf(s) as never);
+    expect(bodyOf(r)["refuse_class"]).toBe("landing_green_on_parent");
+    expect(headSubjectSync(s.hostRepoRoot)).toBe("baseline");
   });
 });
 

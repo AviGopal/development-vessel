@@ -47,7 +47,14 @@ export function installCutoverFetchGuard(): FetchGuard {
   // (cutover-gate-default.ts), so every file's fixtures are decided by their own subject.
   installGateVersionDefault();
   const original = globalThis.fetch;
-  const routes: GuardRoute[] = [];
+  // The ONE tuning row every cutover reads (cutover.precutover_suite_timeout_ms, its pre-cutover suite budget) is ABSENT
+  // by default (activity-api answers 404), so the cutover takes its coded default; a test that pins the row's effect
+  // routes it itself (later routes win). Named by its exact path: any OTHER tuning read is still an unstubbed fetch.
+  const routes: GuardRoute[] = [{
+    name: "tuning row cutover.precutover_suite_timeout_ms (absent by default)",
+    match: (u) => { try { return new URL(u).pathname === "/v2/tuning-params/cutover.precutover_suite_timeout_ms"; } catch { return false; } },
+    respond: () => new Response("not found", { status: 404 }),
+  }];
   const violations: string[] = [];
   const hits: string[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {

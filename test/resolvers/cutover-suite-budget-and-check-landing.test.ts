@@ -394,3 +394,76 @@ describe("cutover: a check-only landing with no own check is a check_landing, no
     expect(stamp["landed_unverified"]).toBe(true);
   });
 });
+
+// THE PRE-CUTOVER SUITE'S BUDGET (A1). With no timeout_ms the suite ran under test_suite's 240 s default; the whole
+// development-vessel suite needs longer, so every run was killed before its summary and read as unmeasurable. The budget
+// is the tuning row cutover.precutover_suite_timeout_ms (readTuningNumber), default and cap 870000. test_suite turns it
+// into the shell's `timeout <s>`, which is what these read.
+/** The suite run's own `timeout <s>` (the last one: an earlier `timeout 120` bounds the dependency install). */
+const budgetOf = (cmd: string) => Number([...cmd.matchAll(/(?<![-\w])timeout (\d+) /g)].at(-1)?.[1] ?? NaN);
+/** A suite that needs ~450 s: it prints its summary only when its budget exceeds that, else it is killed first. */
+function suiteNeeding(seconds: number): void {
+  routeShell(guard, (command) => {
+    shellCalls++;
+    if (!currentHost || git(currentHost, "log", "-1", "--format=%s") !== "baseline") return BUN_NO_TESTS;
+    precheckCalls++;
+    precheckCommands.push(command);
+    return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${budgetOf(command) > seconds ? BUN_PASSING : BUN_KILLED_BY_TIMEOUT}`;
+  });
+}
+function tuningRow(value: unknown): void {
+  guard.route({ name: "tuning row cutover.precutover_suite_timeout_ms", match: (u) => u.includes("/v2/tuning-params/cutover.precutover_suite_timeout_ms"), respond: () => Response.json({ name: "cutover.precutover_suite_timeout_ms", value }) });
+}
+
+describe("cutover: the pre-cutover suite runs under a shaped budget, not test_suite's 240 s default", () => {
+  it("[MUST-FAIL] a suite that needs more than 240 s is measured, not killed: it lands on its measurement", async () => {
+    const s = await setup();
+    suiteNeeding(450);
+    noCheck(s);
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(String(bodyOf(r)["refusal_reason"] ?? "")).toBe("");
+    expect(r.shape).toBe("cutoverApplied");
+    expect(precheckCommands.length).toBeGreaterThan(0);
+    expect(budgetOf(precheckCommands[0]!)).toBe(870);
+  });
+
+  it("[CONTROL] a hung suite still times out under the budget and refuses: nothing is committed or pushed", async () => {
+    const s = await setup();
+    suite("killed");
+    noCheck(s);
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(budgetOf(precheckCommands[0]!)).toBe(870);
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    // Whichever unmeasured-refusal class answers (no_measurement_available, or pre_cutover_suite_not_run for an
+    // undirected landing), a killed suite is not a measurement and nothing lands.
+    expect(["no_measurement_available", "pre_cutover_suite_not_run"]).toContain(String(bodyOf(r)["refuse_class"]));
+    expect(headSubject(s)).toBe("baseline");
+    expect(git(s.originRoot, "rev-parse", "dev")).toBe(s.originSha);
+  });
+
+  it("[CONTROL] the fetch guard answers only that row by default: any OTHER tuning read is still refused and recorded", async () => {
+    const url = "http://127.0.0.1:8080/v2/tuning-params/cutover.some_other_row";
+    let refused = false;
+    try { await fetch(url); } catch { refused = true; }
+    expect(refused).toBe(true);
+    expect(guard.violations).toEqual([`GET ${url}`]);
+    guard.violations.length = 0; // this test's violation is the point; afterEach checks every other test
+    const own = await fetch("http://127.0.0.1:8080/v2/tuning-params/cutover.precutover_suite_timeout_ms");
+    expect(own.status).toBe(404);
+  });
+
+  it("[CONTROL] the tuning row overrides the default (read through readTuningNumber), capped at 870000; <= 0 is the default", async () => {
+    for (const [value, want] of [[300_000, 300], [2_000_000, 870], [0, 870], [-5, 870]] as const) {
+      const s = await setup();
+      suite("passing");
+      tuningRow(value);
+      noCheck(s);
+      await resolveVesselMitosisCutover(s.pointer as never);
+      expect([value, budgetOf(precheckCommands.at(-1)!)]).toEqual([value, want]);
+      await rm(s.hostRepoRoot, { recursive: true, force: true });
+      await rm(s.originRoot, { recursive: true, force: true });
+      await rm(join(ws, "vessels"), { recursive: true, force: true });
+      await rm(join(ws, "git"), { recursive: true, force: true });
+    }
+  });
+});

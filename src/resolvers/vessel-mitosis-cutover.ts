@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { registerAttempt, verifyDirectedIntentStamp } from "./attempt-register.js";
 import { readRecords } from "./attempt-ledger.js";
 import type { AutonomyScope } from "../judge/gap-policy.js";
+import { readTuningNumber } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite, ONLY_TESTS_MAX_NAMES } from "./test-suite.js";
@@ -380,6 +381,21 @@ const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** The change-window lease TTL every cutover takes (runGitAwareCutover). Exported so the auto-revert reader
  *  judges a pending revert stale on the same number, not on a copy of it. */
 export const CUTOVER_LEASE_TTL_MS = 600_000;
+/**
+ * THE PRE-CUTOVER SUITE'S BUDGET IS A SHAPED ROW. With no timeout_ms the suite ran under test_suite's 240 s default,
+ * which development-vessel's whole suite (the cutover measures the whole suite, not the gate's fast set) exceeds, so
+ * every run was killed before its summary and read as unmeasurable. The budget is the tuning row
+ * cutover.precutover_suite_timeout_ms, read through the one tuning reader (readTuningNumber). Absent, unreadable or
+ * <= 0: the default. Capped at the default, which is test_suite's 900 s shell cap less its 30 s margin, so bun's own
+ * `timeout` ends a hung suite (a measured did-not-run) before the shell kills it.
+ */
+export const PRECUTOVER_SUITE_TIMEOUT_ROW = "cutover.precutover_suite_timeout_ms";
+export const PRECUTOVER_SUITE_TIMEOUT_DEFAULT_MS = 870_000;
+export async function precutoverSuiteTimeoutMs(read: (name: string) => Promise<number | null> = readTuningNumber): Promise<number> {
+  const v = await read(PRECUTOVER_SUITE_TIMEOUT_ROW);
+  return v !== null && v > 0 ? Math.min(Math.floor(v), PRECUTOVER_SUITE_TIMEOUT_DEFAULT_MS) : PRECUTOVER_SUITE_TIMEOUT_DEFAULT_MS;
+}
+
 /** Tests only: the precutover gate's last-landed baseline (failing-test names) for a vessel, in place of the
  *  absolute /workspace/post-land-baseline/<vessel>.json read; null restores the file read. A fixture has no
  *  such file, and with no baseline the gate passes by construction (computeNewlyFailing(null, ...) is []),
@@ -3359,8 +3375,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     const precutoverGapId = await cutoverGapIdOf(pointer, mitosis_version_id);
     const precutoverOrigin = await directedLandingOrigin(pointer, stagedFiles, precutoverGapId);
     try {
+      const suiteTimeoutMs = await precutoverSuiteTimeoutMs();
+      operations.push({ op: "precutover_suite_budget", status: "ok", detail: `timeout_ms=${suiteTimeoutMs} (${PRECUTOVER_SUITE_TIMEOUT_ROW})` });
       const runSuiteWith = async (extra: Record<string, unknown>): Promise<{ failing: string[] | null; ran: boolean; pass: number; fail: number }> => {
-        const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, ...extra });
+        const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, timeout_ms: suiteTimeoutMs, ...extra });
         const sb = (res as { body?: Record<string, unknown> }).body ?? {};
         const ran = sb.ran === true;
         return {

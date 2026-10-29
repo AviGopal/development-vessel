@@ -36,6 +36,7 @@ import { resolveVesselMitosisCutover, asSemanticDissentStamp, type SemanticDisse
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
 import { readOperatorHold, classifyVesselsRoot } from "../lib/operator-hold.js";
+import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -615,6 +616,70 @@ export async function clearAuthoringMarker(markerPath: string | null): Promise<v
   }
 }
 
+/**
+ * ROLLBACK VERIFIED BY EFFECT. Every restore (resetTarget, the snapshot backstop, a truncating edit's same-turn
+ * rollback) writes the pre-edit bytes back and re-reads the path: restored means its full sha256 equals the pre-edit
+ * snapshot's (or, for a net-new file, the path is absent again). A match logs one line with the sha; a mismatch is
+ * collected, and the run RETURNS a shaped refusal (stage rollback_unverified, REFUSED) and files a gap instead of
+ * logging and carrying on (measured 10-09: a run truncated a live vessel file and only pull-sync's drift heal restored
+ * it; the restore's own mismatch line was the only trace).
+ */
+export interface RestoreVerdict { path: string; ok: boolean; expected_sha: string | null; got_sha: string | null }
+const fullSha = (s: string): string => createHash("sha256").update(s).digest("hex");
+
+/** Write `content` back to `p` (null: remove it), re-read it, and say whether it now holds exactly the snapshot. */
+export async function restorePathVerified(p: string, content: string | null): Promise<RestoreVerdict> {
+  const expected_sha = content === null ? null : fullSha(content);
+  try {
+    if (content === null) await unlink(p).catch(() => { /* already absent */ });
+    else {
+      await writeFile(p + ".tmp", content);
+      await rename(p + ".tmp", p);
+    }
+  } catch (e) {
+    console.error(`[patch-with-tools] restore threw for ${p}: ${(e as Error).message}`);
+    await unlink(p + ".tmp").catch(() => { /* never written */ });
+  }
+  const back = await readFile(p, "utf-8").catch(() => null);
+  const got_sha = back === null ? null : fullSha(back);
+  const ok = got_sha === expected_sha;
+  if (ok) console.log(`[patch-with-tools] restored ${p} sha=${expected_sha === null ? "absent" : expected_sha.slice(0, 12)} == pre-edit`);
+  else console.error(`[patch-with-tools] RESTORE FAILED — ${p} sha=${got_sha === null ? "absent" : got_sha.slice(0, 12)} != pre-edit ${expected_sha === null ? "absent" : expected_sha.slice(0, 12)} (drift on disk)`);
+  return { path: p, ok, expected_sha, got_sha };
+}
+
+type RollbackGapWriter = (pointer: Record<string, unknown>) => Promise<unknown>;
+let rollbackGapWriter: RollbackGapWriter = (pointer) => resolveSubstrateGapWrite(pointer);
+/** Tests only: capture the rollback gap instead of writing the gap store. null restores the real writer. */
+export function __setRollbackGapWriterForTests(w: RollbackGapWriter | null): void {
+  rollbackGapWriter = w ?? ((pointer) => resolveSubstrateGapWrite(pointer));
+}
+
+/** FAIL LOUD: the shaped refusal for a run whose rollback did not restore every path, with the gap it files. */
+export async function rollbackUnverified(failures: readonly RestoreVerdict[], targetFile: string): Promise<ResolverResult> {
+  const first = failures[0]!;
+  const id = `pwt-rollback-unverified-${createHash("sha256").update(failures.map((f) => f.path).sort().join("\n")).digest("hex").slice(0, 12)}`;
+  try {
+    await rollbackGapWriter({
+      type: "substrateGap_write",
+      gap: {
+        id,
+        category: "systematic_failure",
+        source: "substrate_detected",
+        status: "open",
+        summary: `patch_with_tools could not restore ${failures.length} path(s) to their pre-edit snapshot after a non-landing run on ${targetFile}: ${failures.map((f) => `${f.path} sha=${f.got_sha === null ? "absent" : f.got_sha.slice(0, 12)} != pre-edit ${f.expected_sha === null ? "absent" : f.expected_sha.slice(0, 12)}`).join("; ")}. The file on disk is not what it was before the run; restore it from its clone (mirror-to-live).`,
+        classification_metadata: { detector: "patch_with_tools_rollback_verify", target_file: targetFile, paths: failures.map((f) => ({ path: f.path, expected_sha: f.expected_sha, got_sha: f.got_sha })) },
+      },
+    });
+  } catch (e) {
+    console.error(`[patch-with-tools] rollback gap write failed: ${(e as Error).message}`);
+  }
+  return structuredError(`rollback unverified: ${first.path} is not its pre-edit snapshot after the run (${failures.length} path(s))`, {
+    stage: "rollback_unverified", verdict: "REFUSED", path: first.path, expected_sha: first.expected_sha, got_sha: first.got_sha,
+    failures, gap_id: id, target_file: targetFile,
+  });
+}
+
 /** The operator hold on this resolver's live-tree writes, and the scope its record must carry. */
 export const LIVE_TREE_HOLD_ID = "pwt-live-tree-writes";
 export const LIVE_TREE_HOLD_SCOPE = "patch_with_tools:live_tree_writes";
@@ -721,16 +786,16 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // file that means UNLINK (writing "" back leaves a stub that poisons the next
   // attempt's existence check + makes the no-op guard pass on an empty file);
   // for an existing file, write the original content back.
-  const resetTarget = async (): Promise<void> => {
-    try {
-      if (isNewFile) {
-        await unlink(liveSrcPath).catch(() => { /* not yet created */ });
-      } else {
-        await writeFile(liveSrcPath + '.tmp', baseContent);
-        await rename(liveSrcPath + '.tmp', liveSrcPath);
-      }
-    } catch { /* best-effort */ }
+  // Verified by effect (restorePathVerified), with one second pass; a restore that still does not match is
+  // collected in rollbackFailures, which refuses the run (see ROLLBACK VERIFIED BY EFFECT).
+  const rollbackFailures: RestoreVerdict[] = [];
+  const restoreOrRecord = async (p: string, content: string | null): Promise<RestoreVerdict> => {
+    let v = await restorePathVerified(p, content);
+    if (!v.ok) v = await restorePathVerified(p, content);
+    if (!v.ok && !rollbackFailures.some((f) => f.path === p)) rollbackFailures.push(v);
+    return v;
   };
+  const resetTarget = async (): Promise<RestoreVerdict> => restoreOrRecord(liveSrcPath, isNewFile ? null : baseContent);
 
   // DRIFT-PROOF SNAPSHOT/RESTORE (2026-07-30, gap
   // critical-patch-with-tools-edits-live-vessel-source). resetTarget only ever
@@ -752,30 +817,14 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     const cur = await readFile(p, "utf-8").catch(() => null);
     touchedSnapshots.set(p, cur);
   };
+  // A net-new path (null snapshot) is removed so its stub cannot poison a re-run's existence check or ship as
+  // live source. Each path is verified by effect; the final verdict for a path replaces an earlier one, so a
+  // path this backstop restores is no longer counted as failed.
   const restoreAllSnapshots = async (): Promise<void> => {
     for (const [p, content] of touchedSnapshots) {
-      try {
-        if (content === null) {
-          // Path did not exist pre-op (net-new authoring): remove the stub so it
-          // cannot poison a re-run's existence check and cannot ship as live source.
-          await unlink(p).catch(() => { /* already absent */ });
-          continue;
-        }
-        await writeFile(p, content);
-        const back = await readFile(p, "utf-8").catch(() => null);
-        const want = createHash("sha256").update(content).digest("hex");
-        // SurrealDB 2.3.3+ guarantees array::len([]) returns 0, not throws (2026-09-22 gap route-edit-ee5b2924)
-        const got = back === null || (Array.isArray(back) && back.length === 0) 
-          ? null 
-          : createHash("sha256").update(back).digest("hex");
-        if (got !== want) {
-          // Fail loud: a restore that did not take leaves drift on disk. This is the
-          // exact failure the whole guard exists to prevent, so it must be visible.
-          console.error(`[patch-with-tools] RESTORE FAILED — live ${p} still diverged after snapshot restore (drift on disk)`);
-        }
-      } catch (e) {
-        console.error(`[patch-with-tools] restore threw for ${p}: ${(e as Error).message}`);
-      }
+      const i = rollbackFailures.findIndex((f) => f.path === p);
+      if (i >= 0) rollbackFailures.splice(i, 1);
+      await restoreOrRecord(p, content);
     }
   };
 
@@ -1223,13 +1272,26 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     if (isEditToolCall && !truncationBlocked && !alreadyApplied) {
       await snapshotBeforeEdit(typeof args.path === "string" ? args.path : liveSrcPath);
     }
-    const result = escapedRoot
+    let result: { ok: boolean; body: unknown } = escapedRoot
       ? { ok: false, body: { success: false, error: `path outside the run root ${vesselsRoot}/${vessel}; edit only files under the vessel you were given` } as unknown }
       : truncationBlocked
       ? { ok: false, body: { success: false, error: "fs_write REFUSED: it would replace an existing file with a much smaller full-file rewrite, DELETING most of the live source. fs_write is ONLY for authoring a NET-NEW file. To change an existing file use fs_edit { path, old_string, new_string } or code_replace_lines for a SURGICAL edit that preserves everything you are not changing." } as unknown }
       : alreadyApplied
       ? { ok: true, body: { success: true, noop: true, note: "new_string already present — edit already applied; do NOT re-apply it" } as unknown }
       : await callTool(toolsEndpoint, tool, args);
+    // SAME-TURN TRUNCATION ROLLBACK: an edit tool that left the file it touched below half its pre-edit size (the
+    // fs_write guard's threshold, here judged by effect so fs_edit and the line tools are covered) is rolled back to
+    // its snapshot in this turn, verified, and the drafter is told why.
+    if (result.ok && isEditToolCall && !alreadyApplied) {
+      const editedPath = typeof args.path === "string" ? args.path : liveSrcPath;
+      const pre = touchedSnapshots.get(editedPath);
+      const now = await readFile(editedPath, "utf-8").catch(() => null);
+      if (typeof pre === "string" && pre.length > 400 && now !== null && now.length < pre.length * 0.5) {
+        console.error(`[patch-with-tools] turn ${turn} ${tool} TRUNCATED ${editedPath} from ${pre.length} to ${now.length} chars — rolling back this edit`);
+        const v = await restoreOrRecord(editedPath, pre);
+        result = { ok: false, body: { success: false, error: `${tool} REVERTED: it shrank ${editedPath} from ${pre.length} to ${now.length} chars, deleting most of the file; the file was restored to its content before this run${v.ok ? "" : " (the restore did NOT take)"}. Make a SURGICAL edit that keeps everything you are not changing.` } as unknown };
+      }
+    }
     console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}${alreadyApplied ? " (idempotent no-op)" : ""}: ${JSON.stringify(result.body).slice(0, 160)}`);
     history.push({ turn, thought_or_action: `call ${tool}(${JSON.stringify(args).slice(0, 200)})`, tool_result: { tool, args, result: result.body, ok: result.ok } });
 
@@ -1319,13 +1381,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   if (!finished) {
     // RELIABLE REVERT: /vessels/<v> is NOT a git repo, so the old `git restore .` ALWAYS
     // failed and leaked half-applied edits into live (poisoning later runs). resetTarget()
-    // is the deterministic revert (writeFile/unlink); assert it took, force a second pass.
+    // is the deterministic revert (writeFile/unlink), verified by effect with a second pass.
     await resetTarget();
-    const revertSrc = await readFile(liveSrcPath, "utf-8").catch(() => (isNewFile ? "" : baseContent));
-    if (createHash("sha256").update(revertSrc).digest("hex").slice(0, 12) !== beforeSha) {
-      await resetTarget();
-      console.warn(`[patch-with-tools] live target still diverged after resetTarget — forced second revert (orphan-leak guard)`);
-    }
     await clearAuthoringMarker(authoringMarkerPath);
     return structuredError(
       `patch_with_tools: ${attemptFailures.length} attempt(s) exhausted without a verified patch`,
@@ -1662,6 +1719,8 @@ console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}: llm_consulted=${
       }
     }
   }
+  // A rollback that did not take earlier in this run means the edit was built on a damaged file: never stage it.
+  if (rollbackFailures.length > 0) return await rollbackUnverified(rollbackFailures, pointer.target_file);
 // Stage the modified file into a mitosis dir for the cutover machinery.
   const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);
@@ -1769,5 +1828,9 @@ console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}: llm_consulted=${
     // edit can never strand in the LIVE /vessels source and crash the next restart.
     // Suppressed only once the edit is safely staged and the cutover owns the landing.
     if (!stagedForLanding) await restoreAllSnapshots();
+    // FAIL LOUD (ROLLBACK VERIFIED BY EFFECT): whatever this run was about to return or throw, a path left unrestored
+    // is the outcome. A return here replaces the try's result.
+    // eslint-disable-next-line no-unsafe-finally
+    if (!stagedForLanding && rollbackFailures.length > 0) return await rollbackUnverified(rollbackFailures, pointer.target_file);
   }
 }

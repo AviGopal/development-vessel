@@ -354,6 +354,47 @@ export async function familyHold(
   return { held: false, visited: [...visited] };
 }
 
+/**
+ * AN UNANCHORED ROUTE-EDIT SRC LANDING IS A PROPOSAL, NOT A LANDING (finding agf_kox0hqmw8dgv). The edit-intent route
+ * (route-edit-*) landed goal-host src for gaps whose check supply found no falsifiable anchor (check_supply no_anchor,
+ * falsifier none): one change emitted a fabricated oracle_verified:true, the other was dead code. Both were admitted
+ * as "no own check" and only stamped landed_unverified, so nothing could tell a real fix from a hollow one, while the
+ * check lane's arm-time soundness guards (which refuse unsound checks) never saw them. So the cutover lands an
+ * UNDIRECTED route-edit change that touches src/ only when its gap's check is ARMED (routeEditUnarmedWhy below), and
+ * then the ordinary own check must still pass on the staged tree; otherwise it refuses (unanchored_src_landing) before
+ * the commit and before any credit, and the change stays a proposal. A directed landing (the cutover's stamp-verified
+ * directedLandingOrigin, never a flag on the pointer or the row) keeps the reviewed no-check path. A landing of test
+ * files only (an arming landing adds the gap's own check under test/checks/) touches no src/ and is not refused here.
+ */
+export function isRouteEditGap(gapId: string, row: Record<string, unknown> | null | undefined): boolean {
+  if (/^(?:recommit-)*route-edit-[0-9a-f]+/.test(gapId)) return true;
+  if (!row) return false;
+  const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+  return row["category"] === "edit_intent_route" || (meta["route_edit_persisted"] != null && typeof meta["route_edit_persisted"] === "object");
+}
+
+/** Whether any staged path (vessel-relative) is under src/. */
+export function touchesSrc(paths: readonly string[] | null | undefined): boolean {
+  return Array.isArray(paths) && paths.some((p) => typeof p === "string" && /^src\//.test(p.replace(/^(?:\.\/)+/, "")));
+}
+
+/**
+ * Null when a route-edit gap's check is ARMED, else why not. Armed is what check supply writes when it arms a check
+ * (gap-check-supply.ts): the row carries a test_suite own check, its falsifier is class2 (string or { class } form),
+ * and its check_supply ledger is state "armed", red_at_head true, last_verdict "present". Anything else (no row,
+ * no_anchor, arm_refused, existence_only, green_at_head, goal_dispatched, a stale or malformed arm record) is not.
+ */
+export function routeEditUnarmedWhy(row: Record<string, unknown> | null | undefined, ownCheckFound: boolean): string | null {
+  if (!row) return "no gap row";
+  const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const cs = (meta["check_supply"] && typeof meta["check_supply"] === "object" ? meta["check_supply"] : {}) as Record<string, unknown>;
+  const raw = meta["falsifier"];
+  const fc = String((raw && typeof raw === "object" ? (raw as { class?: unknown }).class : raw) ?? "").toLowerCase();
+  const found = `check_supply.state=${String(cs["state"] ?? "missing")}, falsifier=${fc || "missing"}, red_at_head=${String(cs["red_at_head"] ?? "missing")}, last_verdict=${String(cs["last_verdict"] ?? "missing")}${ownCheckFound ? "" : ", no test_suite own check"}`;
+  if (cs["state"] !== "armed" || fc !== "class2" || cs["red_at_head"] !== true || cs["last_verdict"] !== "present" || !ownCheckFound) return found;
+  return null;
+}
+
 export type LandingRefuseClass = "hold" | "family_hold" | "green_on_parent";
 export type Admissibility = { ok: true; note: string } | { ok: false; refuse_class: LandingRefuseClass; reason: string };
 

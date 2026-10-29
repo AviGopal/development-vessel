@@ -30,7 +30,7 @@ import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 import { armingOnlyLanding, OUT_OF_SUITE_CHECK_RE } from "./check-supply-admission.js";
-import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy, familyHold, landingAdmissible, type Admissibility } from "./staged-mitosis-gate.js";
+import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy, familyHold, landingAdmissible, isRouteEditGap, touchesSrc, routeEditUnarmedWhy, type Admissibility } from "./staged-mitosis-gate.js";
 
 /**
  * The landing gap's own-check dependencies: the gap-store read and the test_suite run. Module-level
@@ -62,8 +62,9 @@ const realOwnCheckDeps: OwnCheckDeps = {
 /**
  * Record a landing refusal's REASON CODE on the gap row (landing_refusal {class, reason, at, mitosis}), so the system
  * reads why a landing was refused (law 8), not only a log line. Merge-style like stampOwnCheckOutcome; never throws.
+ * Also stamps unanchored_src_landing, which the cutover decides before the own check runs (routeEditUnarmedWhy).
  */
-async function stampLandingRefusal(row: Record<string, unknown>, adm: Extract<Admissibility, { ok: false }>, mitosis: string): Promise<string> {
+async function stampLandingRefusal(row: Record<string, unknown>, adm: Extract<Admissibility, { ok: false }> | { refuse_class: "unanchored_src_landing"; reason: string }, mitosis: string): Promise<string> {
   try {
     const res = (await ownCheckDeps.writeGap({
       type: "substrateGap_write",
@@ -301,7 +302,8 @@ export type OwnCheckOutcome =
   | "landed_unverified"
   | "landing_hold"
   | "landing_family_hold"
-  | "landing_green_on_parent";
+  | "landing_green_on_parent"
+  | "unanchored_src_landing";
 const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   own_check_passed: 0,
   own_check_failed: 0,
@@ -311,6 +313,7 @@ const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   landing_hold: 0,
   landing_family_hold: 0,
   landing_green_on_parent: 0,
+  unanchored_src_landing: 0,
 };
 export function getOwnCheckCounters(): Record<OwnCheckOutcome, number> {
   return { ...ownCheckCounts };
@@ -3100,6 +3103,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //   • the gap carries no test_suite check, or has no row (patch_with_tools' synthesized ids) →
   //     proceed, SAY so in operations, and stamp the landing record landed_unverified so tallies
   //     can exclude a landing that only typechecked;
+  //     EXCEPT an undirected route-edit landing that touches src/: refused just below unless its gap's check is
+  //     ARMED (unanchored_src_landing, staged-mitosis-gate.ts routeEditUnarmedWhy), a proposal only;
   //   • the gap store is unreadable → DEFER (gap_store_unavailable): whether an own check exists
   //     is unknown, and a landing gate fails closed. The pending lock is preserved
   //     (preserve_pending) so the next tick retries this same tree once the store answers.
@@ -3128,7 +3133,29 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         `gap_store_unavailable: could not read gap ${ownGapId} to find its own class-2 check (${load.why}). Deferring this cutover; the staged tree and its pending lock are kept and retried next tick.`,
         { kind: "gap_store_unavailable", refuse_class: "gap_store_unavailable", deferred: true, preserve_pending: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check_counters: getOwnCheckCounters(), operations },
       );
-    } else if (load.status === "none" && load.row && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["own_check_broken"] && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["evidence_resolve"] == null) {
+    }
+    // UNANCHORED ROUTE-EDIT SRC (staged-mitosis-gate.ts routeEditUnarmedWhy). Edit-intent route landings bypass the
+    // arm-time check-supply gate, so an undirected route-edit src landing is eligible only when its gap row records a
+    // check that check supply actually armed; the own check below must then still pass on this staged tree. Decided
+    // before that run and before any commit or credit. Directedness is the stamped ledger intent (directedLandingOrigin,
+    // the read the pre-cutover gate uses), never a flag on the pointer or the row.
+    if (isRouteEditGap(ownGapId, load.row) && touchesSrc(stagedFiles)) {
+      const origin = await directedLandingOrigin(pointer, stagedFiles, ownGapId);
+      const unarmed = origin.directed ? null : routeEditUnarmedWhy(load.row, load.status === "found");
+      if (unarmed !== null) {
+        const reason = `route-edit gap ${ownGapId || "(no id)"} would land src with no armed check (${unarmed}; ${origin.why}); nothing can tell this change from a hollow one, so it stays a proposal: not landed, not credited`;
+        const stamped = load.row ? await stampLandingRefusal(load.row, { refuse_class: "unanchored_src_landing", reason }, String(mitosis_version_id)) : "no gap row to record on";
+        operations.push({ op: "route_edit_falsifier", status: "fail", detail: `${reason} (${stamped})` });
+        countOwnCheck("unanchored_src_landing", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${unarmed}`);
+        await unstage("unanchored_src_landing");
+        return softRefuse(
+          `unanchored_src_landing: ${reason}. Refusing to land or credit it.`,
+          { kind: "unanchored_src_landing", refuse_class: "unanchored_src_landing", proposal_only: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
+        );
+      }
+      operations.push({ op: "route_edit_falsifier", status: "ok", detail: origin.directed ? `directed (${origin.why}): the reviewed path` : "armed check found; the staged-tree own check must still pass" });
+    }
+    if (load.status === "none" && load.row && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["own_check_broken"] && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["evidence_resolve"] == null) {
       // Its check was demoted as broken (OWN_CHECK_UNMEASURABLE_ESCALATE_AT unmeasurable runs) and has not been
       // re-derived yet: the gap is in check repair. A tree staged for it must not land typecheck-only meanwhile.
       operations.push({ op: "own_check", status: "fail", detail: `gap ${ownGapId}'s check is under repair (own_check_broken)` });

@@ -510,7 +510,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     : null;
   // A suite that printed no summary at all did not run — do NOT report 0/0/0 as a clean
   // result, or "the suite is missing" becomes indistinguishable from "everything passed".
-  const ran = /\d+\s+(pass|fail)\b/.test(raw);
+  // The summary is recognised by parseBunSummary's own rule: a count at the START of a line. A run killed by its
+  // budget prints no summary, but its test output can still carry "3 pass" mid-line; matched anywhere, that read as
+  // ran with 0 tests counted (the pre-cutover suite at its 240 s default, measured on both nodes), not as did not run.
+  const ran = /^\s*\d+\s+(pass|fail)\b/m.test(raw);
   // A NAME FILTER THAT MATCHED NO TEST IN A FILE THAT LOADED IS A MEASUREMENT (2026-10-08). When none of the named
   // tests exists, bun (1.3.14) collects the file(s) and prints, instead of a summary:
   //   error: regex "<pattern>" matched 0 tests. Searched 1 file (skipping 10 tests)

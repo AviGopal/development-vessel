@@ -105,11 +105,6 @@
     "reason": "cutover lease wait (read in src/resolvers/vessel-mitosis-cutover.ts)"
   },
   {
-    "name": "CUTOVER_PRECHECK_SUITE",
-    "class": "behaviour",
-    "reason": "toggle: cutover precheck suite (read in src/resolvers/vessel-mitosis-cutover.ts)"
-  },
-  {
     "name": "DETECTOR_CLOSURE_LEDGER_PATH",
     "class": "bootstrap",
     "reason": "filesystem root/path: detector closure ledger file (read in src/judge/gap-landing-verdict.ts)"

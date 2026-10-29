@@ -49,6 +49,18 @@ describe("a composed capability declares only the shapes its tasks produce", () 
     expect(other.outputShapes).not.toContain("isotopeJuly_write");
   });
 
+  it("[MUST-FAIL] a MIDDLE task declaring a write its resolver does not perform drops it; the outputs still derive from the FINAL task", () => {
+    const p = plan([
+      DATA,
+      { id: "middle_task_1", resolver: "llm_completion_dispatch", output_shapes: ["superiorRut_write", "julyIsotopeNote"], config: { prompt: "hurried" } },
+      { id: "format_task_1", resolver: "llm_completion_dispatch", config: { prompt: "rut" } },
+    ], "hurriedRutReport");
+    const middle = p.tasks.find((t) => t.id === "middle_task_1")!;
+    expect(middle.output_shapes).toEqual(["julyIsotopeNote"]);
+    expect(p.tasks.flatMap((t) => t.output_shapes ?? [])).not.toContain("superiorRut_write");
+    expect(p.outputShapes).toEqual(["hurriedRutReport"]);
+  });
+
   it("[CONTROL] a non-write deliverable is still the llm task's declared output (unchanged)", () => {
     const p = plan([DATA, { id: "format_task_1", resolver: "llm_completion_dispatch", config: { prompt: "rut" } }], "hurriedRutReport");
     expect(p.outputShapes).toEqual(["hurriedRutReport"]);

@@ -445,7 +445,7 @@ async function validateDataTask(task: PlannedTask, executionId?: string): Promis
 }
 
 /** Validate + normalise the planned tasks. Returns null with a reason on rejection. */
-function coercePlan(
+export function coercePlan(
   raw: unknown,
   catalogue: Set<string>,
   deliverable: string,
@@ -486,7 +486,9 @@ function coercePlan(
       ? (o["output_shapes"] as unknown[]).map(String)
       : Array.isArray(o["outputShapes"]) ? (o["outputShapes"] as unknown[]).map(String) : [];
     const cleanOut = rawOut.filter((s) => /^[A-Za-z_][A-Za-z0-9_:.]*$/.test(s) && !s.includes(" "));
-    const outputShapes = cleanOut.length ? cleanOut : [canonicalOut];
+    // HONEST SHAPES (finding agf_zs97ncomgubz): a task never declares a write its resolver does not perform.
+    const honestOut = cleanOut.filter((s) => !isWriteShape(s) || performsWrite(resolver, config, s));
+    const outputShapes = honestOut.length ? honestOut : [canonicalOut];
     const outputImpulses = Array.isArray(o["outputImpulses"]) ? (o["outputImpulses"] as unknown[]).map(String) : [`${id}_out`];
     const dependencies = Array.isArray(o["dependencies"]) ? (o["dependencies"] as unknown[]).map(String) : undefined;
     const inputShapes = Array.isArray(o["input_shapes"])
@@ -510,13 +512,16 @@ function coercePlan(
   // composites. The reach-gate judges from actual produced content regardless, so
   // narrowing the DECLARED shapes to the deliverable is both correct and the right
   // reuse key. (2026-06-27)
-  // Force the FINAL task's declared output to the goal-specific deliverable shape
+  // Name the FINAL task's declared output as the goal-specific deliverable shape
   // (so the composite's reuse key is unique to this goal, not the generic LLM
   // shape). The format task still runs llm_completion_dispatch; only its DECLARED
-  // output shape is renamed to the deliverable.
+  // output shape is renamed to the deliverable. A WRITE deliverable is declared only
+  // when the final task's resolver performs that write (performsWrite): otherwise the
+  // task keeps the shapes its resolver really produces, and the composite, derived
+  // from its tasks below, mints as what it is, under any id, never as the write.
   const finalTask = tasks[tasks.length - 1];
   if (finalTask) {
-    finalTask.output_shapes = [deliverable];
+    if (!isWriteShape(deliverable) || performsWrite(finalTask.resolver, finalTask.config, deliverable)) finalTask.output_shapes = [deliverable];
     // ENFORCE THE INTER-TASK BINDING. The whole point of decomposition is that the
     // format step CONSUMES the data step's output — but the LLM routinely writes
     // "analyze the data provided" WITHOUT the {{impulse:<slot>}} placeholder, so
@@ -540,8 +545,23 @@ function coercePlan(
       }
     }
   }
-  const outputShapes = [deliverable];
+  const outputShapes = finalTask?.output_shapes?.length ? [...finalTask.output_shapes] : [deliverable];
   return { tasks, outputShapes };
+}
+
+/** A write shape: an `X_write` impulse or a `write_note`. */
+export function isWriteShape(shape: string): boolean {
+  return /_write$/.test(shape) || /(^|:)write_note$/.test(shape);
+}
+const IMPULSE_RESOLVE_RESOLVERS: ReadonlySet<string> = new Set(["resolve_impulse", "impulse_resolve"]);
+/** Whether a task with this resolver and config performs `shape` (a write): the resolver IS that write, it is
+ *  fs_write, or it resolves an impulse whose pointer type is that write. An llm task never does. */
+export function performsWrite(resolver: string, config: Record<string, unknown>, shape: string): boolean {
+  if (resolver === shape || resolver === "fs_write") return true;
+  if (!IMPULSE_RESOLVE_RESOLVERS.has(resolver)) return false;
+  const p = (config["impulse"] ?? config["pointer"]) as Record<string, unknown> | undefined;
+  const t = p && typeof p === "object" ? p["type"] : config["pointer_type"];
+  return t === shape;
 }
 
 /**

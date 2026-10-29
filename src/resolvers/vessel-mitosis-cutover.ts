@@ -64,7 +64,7 @@ const realOwnCheckDeps: OwnCheckDeps = {
  * reads why a landing was refused (law 8), not only a log line. Merge-style like stampOwnCheckOutcome; never throws.
  * Also stamps unanchored_src_landing, which the cutover decides before the own check runs (routeEditUnarmedWhy).
  */
-async function stampLandingRefusal(row: Record<string, unknown>, adm: Extract<Admissibility, { ok: false }> | { refuse_class: "unanchored_src_landing"; reason: string }, mitosis: string): Promise<string> {
+async function stampLandingRefusal(row: Record<string, unknown>, adm: Extract<Admissibility, { ok: false }> | { refuse_class: "unanchored_src_landing" | "parent_unmeasured"; reason: string }, mitosis: string): Promise<string> {
   try {
     const res = (await ownCheckDeps.writeGap({
       type: "substrateGap_write",
@@ -303,7 +303,8 @@ export type OwnCheckOutcome =
   | "landing_hold"
   | "landing_family_hold"
   | "landing_green_on_parent"
-  | "unanchored_src_landing";
+  | "unanchored_src_landing"
+  | "parent_unmeasured";
 const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   own_check_passed: 0,
   own_check_failed: 0,
@@ -314,6 +315,7 @@ const ownCheckCounts: Record<OwnCheckOutcome, number> = {
   landing_family_hold: 0,
   landing_green_on_parent: 0,
   unanchored_src_landing: 0,
+  parent_unmeasured: 0,
 };
 export function getOwnCheckCounters(): Record<OwnCheckOutcome, number> {
   return { ...ownCheckCounts };
@@ -3139,8 +3141,11 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     // check that check supply actually armed; the own check below must then still pass on this staged tree. Decided
     // before that run and before any commit or credit. Directedness is the stamped ledger intent (directedLandingOrigin,
     // the read the pre-cutover gate uses), never a flag on the pointer or the row.
+    // Set for an undirected route-edit src landing that passed the arm check: its parent run must be measured (below).
+    let routeEditUndirectedSrc = false;
     if (isRouteEditGap(ownGapId, load.row) && touchesSrc(stagedFiles)) {
       const origin = await directedLandingOrigin(pointer, stagedFiles, ownGapId);
+      routeEditUndirectedSrc = !origin.directed;
       const unarmed = origin.directed ? null : routeEditUnarmedWhy(load.row, load.status === "found");
       if (unarmed !== null) {
         const reason = `route-edit gap ${ownGapId || "(no id)"} would land src with no armed check (${unarmed}; ${origin.why}); nothing can tell this change from a hollow one, so it stays a proposal: not landed, not credited`;
@@ -3245,6 +3250,20 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         if (parent.measured && (!parentRoot || resolve(parentRoot) === resolve(hostRepoRoot))) {
           parent = { pass: false, measured: false, reason: parentRoot ? `parent run measured the staged clone ${parentRoot}, not a tree of HEAD` : "parent run reported no measured root" };
         }
+      }
+      // AN UNDIRECTED ROUTE-EDIT SRC LANDING NEEDS ITS PARENT MEASURED. Its arm is armed at some base; the parent run is what
+      // re-verifies the check red on the CURRENT parent. Unmeasured, nothing re-verified it, so it stays a proposal instead
+      // of being admitted with a note (a directed landing keeps the note: someone reviewed it).
+      if (routeEditUndirectedSrc && load.status === "found" && !hold.held && parent && !parent.measured) {
+        const reason = `route-edit gap ${ownGapId} would land src on an arm the current parent never re-verified: the parent own-check run was unmeasurable (${parent.reason}); it stays a proposal: not landed, not credited`;
+        const stamped = await stampLandingRefusal(admRow, { refuse_class: "parent_unmeasured", reason }, String(mitosis_version_id));
+        operations.push({ op: "landing_admissible", status: "fail", detail: `parent_unmeasured: ${reason} (${stamped})` });
+        countOwnCheck("parent_unmeasured", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${parent.reason}`);
+        await unstage("parent_unmeasured");
+        return softRefuse(
+          `parent_unmeasured: ${reason}. Refusing.`,
+          { kind: "parent_unmeasured", refuse_class: "parent_unmeasured", proposal_only: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
+        );
       }
       const adm = landingAdmissible({ hold, ownCheck: load.status === "found" ? { parent: parent ?? { pass: false, measured: false, reason: "parent not run (a hold refuses first)" } } : null });
       if (!adm.ok) {

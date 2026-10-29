@@ -356,6 +356,32 @@ describe("malformed or stale arm records (controls: the strict reads already ref
   });
 });
 
+describe("an undirected route-edit src landing needs its parent own-check run measured", () => {
+  const UNMEASURED_PARENT = { shape: "test_suite", body: { verified_root: "/tmp/test-suite-base-fixture", ran: false } };
+  it("[MUST-FAIL] undirected + ARMED + an unmeasurable parent run is refused parent_unmeasured (proposal_only), not admitted with a note", async () => {
+    const s = await setup();
+    const st = store([routeEditRow(ARMED)]);
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: passing(s) }, UNMEASURED_PARENT);
+    const r = await resolveVesselMitosisCutover(pointerOf(s) as never);
+    expect(bodyOf(r)["refuse_class"]).toBe("parent_unmeasured");
+    expect(bodyOf(r)["proposal_only"]).toBe(true);
+    expect(headSubjectSync(s.hostRepoRoot)).toBe("baseline");
+    expect(metaWrites(st.writes).some((m) => (m["landing_refusal"] as Record<string, unknown> | undefined)?.["class"] === "parent_unmeasured")).toBe(true);
+  });
+
+  it("[CONTROL] the same case DIRECTED (a stamped, verified attemptIntent) is admitted with the note, as before", async () => {
+    const s = await setup();
+    const st = store([routeEditRow(ARMED)]);
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: passing(s) }, UNMEASURED_PARENT);
+    const attemptId = `att-directed-${Date.now().toString(36)}`;
+    const intent = { attempt_id: attemptId, route: "feature_compose", repo: `/workspace/git/vessels/${VESSEL}`, gap_id: GAP, touched_files: [TARGET], directed: true };
+    appendRecord("attemptIntent", attemptId, { ...intent, directed_stamp: directedIntentStamp(FIXTURE_NODE_KEY, intent) });
+    const r = await resolveVesselMitosisCutover(pointerOf(s, { attempt_id: attemptId }) as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect(JSON.stringify(bodyOf(r)["operations"] ?? [])).toContain("parent run unmeasurable");
+  });
+});
+
 describe("routeEditUnarmedWhy (pure)", () => {
   it("[UNIT] armed only on check supply's arm record plus a class2 falsifier and a found own check; else it says what it found", () => {
     expect(routeEditUnarmedWhy(routeEditRow(ARMED), true)).toBe(null);

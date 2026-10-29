@@ -644,8 +644,17 @@ export function mustFailControlSentence(meta: Row | null): string {
  * later (an existence_only reason puts it past 160), so the next attempt is told the name it must not read.
  */
 export function priorAttemptSentence(prior: readonly Row[]): string {
-  const last = [...prior].reverse().find((h) => JUDGED_NOT_ARMED.has(String(h?.["state"] ?? "")));
+  // A dispatch the goal-host refused at a test-writing stage is a judged attempt too: its check was drafted and refused
+  // before it could land, so the next goal is told that stage and why (a dispatch_failed with no such stage adds nothing).
+  const testWritingRefusal = (h: Row | undefined): RegExpExecArray | null =>
+    h?.["state"] === "dispatch_failed" ? TEST_WRITING_STAGE_RE.exec(String(h["reason"] ?? "")) : null;
+  const last = [...prior].reverse().find((h) => JUDGED_NOT_ARMED.has(String(h?.["state"] ?? "")) || testWritingRefusal(h) !== null);
   if (!last) return "";
+  const tw = testWritingRefusal(last);
+  if (tw) {
+    const fromStage = String(last["reason"] ?? "").slice(tw.index).replace(/^[\w$]+[:=]?\s*/, "");
+    return `An earlier attempt was refused at test-writing: ${tw[1]}: ${fromStage.slice(0, 160)}: write a different test that avoids that. `;
+  }
   const titles = (Array.isArray(last["titles"]) ? (last["titles"] as unknown[]) : []).filter((t): t is string => typeof t === "string" && t.length > 0);
   const named = titles.length ? titles.map((t) => JSON.stringify(t)).join(", ") : "the previous check";
   if (last["state"] === "green_at_head")
@@ -915,6 +924,20 @@ export function nonAttemptLedger(ledger: Ledger, kind: "non_attempt" | "refused"
  * The verdict on one in-flight dispatch. Pure. An outcome that cannot be read is never "failed": it waits (and is
  * reported) until the staleness bound, then is lost with the reason it could not be read.
  */
+/**
+ * THE TEST-WRITING STAGE SURVIVES THE CUT. goal-host's reach_reason for a refused check_supply compose opens with ~110
+ * characters of routing prefix ("early edit-intent routed to feature_compose; check_supply compose refused at …"), and
+ * the test-writing judgement that refused the check (`test_writing=<stage>: <reason>`) comes after the verify text. Cut
+ * at 240 characters from the start, the stage was lost, so the ledger recorded a generic failed dispatch. When the text
+ * names a test-writing stage, it is kept from the stage on (the stage and its reason, then the cut); otherwise as before.
+ */
+export const TEST_WRITING_STAGE_RE = /\b(test_writing_[a-z_]+|check_references_missing_export|edit_site_not_importable)\b/;
+export function reachReasonText(reachReason: string): string {
+  const text = reachReason.replace(/\s+/g, " ").trim();
+  const m = TEST_WRITING_STAGE_RE.exec(text);
+  return (m && m.index > 0 ? text.slice(m.index) : text).slice(0, 240);
+}
+
 export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, nowMs: number, bounds: OutcomeBounds, localNode: string): DispatchVerdict {
   const sent = Date.parse(String(ledger.last_dispatch_at ?? ""));
   const age = Number.isFinite(sent) ? nowMs - sent : Number.POSITIVE_INFINITY;
@@ -947,7 +970,7 @@ export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, now
   const status = String(probe.status ?? "").toLowerCase();
   if (RUNNING_STATUSES.has(status)) return age > bounds.timeout_ms ? { kind: "lost", why: "timed_out", reason: `timed_out: still ${status} ${hours(age)} after dispatch (bound ${hours(bounds.timeout_ms)})` } : { kind: "running" };
   if (TERMINAL_STATUSES.has(status)) {
-    const why = typeof probe.reach_reason === "string" && probe.reach_reason.trim() ? `: ${probe.reach_reason.replace(/\s+/g, " ").trim().slice(0, 240)}` : "";
+    const why = typeof probe.reach_reason === "string" && probe.reach_reason.trim() ? `: ${reachReasonText(probe.reach_reason)}` : "";
     if (probe.reached === true) {
       return age > bounds.title_grace_ms
         ? { kind: "failed", reason: `the goal ended ${status} and reached, but no new test title appeared in ${ledger.test_file ?? "the check file"} within ${hours(bounds.title_grace_ms)}` }

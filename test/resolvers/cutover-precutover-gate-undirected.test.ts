@@ -8,8 +8,9 @@
 // signal the AUTONOMY-SCOPE CHOKEPOINT already uses; author identity cannot separate operator from
 // autonomous), a pre-cutover suite that did not run OR that ran and measured zero tests is treated
 // the same as own_check_unmeasurable: refused, no preserve_pending (the tree is not retried — the
-// gap stays open and is recomposed), with the same consecutive-unmeasurable escalation counter
-// (OWN_CHECK_UNMEASURABLE_ESCALATE_AT) on the landing gap's row. An operator-DIRECTED landing is
+// gap stays open and is recomposed). It is NOT charged to the landing gap's own-check counter
+// (own_check_unmeasurable_count / OWN_CHECK_UNMEASURABLE_ESCALATE_AT on its row): this suite is not the gap's own check,
+// and that charge demoted unrelated predicates (cutover-suite-refusal-not-charged.test.ts). An operator-DIRECTED landing is
 // unaffected (see cutover-no-measurement-refuses.test.ts's "CONTROL (directed)" for that contract).
 //
 // "Did not run" (bun prints no summary at all — no shell producer, a non-test file, a timeout) is
@@ -218,14 +219,17 @@ describe("cutover: the precutover gate fails closed for undirected landings on n
     expect(git(s.originRoot, "rev-parse", "dev")).toBe(before);
   });
 
-  it("MUST-FAIL: the consecutive-unmeasurable counter (own_check_unmeasurable shape) increments across repeated zero-tests attempts on the landing gap's row", async () => {
+  it("MUST-FAIL: the consecutive-unmeasurable counter (own_check_unmeasurable shape) does NOT increment across repeated zero-tests attempts on the landing gap's row, and never escalates", async () => {
     const s = await setup();
     suite("zero_tests_matched");
     noOwnCheck();
+    const meta = () => (liveRow["classification_metadata"] ?? {}) as Record<string, unknown>;
+    const before = meta()["own_check_unmeasurable_count"];
     const r1 = await resolveVesselMitosisCutover(s.pointer as never);
     const r2 = await resolveVesselMitosisCutover(s.pointer as never);
-    expect(Number(bodyOf(r1)["own_check_unmeasurable_count"])).toBe(1);
-    expect(Number(bodyOf(r2)["own_check_unmeasurable_count"])).toBe(2);
+    expect([bodyOf(r1)["refuse_class"], bodyOf(r2)["refuse_class"]]).toEqual(["pre_cutover_suite_zero_tests", "pre_cutover_suite_zero_tests"]);
+    expect(meta()["own_check_unmeasurable_count"]).toBe(before);
+    expect(meta()["own_check_broken"]).toBeUndefined();
   });
 
   it("CONTROL: an undirected landing whose pre-cutover suite RAN with a real pass still lands (unaffected)", async () => {

@@ -3396,23 +3396,16 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       if (!precutoverOrigin.directed && (!firstRun.ran || (firstRun.pass === 0 && firstRun.fail === 0))) {
         const reasonLabel = firstRun.ran ? "ran but measured 0 tests" : "did not run";
         const kind = firstRun.ran ? "pre_cutover_suite_zero_tests" : "pre_cutover_suite_not_run";
-        const vesselBareForStamp = String(vessel_name).replace(/^repos\//, "");
-        let stampCount = 0;
-        let stampEscalated = false;
-        try {
-          const load2 = await loadOwnCheck(vesselBareForStamp, precutoverGapId, ownCheckDeps.readGap);
-          const row2 = load2.status !== "unreadable" ? load2.row : undefined;
-          if (row2) {
-            const stamp2 = await stampOwnCheckOutcome(row2, { measured: false, reason: `pre-cutover suite ${reasonLabel} (undirected landing, ${precutoverOrigin.why})` });
-            stampCount = stamp2.count;
-            stampEscalated = stamp2.escalated;
-          }
-        } catch { /* best-effort stamp; the refusal below stands on no measurement either way */ }
+        // NOT CHARGED TO THE LANDING GAP'S OWN CHECK (gap a-pre-cutover-suite-timeout-is-charged-to-the-landing-gaps-own-check-
+        // counter-and-breaks-an-unrelated-predicate). This suite is the whole-suite scan, not the gap's own check: stamping
+        // its did-not-run on the row's own_check_unmeasurable_count demoted, at OWN_CHECK_UNMEASURABLE_ESCALATE_AT in a row,
+        // whatever evidence_resolve the row held, a predicate this cutover never ran. The refusal below stands on no
+        // measurement either way; only the gap's own check (above) moves that counter.
         countOwnCheck("own_check_unmeasurable", `gap=${precutoverGapId} vessel=${vessel_name} mitosis=${mitosis_version_id}: precutover suite ${reasonLabel}, undirected (${precutoverOrigin.why})`);
         await unstage(kind);
         return softRefuse(
-          `${kind}: the pre-cutover suite ${reasonLabel} on this staged tree; a system-authored landing (${precutoverOrigin.why}) cannot be verified without it, even when its own check passed above — an own-check pass alone is gameable. Refusing like own_check_unmeasurable: unproduced evidence is not passing evidence; this tree is not retried, the gap stays open and is recomposed. ${stampEscalated ? `This is unmeasurable run ${stampCount} in a row: the check is treated as broken and demoted for re-derivation, not recompose.` : `Unmeasurable run ${stampCount} of ${OWN_CHECK_UNMEASURABLE_ESCALATE_AT} before the check is treated as broken.`}`,
-          { kind, refuse_class: kind, vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, own_check_unmeasurable_count: stampCount, own_check_escalated: stampEscalated, own_check_counters: getOwnCheckCounters(), operations },
+          `${kind}: the pre-cutover suite ${reasonLabel} on this staged tree; a system-authored landing (${precutoverOrigin.why}) cannot be verified without it, even when its own check passed above — an own-check pass alone is gameable. Refusing like own_check_unmeasurable: unproduced evidence is not passing evidence; this tree is not retried, the gap stays open and is recomposed. The landing gap's own-check counter is not charged: this suite is not its own check.`,
+          { kind, refuse_class: kind, vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, own_check_counters: getOwnCheckCounters(), operations },
         );
       }
       if (failNow !== null) {                // null = unmeasurable → fall through and commit

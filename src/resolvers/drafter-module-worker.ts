@@ -1,3 +1,6 @@
+// A module (not a script), so its `self` declaration is local and does not redeclare the global one.
+export {};
+
 type DrafterEntry = "planDrafterReads" | "assembleDrafterContext";
 type WorkerInput = { variant: string; entry: DrafterEntry; facts: unknown };
 
@@ -11,7 +14,7 @@ function drafterVariantAllowlisted(id: string): string {
 async function loadDrafterModule(variant: string): Promise<{ ok: true; module: { planDrafterReads: unknown; assembleDrafterContext: unknown } } | { ok: false; error: string }> {
   if (variant !== "drafter-v1" && !/^drafter-v[0-9]+[a-z0-9-]*$/.test(variant)) return { ok: false, error: "variant id is outside the allowlist" };
   try {
-    const { planDrafterReads, assembleDrafterContext } = await import(variant === "drafter-v1" ? "../src/drafter/index.js" : `../src/drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`);
+    const { planDrafterReads, assembleDrafterContext } = await import(variant === "drafter-v1" ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`);
     return { ok: true, module: { planDrafterReads, assembleDrafterContext } };
   } catch (err) {
     return { ok: false, error: `import_failed: ${String((err as Error)?.message ?? err).slice(0, 220)}` };

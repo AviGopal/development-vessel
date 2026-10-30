@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const FC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts"), "utf8");
-const DRAFTER_WORKER = readFileSync(join(import.meta.dir, "..", "..", "workers", "drafter-module-worker.ts"), "utf8");
+const DRAFTER_WORKER = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "drafter-module-worker.ts"), "utf8");
 
 const ANCHORS = {
   held: "const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;",
@@ -25,7 +25,7 @@ const ANCHORS = {
   envelope: 'const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");',
   worker: 'workerVariant: variantChoice.mode === "named" ? variantChoice.variant : DRAFTER_DEFAULT_VARIANT,',
 };
-const WORKER_IMPORT = 'const { planDrafterReads, assembleDrafterContext } = await import(variant === "drafter-v1" ? "../src/drafter/index.js" : `../src/drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`);';
+const WORKER_IMPORT = 'const { planDrafterReads, assembleDrafterContext } = await import(variant === "drafter-v1" ? "../drafter/index.js" : `../drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`);';
 /** The floor's refusals as they were inline. None may come back as a local copy beside the core. */
 const MOVED = [
   "is under operator_hold`);",

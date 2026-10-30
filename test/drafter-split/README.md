@@ -11,7 +11,7 @@ change these pins.
 | `harness.ts` | The hermetic seams every pin drives `resolveFeatureCompose` through, and the fixture corpus. |
 | `verdict-diff.golden.test.ts` + `verdict-diff.golden.json` | F5(b): with the open module forced to fail, every recording (verdict, stage, ops, applied, gap-store writes, fetches, prompt bytes, console) equals the tree before the split. Re-baselined only by an operator/qa act. |
 | `f1-adversarial-module.test.ts` | F1: no open module reaches a cutover without verify, the own check, the judge, the refuter and (autonomous) the scope floor; a verify-red draft is never cut over. |
-| `f2-f3-module-boundary.test.ts` | F2: `src/drafter/` is pure (no I/O, no ambient authority, declarations only at top level, no re-export of an outside name). F3: only `workers/drafter-module-worker.ts` imports it, by one allowlist-guarded dynamic import taking the two entry points. |
+| `f2-f3-module-boundary.test.ts` | F2: `src/drafter/` is pure (no I/O, no ambient authority, declarations only at top level, no re-export of an outside name). F3: only `src/resolvers/drafter-module-worker.ts` imports it, by one allowlist-guarded dynamic import taking the two entry points. |
 | `f4-clamps.test.ts` | F4: prompt-byte refusal (never truncation), the op-budget clamp, the read allowlist, schema refusal, target visibility on structured facts, prefixed journal lines. |
 | `f-context-read-once.test.ts` | The context clamp reads the module's context once: a getter or a Proxy cannot show validation one value and deliver another; a context that is not plain data is refused (the floor drafts). |
 | `f6-behaviour-preservation.test.ts` | F6: the shipped module drafts every corpus compose with no fallback, and every closed outcome is unchanged. |
@@ -29,7 +29,7 @@ drafter is shown changes that golden in the same compose.
   and the lesson renderers), leaving one closed floor that the open module is
   measured against. review_by 2026-10-18.
 - phase-2: remove the duplicated floor assembly from the core remains open; runtime
-  Worker timeout protection is implemented by `workers/drafter-module-worker.ts`.
+  Worker timeout protection is implemented by `src/resolvers/drafter-module-worker.ts`.
 - phase-2: carry `drafter.version` and `fell_back` on the structured attempt
   record (phase 1 carries them on the report and the `[fc-drafter]` journal line;
   the attempt-record writer sits in the post-assembly region F5(a) keeps

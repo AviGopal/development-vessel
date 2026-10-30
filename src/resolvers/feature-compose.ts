@@ -7022,7 +7022,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
 //
 // What the drafter is SHOWN is assembled by an open, pure module (src/drafter/). Everything that gates an edit, a
 // write or a verdict stays here. The module's two entry points run in a terminable Worker, and the one dynamic import
-// of src/drafter/ is in workers/drafter-module-worker.ts. This file's own assembly (THE FLOOR: the grounding, feedback and lessons built
+// of src/drafter/ is in src/resolvers/drafter-module-worker.ts. This file's own assembly (THE FLOOR: the grounding, feedback and lessons built
 // above that call, unchanged) has run and every fact has been read:
 //   - the facts it gets are the values the floor computed or read, deep-frozen (targets, region, line hint, the
 //     listing and every file text the grounding read, the own check, the lineage lessons, the lesson recall);
@@ -7080,7 +7080,7 @@ type DrafterWorkerFactory = (url: URL) => Worker;
  * created from the closed variant choice; the Worker independently checks the same id before constructing an import. */
 function invokeDrafterWorker(variant: string, entry: DrafterEntry, facts: unknown, timeoutMs = DRAFTER_WORKER_TIMEOUT_MS, factory: DrafterWorkerFactory = (url) => new Worker(url)): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const worker = factory(new URL("../../workers/drafter-module-worker.ts", import.meta.url));
+    const worker = factory(new URL("./drafter-module-worker.ts", import.meta.url));
     let settled = false;
     const finish = (err?: Error, value?: unknown): void => {
       if (settled) return;

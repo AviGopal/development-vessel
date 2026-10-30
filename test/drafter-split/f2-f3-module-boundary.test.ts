@@ -7,7 +7,7 @@
 //     setInterval, setImmediate, queueMicrotask, Worker, WebAssembly, import.meta, a dynamic import(), any __*ForTests;
 //   - has only declarations at top level (no call or `new` runs when the module loads);
 //   - re-exports nothing from outside src/drafter/ (a lane-editable re-export could be swapped for a loosened copy).
-// F3, the edge: the only runtime importer of src/drafter/ is the isolated workers/drafter-module-worker.ts, by ONE
+// F3, the edge: the only runtime importer of src/drafter/ is the isolated src/resolvers/drafter-module-worker.ts, by ONE
 //   dynamic import() inside loadDrafterModule that destructures exactly the two entry points;
 //   no src/judge file, retry-evidence.ts or any other file imports it, statically, dynamically or type-only.
 //   The site's specifier may be computed in ONE form only (drafting-as-activities 1.2, USER RULING 2026-10-22 "One
@@ -23,11 +23,11 @@ import ts from "typescript";
 const ROOT = join(import.meta.dir, "..", "..");
 const DRAFTER_DIR = "src/drafter/";
 const CORE = "src/resolvers/feature-compose.ts";
-const WORKER = "workers/drafter-module-worker.ts";
+const WORKER = "src/resolvers/drafter-module-worker.ts";
 const ALLOWED_OUTSIDE = ["src/control-bytes.ts", "src/resolvers/region-probe.ts", "src/cross-file-symbols.ts"];
 const FORBIDDEN_NAMES = new Set(["fetch", "Bun", "process", "globalThis", "require", "eval", "Function", "console", "Date", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Worker", "WebAssembly", "XMLHttpRequest", "WebSocket"]);
 const ENTRY_SYMBOLS = ["assembleDrafterContext", "planDrafterReads"];
-const VARIANT_PREFIX = "../src/drafter/variants/";
+const VARIANT_PREFIX = "../drafter/variants/";
 const VARIANT_SUFFIX = "/index.js";
 const VARIANT_GUARD = "drafterVariantAllowlisted";
 const VARIANT_ID_SOURCE = "/^drafter-v[0-9]+[a-z0-9-]*$/";
@@ -232,7 +232,7 @@ describe("F2: every src/drafter/ file is pure", () => {
 });
 
 describe("F3: only the isolated runtime Worker imports src/drafter/", () => {
-  const files = [...listTs("src/").filter((r) => !r.startsWith(DRAFTER_DIR)).map((rel) => ({ rel, text: read(rel) })), { rel: WORKER, text: readFileSync(join(ROOT, WORKER), "utf8") }];
+  const files = listTs("src/").filter((r) => !r.startsWith(DRAFTER_DIR)).map((rel) => ({ rel, text: read(rel) }));
   it("the live tree holds the pin", () => { expect(edgeOffenders(files)).toEqual([]); });
   it("retry-evidence.ts and every src/judge/ file import nothing from src/drafter/", () => {
     for (const f of files.filter((x) => x.rel === "src/resolvers/retry-evidence.ts" || x.rel.startsWith("src/judge/"))) expect({ file: f.rel, edges: drafterEdges(f.rel, f.text) }).toEqual({ file: f.rel, edges: [] });
@@ -275,10 +275,10 @@ describe("F2 over src/drafter/variants/: a variant is held to the same purity", 
 });
 
 describe("F3 over src/drafter/variants/: Worker import is computed only through the allowlist guard", () => {
-  const files = [...listTs("src/").filter((r) => !r.startsWith(DRAFTER_DIR)).map((rel) => ({ rel, text: read(rel) })), { rel: WORKER, text: readFileSync(join(ROOT, WORKER), "utf8") }];
+  const files = listTs("src/").filter((r) => !r.startsWith(DRAFTER_DIR)).map((rel) => ({ rel, text: read(rel) }));
   const worker = files.find((f) => f.rel === WORKER)!;
   const swap = (rel: string, text: string) => files.map((f) => (f.rel === rel ? { rel, text } : f));
-  const SITE = "`../src/drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`";
+  const SITE = "`../drafter/variants/${drafterVariantAllowlisted(variant)}/index.js`";
   const mutate = (from: string, to: string): string => { const t = worker.text.replace(from, to); expect(t).not.toBe(worker.text); return t; };
   it("the live tree's single Worker import is guarded and takes exactly the two entry points", () => {
     const edges = drafterEdges(WORKER, worker.text);
@@ -287,7 +287,7 @@ describe("F3 over src/drafter/variants/: Worker import is computed only through 
     expect(variantGuardOffenders(WORKER, worker.text)).toEqual([]);
   });
   it("MUTANT a computed path outside the prefix is red", () => {
-    expect(edgeOffenders(swap(WORKER, mutate("`../src/drafter/variants/${", "`../resolvers/${"))).join("; ")).toMatch(/non-literal specifier/);
+    expect(edgeOffenders(swap(WORKER, mutate("`../drafter/variants/${", "`../resolvers/${"))).join("; ")).toMatch(/non-literal specifier/);
   });
   it("MUTANT a computed suffix that climbs out of the variant directory is red", () => {
     expect(edgeOffenders(swap(WORKER, mutate("(variant)}/index.js`", "(variant)}/../../resolvers/x.js`"))).join("; ")).toMatch(/non-literal specifier/);
@@ -302,7 +302,7 @@ describe("F3 over src/drafter/variants/: Worker import is computed only through 
     expect(edgeOffenders(swap(WORKER, mutate("function drafterVariantAllowlisted(id: string): string {", "function drafterVariantAllowlistedX(id: string): string {"))).join("; ")).toMatch(/0 top-level declaration\(s\) of drafterVariantAllowlisted/);
   });
   it("MUTANT the conditional's literal branch pointing outside src/drafter/ is red", () => {
-    expect(edgeOffenders(swap(WORKER, mutate('variant === "drafter-v1" ? "../src/drafter/index.js" :', 'variant === "drafter-v1" ? "../resolvers/x.js" :'))).join("; ")).toMatch(/non-literal specifier/);
+    expect(edgeOffenders(swap(WORKER, mutate('variant === "drafter-v1" ? "../drafter/index.js" :', 'variant === "drafter-v1" ? "../resolvers/x.js" :'))).join("; ")).toMatch(/non-literal specifier/);
   });
   it("MUTANT a third destructured symbol on the computed site is red (VERSION visible)", () => {
     expect(edgeOffenders(swap(WORKER, mutate("const { planDrafterReads, assembleDrafterContext } = await import(", "const { planDrafterReads, assembleDrafterContext, VERSION } = await import("))).join("; ")).toMatch(/VERSION/);

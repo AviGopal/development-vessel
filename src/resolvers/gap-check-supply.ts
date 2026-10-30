@@ -683,11 +683,16 @@ export function noControlRefusal(controlTitles: readonly string[]): string | nul
   return controlTitles.length === 0 ? CHECK_NO_CONTROL_REASON : null;
 }
 
+/** A `test("<title>"` / `it(…)` call's quoted title (group 2, as written), and that title decoded as a run name. */
+const TEST_TITLE_CALL_RE = /\b(?:test|it)(?:\.only|\.failing)?\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
+const decodedTitle = (written: string): string => written.replace(/\\(.)/g, "$1");
+
 /** The source of the call `test("<title>", …)` / `it(…)` from its opening parenthesis to the matching close (strings skipped). */
 function testBody(src: string, title: string): string | null {
-  const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const m = new RegExp(`\\b(?:test|it)(?:\\.only|\\.failing)?\\s*\\(\\s*(["'\`])${esc}\\1`).exec(src);
-  if (!m) return null;
+  // Matched on the DECODED title, as declaredTestTitles reads it: a title written with an escape (`'the widget\'s'`)
+  // is found as well.
+  const m = [...src.matchAll(TEST_TITLE_CALL_RE)].find((c) => decodedTitle(c[2] ?? "") === title);
+  if (!m || m.index === undefined) return null;
   let i = src.indexOf("(", m.index), depth = 0, q: string | null = null;
   for (let j = i; j < src.length; j++) {
     const c = src[j]!;
@@ -737,8 +742,8 @@ export function existenceOnlyCheck(src: string, titles: readonly string[]): { ex
 /** String-literal test titles declared in a test file (template titles with placeholders are not runnable names). */
 export function declaredTestTitles(src: string): string[] {
   const titles: string[] = [];
-  for (const m of src.matchAll(/\b(?:test|it)(?:\.only|\.failing)?\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
-    const t = (m[2] ?? "").replace(/\\(.)/g, "$1");
+  for (const m of src.matchAll(TEST_TITLE_CALL_RE)) {
+    const t = decodedTitle(m[2] ?? "");
     if (!t.trim() || (m[1] === "`" && t.includes("${"))) continue;
     if (testTitleInSource(src, t) && !titles.includes(t)) titles.push(t);
   }

@@ -657,6 +657,13 @@ export function testTitleSegmentOffset(src: string, segment: string): number {
   if (!seg) return 0;
   const at = src.indexOf(seg);
   if (at >= 0) return at;
+  // A run name is DECODED (bun's reporter, declaredTestTitles), but a quoted title is written with its escapes:
+  // `it('the widget\'s total', …)`. The spelling each quote kind would give it counts as written too.
+  for (const q of ["'", '"', "`"]) {
+    const written = seg.replace(/\\/g, "\\\\").split(q).join(`\\${q}`);
+    const e = written === seg ? -1 : src.indexOf(written);
+    if (e >= 0) return e;
+  }
   for (const m of src.matchAll(TEMPLATE_LITERAL_RE)) {
     const body = (m[1] ?? "").trim();
     if (!PLACEHOLDER_RE.test(body)) continue;

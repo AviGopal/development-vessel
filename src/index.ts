@@ -340,6 +340,7 @@ async function developmentVesselDrain(sig: string): Promise<void> {
 const deadline = Date.now() + DEV_VESSEL_DRAIN_MS;
   const markerDir = "/workspace/authoring-inflight";
   const freshMs = Number(process.env["DEV_VESSEL_DRAIN_FRESH_MS"] ?? 600000);
+  let abandoned = false;
   try {
     const { readdir, stat } = await import("node:fs/promises");
     for (;;) {
@@ -366,6 +367,7 @@ const deadline = Date.now() + DEV_VESSEL_DRAIN_MS;
       } catch { /* lease unreadable: fall through to the request/marker signals below */ }
       if (cutoversLive === 0) {
         console.log(`[development-vessel] ${sig}: drained (0 cutovers in progress; ${inFlightRequests} request(s) and ${live} authoring run(s) in draft/verify are parked or re-picked, not waited for)`);
+        abandoned = true;
         break;
       }
       console.log(`[development-vessel] ${sig}: ${cutoversLive} cutover(s) in progress - waiting for push`);
@@ -395,6 +397,21 @@ const deadline = Date.now() + DEV_VESSEL_DRAIN_MS;
       await new Promise((r) => setTimeout(r, 1000));
     }
   } catch (e) { console.warn(`[development-vessel] ${sig}: drain error (exiting anyway): ${(e as Error).message}`); }
+  // AN ABANDONED COMPOSE GIVES BACK ITS LANDING LEASE. Exiting skips its exit's release, so the gap stayed leased to the
+  // dead attempt until the TTL and this node's next acquire was refused held_by_prior_attempt (2026-10-30). Only on the
+  // no-cutover path: a cutover mid-push keeps its lease. Best-effort and bounded: the exit never waits on it.
+  if (abandoned) {
+    const LEASE_RELEASE_MS = 5_000;
+    try {
+      const held = await Promise.race([
+        import("./resolvers/feature-compose.js").then((m) => m.releaseAbandonedLandingLeases()),
+        new Promise<null>((r) => setTimeout(() => r(null), LEASE_RELEASE_MS)),
+      ]);
+      console.log(held === null
+        ? `[development-vessel] ${sig}: landing-lease release did not finish in ${LEASE_RELEASE_MS}ms (those leases lapse at their TTL)`
+        : `[development-vessel] ${sig}: released the landing lease(s) of ${held} abandoned compose(s)`);
+    } catch (e) { console.warn(`[development-vessel] ${sig}: landing-lease release failed (they lapse at their TTL): ${(e as Error).message}`); }
+  }
   try { server.stop(true); } catch { /* best-effort */ }
   process.exit(0);
 }

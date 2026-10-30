@@ -6740,6 +6740,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage, held_by: v.held_by ?? null, until: v.until ?? null, landing_lease_refusals: landingLeaseRefusalCounts(), error: unknown ? `gap ${landingLeaseGap}: the landing lease could not be read or taken at the gap-store holder (${v.reason ?? "unknown"}); abstaining` : `gap ${landingLeaseGap}: the landing lease is held by ${v.held_by} until ${v.until ?? "?"}` } };
     }
     landingLease = { gapId: landingLeaseGap, holder, attempt: slotId };
+    inFlightLandingLeases.set(slotId, landingLease);
   }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot, armed: composeArmed });
   if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
@@ -6886,6 +6887,23 @@ export function landingVerdictFromCutovers(draftVerdict: string, results: Readon
 }
 
 /**
+ * THE LANDING LEASES OF COMPOSES STILL RUNNING IN THIS PROCESS, by attempt id: set when a compose takes its lease, removed
+ * when its exit settles it (releaseOrKeepLandingLease). A drain that abandons in-flight composes exits the process, so
+ * no compose exit runs and the lease stayed until its TTL: the restarted node's own acquire is a new attempt, refused
+ * held_by_prior_attempt, and the armed gap idled (about 90 min, 2026-10-30).
+ */
+const inFlightLandingLeases = new Map<string, { gapId: string; holder: string; attempt: string }>();
+/**
+ * The drain's release of the leases its abandoned composes hold, through the compose exit's own path with no outcome
+ * (nothing pending for a cutover, so a release). Returns how many were held. Never throws; the caller bounds the wait.
+ */
+export async function releaseAbandonedLandingLeases(): Promise<number> {
+  const held = [...inFlightLandingLeases.values()];
+  await Promise.allSettled(held.map((l) => releaseOrKeepLandingLease(l, null)));
+  return held.length;
+}
+
+/**
  * The compose exit's share of the landing lease. A cutover still pending keeps it, RENEWED here (a stage
  * boundary), so another node stays refused until that cutover's outcome. Otherwise it is released: the
  * cutover already released it on its own outcome (a second release by this holder is a no-op), or the
@@ -6893,6 +6911,7 @@ export function landingVerdictFromCutovers(draftVerdict: string, results: Readon
  */
 export async function releaseOrKeepLandingLease(lease: { gapId: string; holder: string; attempt: string } | null, outcome: ResolverResult | null): Promise<void> {
   if (!lease) return;
+  inFlightLandingLeases.delete(lease.attempt);
   const pending = cutoverPendingIn(outcome);
   try {
     const r = await resolveSubstrateGapLease({ type: "substrateGapLease_write", action: pending ? "renew" : "release", gap_id: lease.gapId, holder: lease.holder, attempt: lease.attempt });

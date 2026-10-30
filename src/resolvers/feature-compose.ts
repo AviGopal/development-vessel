@@ -51,7 +51,7 @@ export async function escalateComposeRefusal(escalate: () => Promise<string>): P
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { seedDeliveryLesson, seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
-import { acquireComposeSlot } from "../compose-slots.js";
+import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
 import { heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
@@ -662,7 +662,7 @@ async function llmEndpointAuthOnce(endpoint: string): Promise<Record<string, str
   if (overlayHopReason(endpoint) !== null) return { Authorization: `ApiKey ${METABOB_API_KEY}` };
   return (await crossNodeKeyHeaders(endpoint)) ?? {};
 }
-async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
+async function llmCall(endpoint: string, prompt: string, model: string, timeoutMs = LLM_CALL_TIMEOUT_MS): Promise<string> {
   const auth = await llmEndpointAuth(endpoint);
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -686,7 +686,7 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
       // ledgered `caller: unknown` ($1.06 of $1.31 on node 1 in the first contained hour).
       caller: 'development-vessel:feature_compose',
     }),
-    signal: AbortSignal.timeout(250_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {
@@ -769,6 +769,17 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
  * rather than spin on a dead one.
  */
 const LLM_RETRY_ROUNDS = 3;
+/**
+ * ONE FAILOVER CALL ENDS WELL INSIDE THE COMPOSE CEILING. The rounds above had no overall bound: in a repair call one
+ * endpoint took about 2 min per failing attempt and ran again every round, and with the compose's other calls the
+ * attempt outlived the ceiling (one repair call hung past 15 min, 2026-10-30) and was killed by a lossy restart. The
+ * deadline is a third of the ceiling pull-sync reads (the same COMPOSE_CEILING_MS, same default): it admits one whole
+ * slow attempt (llmCall's 250 s cap) and the other endpoints' fast failures, and is at most half of pull-sync's
+ * no-progress bound. Each attempt is clipped to what is left; at the deadline the call
+ * throws, so the compose ends through its own exit and releases normally. Fast failures cost the budget nothing.
+ */
+const LLM_FAILOVER_DEADLINE_MS = Math.floor(COMPOSE_CEILING_MS / 3);
+const LLM_CALL_TIMEOUT_MS = 250_000;
 function isRetryableLlmError(e: Error): boolean {
   const m = e.message;
   const status = m.match(/failed with status (\d{3})/)?.[1];
@@ -778,11 +789,15 @@ function isRetryableLlmError(e: Error): boolean {
 }
 export async function llmCallWithFailover(endpoints: string[], prompt: string, model: string): Promise<string> {
   let lastError: Error | null = null;
+  const deadline = Date.now() + LLM_FAILOVER_DEADLINE_MS;
+  const pastDeadline = () => new Error(`llm failover deadline: no endpoint answered within ${LLM_FAILOVER_DEADLINE_MS}ms (a third of the compose ceiling) — last: ${lastError?.message.slice(0, 200) ?? "none"}`);
   for (let round = 0; round < LLM_RETRY_ROUNDS; round++) {
     let anyRetryable = false;
     for (const endpoint of endpoints) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw pastDeadline();
       try {
-        return await llmCall(endpoint, prompt, model);
+        return await llmCall(endpoint, prompt, model, Math.min(LLM_CALL_TIMEOUT_MS, left));
       } catch (e) {
         const err = e instanceof Error ? e : new Error(String(e));
         lastError = err;
@@ -792,7 +807,7 @@ export async function llmCallWithFailover(endpoints: string[], prompt: string, m
     // Every lane failed for a NON-transient reason — another round cannot help.
     if (!anyRetryable) break;
     if (round < LLM_RETRY_ROUNDS - 1) {
-      const backoffMs = 2000 * Math.pow(2, round);
+      const backoffMs = Math.min(2000 * Math.pow(2, round), Math.max(0, deadline - Date.now()));
       console.log(`[llm-failover] all ${endpoints.length} endpoint(s) failed transiently (round ${round + 1}/${LLM_RETRY_ROUNDS}); retrying in ${backoffMs}ms — last: ${lastError?.message.slice(0, 160)}`);
       await new Promise((r) => setTimeout(r, backoffMs));
     }

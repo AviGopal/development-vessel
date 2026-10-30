@@ -10,7 +10,7 @@
 //   [MUST-FAIL] such a row is re-judged on the next tick (well inside the backoff) and arms on the missed red title.
 //   [MUST-FAIL] the re-judged ledger no longer tells the next attempt the check "already PASSES at HEAD".
 //   [CONTROL]   a green_at_head whose every new title was judged stays settled: no re-judge, no new goal inside backoff.
-//   [CONTROL]   arm_refused and existence_only rows are left as they were.
+//   [CONTROL]   arm_refused and existence_only rows whose every title and input was judged are left as they were.
 // End to end on the harness of gap-check-supply-no-control.test.ts: the birth judge's test_suite is the REAL resolveTestSuite.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -214,10 +214,14 @@ describe("settled rows the re-judge does not touch", () => {
     expect(after).toEqual(before);
   });
 
-  it("[CONTROL] arm_refused and existence_only rows are left as they were", async () => {
+  it("[CONTROL] arm_refused and existence_only rows whose every title and input was judged are left as they were", async () => {
+    // (Since gap an-arm-refused-row-is-never-re-judged-after-the-cause-of-the-refusal-is-corrected: a settled row that
+    // never judged a landed title, or records no judged_inputs, IS judged again; this control holds the unchanged case.)
     for (const state of ["arm_refused", "existence_only"]) {
       const id = await dispatchAndLand(`rj-${state}`, checkOf(RED, GREEN));
-      await setLedger(id, { state, judged_titles: [GREEN_TITLE], reason: `${state}: an earlier judgement` });
+      const m = metaOf(await storeRow(id));
+      const judged_inputs = { region: m["region"] === undefined || m["region"] === null ? "" : String(m["region"]).trim(), edit_site: String(m["edit_site"] ?? "").trim(), check_sha256: new Bun.CryptoHasher("sha256").update(checkOf(RED, GREEN)).digest("hex") };
+      await setLedger(id, { state, judged_titles: [RED_TITLE, GREEN_TITLE], judged_inputs, reason: `${state}: an earlier judgement` });
       const before = ledgerOf(await storeRow(id));
       await tick(soon());
       expect(ledgerOf(await storeRow(id))).toEqual(before);

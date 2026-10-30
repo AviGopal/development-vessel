@@ -150,6 +150,8 @@ type Ledger = {
   non_attempt_streak?: number;
   /** The new titles the arm step judged on the last attempt (kept so the next attempt can be told which check did not reproduce). */
   judged_titles?: string[];
+  /** What else that judgement read (judgedInputsOf): a settled row whose inputs differ from these is judged again. */
+  judged_inputs?: JudgedInputs;
   /** Set on an armed record when the missing-export guard could not run (typescript unavailable): it decided nothing. */
   guard_decided_nothing?: string;
   /** The edit-site mutation gate's reading at arm time (EDIT-SITE MUTATION GATE): mutants run, how many changed the red. */
@@ -162,6 +164,15 @@ export const SEND_PENDING = "send_pending";
 export const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
 /** How many arm entries a ledger keeps (check_supply.arms); the oldest is dropped past it. */
 const ARM_HISTORY_MAX = 5;
+/** The inputs an arm judgement reads besides its titles: the row's region and edit_site, and the landed check's text. */
+type JudgedInputs = { region: string; edit_site: string; check_sha256: string };
+const judgedInputsOf = (meta: Row, checkSrc: string): JudgedInputs => ({
+  region: regionOf(meta),
+  edit_site: String(meta["edit_site"] ?? "").trim(),
+  check_sha256: createHash("sha256").update(checkSrc).digest("hex"),
+});
+const sameJudgedInputs = (a: JudgedInputs | undefined, b: JudgedInputs): boolean =>
+  !!a && typeof a === "object" && a.region === b.region && a.edit_site === b.edit_site && a.check_sha256 === b.check_sha256;
 const settledHistory = (l: Ledger): Row[] => {
   const prior = Array.isArray(l.history) ? l.history.slice(-4) : [];
   if (l.state === "dispatch_failed" || l.state === "dispatch_lost")
@@ -1817,27 +1828,31 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
     // A failed or lost goal's test may still land late: its titles arm the gap all the same.
-    // A GREEN AT HEAD IS RE-JUDGED WHEN IT NEVER READ A TITLE ITS LANDED CHECK DECLARES. Its judged_titles are the
-    // titles the arm step read then; a reader since fixed (an escaped title was once dropped) can declare more today.
-    // Such a row waited out the attempt backoff and was then sent a new goal told the check "already PASSES", whose
-    // baseline subtracted the landed must-fail for good. It is judged again now, on this path, against its own baseline.
-    const rejudge = ledger.state === "green_at_head";
-    if (!(rejudge || ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
+    // A SETTLED JUDGEMENT (green_at_head, arm_refused, existence_only) IS TAKEN AGAIN WHEN WHAT IT READ HAS CHANGED: a
+    // landed title it never judged (a reader since fixed: an escaped title was once dropped), or a different row region
+    // or edit_site, or a different landed check, than its judged_inputs record. Settled, such a row waited out the
+    // attempt backoff and was then sent a new goal whose baseline subtracted the landed check for good (a region
+    // corrected or cleared after an arm refusal changed nothing). It is judged again now, on this path, against its own
+    // baseline. A judgement written before judged_inputs existed reads as changed, once.
+    const settled = JUDGED_NOT_ARMED.has(String(ledger.state ?? ""));
+    if (!(settled || ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
     // LANDED, NOT PRESENT: the check is read from the clone's origin/dev (landedCheckSource). A file only in the work
     // tree (a refused cutover's leftover, or a landing still on its way) arms nothing and writes nothing: if it lands,
     // a later tick arms it.
     const landed = landedCheckSource(ledger.vessel, ledger.test_file, landedRefs);
     if (landed.state !== "landed") {
-      if (!rejudge && existsSync(join(clonesRoot(), ledger.vessel, ledger.test_file))) notArmed.push({ id, reason: `${CHECK_NOT_LANDED}: ${ledger.test_file} is in the clone's work tree but not at origin/dev${landed.state === "unreadable" ? " (origin/dev unreadable)" : ""}` });
+      if (!settled && existsSync(join(clonesRoot(), ledger.vessel, ledger.test_file))) notArmed.push({ id, reason: `${CHECK_NOT_LANDED}: ${ledger.test_file} is in the clone's work tree but not at origin/dev${landed.state === "unreadable" ? " (origin/dev unreadable)" : ""}` });
       continue;
     }
     const src = landed.src;
     const baseline = Array.isArray(ledger.baseline_titles) ? ledger.baseline_titles : [];
     const titles = declaredTestTitles(src).filter((t) => !baseline.includes(t)).slice(0, 20);
     if (titles.length === 0) continue; // nothing appended yet: still waiting on the goal
-    // Every new title was judged: a settled green at head, left to the backoff and the next goal.
+    // Every new title judged, on the same inputs: a settled judgement, left to the backoff and the next goal.
+    const inputs = judgedInputsOf(meta, src);
     const judgedBefore = Array.isArray(ledger.judged_titles) ? ledger.judged_titles : [];
-    if (rejudge && titles.every((t) => judgedBefore.includes(t))) continue;
+    if (settled && titles.every((t) => judgedBefore.includes(t)) && sameJudgedInputs(ledger.judged_inputs, inputs)) continue;
+    const judgedNow = { judged_titles: titles, judged_inputs: inputs };
     // The budget bounds the checks run for this tick: here, the ones this node runs; on a node that forwards its gap
     // store, the ones it hands to the holder (counted at the hand-off below), which bounds the holder's load. Waiting on
     // or reading back the holder's verdict spends nothing (a present's report read, below, runs the check once more at
@@ -1856,7 +1871,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (why) {
       refused += 1;
       notArmed.push({ id, reason: why });
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: why } });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: why, ...judgedNow } });
       continue;
     }
     // F-ARM: a check that reads a name its module does not export is red for the invented name on every tree, never
@@ -1871,14 +1886,14 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       refused += 1;
       notArmed.push({ id, reason });
       console.warn(`[gap-check-supply] ${id}: ${reason} — not armed`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason, judged_titles: titles } });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason, ...judgedNow } });
       continue;
     }
     if (missing) {
       refused += 1;
       notArmed.push({ id, reason: missing.reason });
       console.warn(`[gap-check-supply] ${id}: ${missing.reason.slice(0, 240)} — not armed`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: missing.reason, judged_titles: titles } });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: missing.reason, ...judgedNow } });
       continue;
     }
     // THE CHECK'S CALLS REACH THE REGION (checkMissesRegionRefusal): static, before anything runs, like the export guard.
@@ -1894,14 +1909,14 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       notArmed.push({ id, reason: echo.reason });
       console.warn(`[gap-check-supply] ${id}: ${echo.reason.slice(0, 240)} — not armed`);
       const echoLessons = withArmRefusalLesson(meta, { reason: echo.reason, testFile: ledger.test_file, checkSrc: src, at: nowIso });
-      if (!pointer.dry_run) await writeMeta(row, { ...(echoLessons ? { failure_lessons: echoLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: echo.reason, judged_titles: titles } });
+      if (!pointer.dry_run) await writeMeta(row, { ...(echoLessons ? { failure_lessons: echoLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: echo.reason, ...judgedNow } });
       continue;
     }
     if (misses) {
       refused += 1;
       notArmed.push({ id, reason: misses.reason });
       console.warn(`[gap-check-supply] ${id}: ${misses.reason.slice(0, 240)} — not armed`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: misses.reason, judged_titles: titles } });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: misses.reason, ...judgedNow } });
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };
@@ -2010,7 +2025,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (!unknown) refused += 1;
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
       if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
-      const judged = unknown ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD", ...(firstFailure ? { first_failure: firstFailure } : {}), ...mutationRecord };
+      const judged = unknown ? {} : { ...judgedNow, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD", ...(firstFailure ? { first_failure: firstFailure } : {}), ...mutationRecord };
       // A handed-off check judged not to arm (green, or red for the wrong reason) is taken back off the row, so it reads
       // unarmed and is asked again, whichever node judges it: the holder's own tick may reach a handed-off row first.
       const handedOff = !unknown && meta["predicate_birth_key"] === class2PredicateKey({ ...meta, evidence_resolve });
@@ -2037,13 +2052,13 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, control_titles: controlTitles, ...attribution, arm: armEntry, arms, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(rejudge ? { reason: "", judged_titles: titles } : {}), ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
+      check_supply: { ...armLedger, state: "armed", armed_at: nowIso, control_titles: controlTitles, ...attribution, arm: armEntry, arms, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0, ...(settled ? { reason: "", judged_titles: titles } : {}), ...(firstFailure ? { first_failure: firstFailure } : {}), ...(unguarded ? { guard_decided_nothing: unguarded } : {}), ...mutationRecord },
     }, stamp ? { birthVerdict: stamp } : undefined); // the verdict minted by the run above (the seam honours nothing else), or the holder's own
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;
       refused += 1;
       notArmed.push({ id, reason });
-      await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason } });
+      await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason, ...judgedNow } });
     } else {
       armed.push(id);
       countControl();
@@ -2139,7 +2154,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       let checkSrc = "";
       try { checkSrc = readFileSync(join(clonesRoot(), ledger.vessel, ledger.test_file), "utf-8"); } catch { checkSrc = ""; }
       const regateLessons = withArmRefusalLesson(meta, { reason: g.reason, testFile: ledger.test_file, checkSrc, firstFailure: firstFailureOf(baseline["red_reason"]), at: nowIso });
-      await writeMeta(row, { evidence_resolve: null, ...(regateLessons ? { failure_lessons: regateLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: g.reason, judged_titles: titles, mutation_gate } });
+      await writeMeta(row, { evidence_resolve: null, ...(regateLessons ? { failure_lessons: regateLessons } : {}), check_supply: { ...ledger, state: "arm_refused", reason: g.reason, judged_titles: titles, judged_inputs: judgedInputsOf(meta, checkSrc), mutation_gate } });
     } else {
       await writeMeta(row, { check_supply: { ...ledger, mutation_gate } });
     }

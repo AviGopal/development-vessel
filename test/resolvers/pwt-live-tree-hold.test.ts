@@ -35,6 +35,8 @@ const SUB = "src/resolvers/existing.ts";
 
 const originalFetch = globalThis.fetch;
 const priorKey = process.env["METABOB_API_KEY"];
+// pwt reads the gap store for its admission: this file's own (empty) store, never a holder over the network.
+const priorGapStore = process.env["GAP_STORE_ENDPOINT"];
 let base: string, live: string, compose: string, ws: string, poolFile: string;
 let calls: { tools: number; llm: number; other: number; offOrigin: string[] };
 
@@ -114,6 +116,7 @@ beforeEach(() => {
   setZones({ supers: [], clones: join(base, "no-clones"), runtime: live, compose });
   resetHoldLog();
   process.env["METABOB_API_KEY"] = NODE_KEY;
+  delete process.env["GAP_STORE_ENDPOINT"];
   calls = { tools: 0, llm: 0, other: 0, offOrigin: [] };
   globalThis.fetch = stubFetch([
     JSON.stringify({ action: "call_tool", tool: "code_search", args: { path: join(live, "demo-vessel", SUB), pattern: "return 1" } }),
@@ -126,7 +129,10 @@ afterEach(() => {
   setZones(null);
   try { rmSync(base, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
-afterAll(() => { if (priorKey === undefined) delete process.env["METABOB_API_KEY"]; else process.env["METABOB_API_KEY"] = priorKey; });
+afterAll(() => {
+  if (priorKey === undefined) delete process.env["METABOB_API_KEY"]; else process.env["METABOB_API_KEY"] = priorKey;
+  if (priorGapStore === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = priorGapStore;
+});
 
 function expectHeldUntouched(r: { shape: string; body: unknown }, targetSha: string): void {
   const b = r.body as Record<string, unknown>;

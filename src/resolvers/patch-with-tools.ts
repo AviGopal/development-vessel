@@ -36,7 +36,7 @@ import { resolveVesselMitosisCutover, asSemanticDissentStamp, type SemanticDisse
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
 import { readOperatorHold, classifyVesselsRoot } from "../lib/operator-hold.js";
-import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -680,6 +680,64 @@ export async function rollbackUnverified(failures: readonly RestoreVerdict[], ta
   });
 }
 
+/** The admission refusal for this run's gap, or null when admitted (see the ADMISSION block in resolvePatchWithTools). */
+async function pwtAdmissionRefusal(pointer: PatchWithToolsPointer): Promise<ResolverResult | null> {
+  const gapId = typeof pointer.gap_id === "string" ? pointer.gap_id.trim() : "";
+  if (!gapId) return null;
+  const csa = await import("./check-supply-admission.js");
+  const { composeEligibilitySkipReason, heldLineageAncestor } = await import("../judge/gap-eligibility.js");
+  const { composeAdmission, renderAdmissionRefusal } = await import("./compose-admission-core.js");
+  const readRows = async (id: string): Promise<Array<Record<string, unknown>> | null> => {
+    const rows = ((await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps;
+    return Array.isArray(rows) ? rows : null;
+  };
+  const supplyMarker = csa.checkSupplyMarkerOf(pointer);
+  let rows: Array<Record<string, unknown>> | null = null;
+  if (supplyMarker) rows = await csa.readWithin(() => readRows(gapId), csa.checkSupplyLedgerWait().read_timeout_ms);
+  else { try { rows = await readRows(gapId); } catch { rows = null; } }
+  const stored = rows?.find((r) => String(r.id) === gapId);
+  const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
+  let lineageHeld = false;
+  if (stored && !held) {
+    const ancestorRows = new Map<string, Array<Record<string, unknown>> | null>();
+    for (let pass = 0; pass < 32; pass++) {
+      const missing: string[] = [];
+      heldLineageAncestor(stored, (id) => { if (ancestorRows.has(id)) return ancestorRows.get(id)!; missing.push(id); return []; });
+      if (missing.length === 0) break;
+      for (const id of missing) {
+        let got: Array<Record<string, unknown>> | null = null;
+        try { got = await readRows(id); } catch { got = null; }
+        ancestorRows.set(id, got === null ? null : got.filter((r) => String(r.id) === id));
+      }
+    }
+    lineageHeld = heldLineageAncestor(stored, (id) => ancestorRows.has(id) ? ancestorRows.get(id)! : null) !== null;
+  }
+  let why: string | null = null;
+  let supplyVerdict: { admit: boolean; why: string | null } | null = null;
+  if (stored && !held && !lineageHeld) {
+    why = composeEligibilitySkipReason(stored);
+    if (why === "unarmed" && supplyMarker) {
+      const v = csa.checkSupplyAdmission(stored, supplyMarker, gapId, (pointer as { authoring_execution_id?: unknown }).authoring_execution_id, why);
+      supplyVerdict = v.admit ? { admit: true, why: null } : { admit: false, why: v.why };
+    }
+  }
+  const site = (m: unknown): string | null => { const e = (m as { edit_site?: unknown } | undefined)?.edit_site; return typeof e === "string" && e.trim() ? e.trim() : null; };
+  const input: import("./compose-admission-core.js").ComposeAdmissionInput = {
+    schema: 1, entry: "composeAdmission", gap_id: gapId, lane: (pointer as { directed?: unknown }).directed === true ? "directed" : "undirected", land: true,
+    supply_marker: !!supplyMarker, stored: rows === null ? "unreadable" : stored ? "present" : "absent", operator_hold: held || lineageHeld,
+    why, supply_verdict: supplyVerdict, edit_site: site(stored?.classification_metadata), scope: null,
+    scope_reason: (await import("../judge/routing-capture.js")).SCOPE_NOT_CONSULTED,
+    localization: (stored as { localization?: unknown } | undefined)?.localization ?? null,
+  };
+  const admission = composeAdmission(input);
+  if (admission.admit || !admission.refusal) return null;
+  const r = renderAdmissionRefusal(input, admission.refusal);
+  console.log(`[patch-with-tools] NOT started: ${r.log}`);
+  return structuredError(`admission refused: gap ${gapId} ${admission.refusal.stage}`, {
+    ...r.body, resolver: "patch_with_tools", gap_id: gapId, target_file: pointer.target_file, ...(why ? { why } : {}),
+  });
+}
+
 /** The operator hold on this resolver's live-tree writes, and the scope its record must carry. */
 export const LIVE_TREE_HOLD_ID = "pwt-live-tree-writes";
 export const LIVE_TREE_HOLD_SCOPE = "patch_with_tools:live_tree_writes";
@@ -708,6 +766,16 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         });
       }
     }
+  }
+  // ADMISSION: WHAT feature_compose REFUSES, THIS REFUSES. Every compose refusal used to escalate here and land
+  // through the cutover with no admission at all (an unarmed gap's test landed this way, red for the wrong reason, and
+  // was reverted). The decision is compose-admission-core's composeAdmission, over the evidence feature_compose gathers
+  // for it (the stored row, its hold and lineage hold, composeEligibilitySkipReason, the check-supply ledger verdict),
+  // read the same way. This resolver always lands, so land is true. An id the store does not hold (the pwt-… ids minted
+  // below) is admitted, exactly as feature_compose admits one. Checked before any write.
+  {
+    const refused = await pwtAdmissionRefusal(pointer);
+    if (refused) return refused;
   }
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
   const model = pointer.model ?? "auto";

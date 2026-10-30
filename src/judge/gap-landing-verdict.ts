@@ -2317,6 +2317,8 @@ export interface PwtEscalationDeps {
   persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
   /** Whether the hold a pwt_escalation_held stamp names still reads held (lib/operator-hold.ts readOperatorHold). */
   holdStillHeld: (holdId: string) => boolean;
+  /** The isolated compose worktree the escalation edits (patch-with-tools acquirePwtComposeRoot); null: none could be made. */
+  isolatePwt?: (targetFile: string, id: string) => Promise<{ vesselsRoot: string; release: () => Promise<void> } | null>;
 }
 export const defaultPwtEscalationDeps = (cb: { escalate?: Escalate } = {}): PwtEscalationDeps => ({
   resolvePwt: async (p) => (await import("../resolvers/patch-with-tools.js")).resolvePatchWithTools(p as never),
@@ -2326,6 +2328,7 @@ export const defaultPwtEscalationDeps = (cb: { escalate?: Escalate } = {}): PwtE
   closeLandedGap,
   persistGapMeta: persistGapMetaPatch,
   holdStillHeld: (holdId) => readOperatorHold(holdId).held,
+  isolatePwt: async (targetFile, id) => (await import("../resolvers/patch-with-tools.js")).acquirePwtComposeRoot(targetFile, id),
 });
 export async function escalateApplyFailureToPwt(
   gap: Record<string, unknown>,
@@ -2346,7 +2349,18 @@ export async function escalateApplyFailureToPwt(
     try { stillHeld = deps.holdStillHeld(priorHoldId); } catch { stillHeld = true; }
     if (stillHeld) console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)} SKIPPED: hold ${priorHoldId} (stamped ${String(priorHold?.at ?? "-")}) still held — grading the compose failure as with no escalation`);
   }
-  if (cb.apply_failed && !_gm.pwt_escalated && !stillHeld) {
+  // THE ESCALATION EDITS AN ISOLATED COMPOSE WORKTREE, NEVER THE RUNTIME TREE. Handed the runtime dir, pwt edited the
+  // running code, so the operator hold on live-tree writes refused every escalation. A worktree at origin/dev is what
+  // the hold's lift names; the cutover pwt calls still owns the runtime write. No worktree: no escalation, the compose
+  // failure is graded as with none, and the one-shot is not consumed.
+  let iso: { vesselsRoot: string; release: () => Promise<void> } | null | undefined;
+  let keepStaged = false;
+  if (cb.apply_failed && !_gm.pwt_escalated && !stillHeld && deps.isolatePwt) {
+    try { iso = await deps.isolatePwt(String(gapEditSite(gap, _gm) ?? ""), `pwt-escalation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`); }
+    catch (e) { console.warn("[gap-to-feature] pwt escalation worktree error: " + (e as Error).message); iso = null; }
+    if (iso === null) console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)} NOT RUN: no isolated compose worktree for ${String(gapEditSite(gap, _gm) ?? "-")} — grading the compose failure as with no escalation`);
+  }
+  if (cb.apply_failed && !_gm.pwt_escalated && !stillHeld && iso !== null) {
     _gm.pwt_escalated = true; // one-shot BEFORE the attempt: a crash/retry can never re-escalate
     escalated = true;
     try {
@@ -2365,9 +2379,12 @@ export async function escalateApplyFailureToPwt(
         proposal_id: gap.id,
         // Explicit, not the resolver's silent `?? "/vessels"` default: the value
         // becomes visible in the trace, which is the point of threading it.
-        vessels_root: process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
+        ...(iso ? { vessels_root: iso.vesselsRoot } : {}),
       });
       const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
+      // A tree pwt staged that the inline cutover did not land (deferred) is the next mitosis tick's input: keep the
+      // worktree that holds it (the compose-workspace janitor sweeps it after its stale window).
+      if ((result as { shape?: unknown } | null)?.shape === "mitosisStaged" && rb.landed !== true) keepStaged = true;
       if (isInfraRefusalBody(rb)) {
         held = true;
         delete _gm.pwt_escalated; // a held refusal is not an attempt: the one-shot is not consumed
@@ -2387,6 +2404,9 @@ export async function escalateApplyFailureToPwt(
       }
     } catch (e) {
       console.warn("[gap-to-feature] pwt escalation error: " + (e as Error).message);
+    } finally {
+      if (keepStaged) console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)}: staged tree not landed inline; worktree kept for the cutover`);
+      else try { await iso?.release(); } catch { /* best-effort: the compose-workspace janitor sweeps a leaked worktree */ }
     }
   }
   if (!_pwtLanded && !held) {

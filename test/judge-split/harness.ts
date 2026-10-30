@@ -285,7 +285,8 @@ function installModuleStandIns(): void {
   mock.module(SPECS.ar, () => ({ ...ORIG.ar, sweepAttempts: async () => ({ drained: null, outcomes_written: 0, settlements_written: 0, lessons_written: 0, errors: [] }) }));
   mock.module(SPECS.sei, () => ({ ...ORIG.sei, applyScopeProposals: async () => ({ applied: [], refused: [], waiting: null }) }));
   mock.module(SPECS.ca, () => ({ ...ORIG.ca, stampEnvironmentBaseline: async () => "pin_skipped", measureClass1: async () => null, stampBaseline: async () => "pin_skipped" }));
-  mock.module(SPECS.pwt, () => ({ ...ORIG.pwt, resolvePatchWithTools: async (p: Row) => { calls.pwt.push(p); return structuredClone(script.pwt); } }));
+  // The escalation's isolated compose worktree is a stand-in too: a scratch dir, nothing to release.
+  mock.module(SPECS.pwt, () => ({ ...ORIG.pwt, resolvePatchWithTools: async (p: Row) => { calls.pwt.push(p); return structuredClone(script.pwt); }, acquirePwtComposeRoot: async () => ({ vesselsRoot: join(SCRATCH, "compose-ws"), release: async () => {} }) }));
 }
 function restoreModuleStandIns(): void {
   for (const k of Object.keys(SPECS) as Array<keyof typeof SPECS>) mock.module(SPECS[k], () => ORIG[k]);

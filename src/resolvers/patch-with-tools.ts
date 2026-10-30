@@ -162,6 +162,28 @@ async function resolveCheckScripts(vesselDir: string): Promise<string[]> {
   return ["typecheck"];
 }
 
+/** The authoring tree the static gate compares a staged tree against. The resolver stages at
+ * `<vessels_root>/<vessel>-mitosis-<stamp>` and authored in `<vessels_root>/<vessel>`, so the base is the staged
+ * tree's sibling, whatever the vessels root is (the runtime dir or an isolated compose worktree). */
+export function evaluatorBaseRoot(mitosisRoot: string, vessel: string): string {
+  return join(dirname(mitosisRoot), vessel);
+}
+
+/** An isolated compose worktree at origin/dev for one run on `targetFile`'s vessel (compose-workspace.ts): its
+ * vessels_root is the workspace directory that holds `<vessel>/`, which lib/operator-hold.ts classifies "compose", so
+ * the live-tree hold does not apply and the running tree is never edited. The caller releases it after the run (the
+ * cutover, called inside the run, owns the runtime write). null when the target names no vessel, the vessel has no
+ * push clone, or the worktree could not be made: the caller does not run pwt on the runtime tree instead. */
+export async function acquirePwtComposeRoot(targetFile: string, id: string): Promise<{ vesselsRoot: string; release: () => Promise<void> } | null> {
+  const derived = deriveVesselFromPath(targetFile);
+  if (!derived) return null;
+  const { acquireComposeWorkspace } = await import("./compose-workspace.js");
+  const ws = await acquireComposeWorkspace([derived.vessel], id);
+  const root = ws.rootFor(derived.vessel);
+  if (!root) { await ws.release(); return null; }
+  return { vesselsRoot: dirname(root), release: () => ws.release() };
+}
+
 async function triggerMitosisTick(a: {
   vessel: string;
   mitosisVersionId: string;
@@ -222,8 +244,7 @@ async function triggerMitosisTick(a: {
     // TS1xxx + clean-base guard). Refuse on regression; DEFER (not refuse) on an
     // inconclusive timeout so the normal mitosis-tick re-evaluates in a quieter window.
     const bunCmd = Bun.which("bun") ?? "/root/.bun/bin/bun";
-    const vesselsRootForEval = dirname(dirname(a.mitosisRoot)); // Fix: find live authoring tree in /vessels, not /vessels/mitosis
-    const baseRootForEval = join(vesselsRootForEval, a.vessel);
+    const baseRootForEval = evaluatorBaseRoot(a.mitosisRoot, a.vessel);
     // Run the vessel's REAL check script (not the ["lint"] default, which is absent in
     // goal-host-vessel and made the gate a silent no-op). Fails closed when neither exists.
     const checkScripts = await resolveCheckScripts(baseRootForEval);

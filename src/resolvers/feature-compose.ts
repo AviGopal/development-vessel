@@ -160,7 +160,7 @@ import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
 import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } from "../shape-vocabulary.js";
-import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
+import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink, readdir as pinReaddir } from "node:fs/promises";
 import { createHash as parkHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { posix as floorPosix } from "node:path";
@@ -5511,6 +5511,111 @@ export function testWritingScopeBlock(input: { write: string[]; readonly: Array<
   }
   return parts.join("\n\n");
 }
+// THE SUITE TESTS THAT PIN THE EDIT SITE (verify_failed with the own check GREEN). Of 20 verify_failed attempts on both
+// nodes in one night, 8 had their own check green and failed in the suite: the draft broke existing tests that import
+// the edit site, assert on the region's output text, or pin its declaration's callers (one asserts the index.ts call
+// text of the region's function). The drafter was shown the site and its own check, never those tests, and a draft that
+// edits them is refused (strayTestEdits). They are shown READ-ONLY, like the own check: the vessel's test files (under
+// test/, tests/ and src/) that import the site module (scope-earn-in.ts testImportsFile), contain a plain-text fragment
+// of the region, or name the region's enclosing declaration (enclosingTopLevelSymbol), each with its import line(s) of
+// the site and the assertion lines that name what it pins. Files are only read, asynchronously: no child process, no
+// test run. Bounded: PIN_TESTS_MAX_FILES files (twice the relocation hint's cap), PIN_TESTS_MAX_LINES lines each, the
+// whole block within one target window (PER_FILE_SLICE); the rest are counted, never dropped silently. Fails open to "".
+const PIN_TESTS_MAX_FILES = 2 * RELOCATION_HINT_MAX_FILES;
+const PIN_TESTS_MAX_LINES = 8;
+const PIN_TEST_DIRS = ["test", "tests", "src"];
+const PIN_TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const PIN_ASSERT_RE = /\bexpect\s*\(|\bassert(?:\.\w+)?\s*\(/;
+export type PinningTests = { block: string; scanned: number; found: string[]; shown: string[] };
+/** The plain-text pieces of a one-line region a test asserting on its output can contain: the contents of its string
+ *  literals (the whole region when it has none), split at template holes `${…}`, edge punctuation trimmed, each at
+ *  least 12 characters (the focus-hint floor). */
+export function regionFragments(region: string): string[] {
+  const r = String(region ?? "").trim();
+  if (!r || r.includes("\n")) return [];
+  const literals = [...r.matchAll(/`([^`]*)`|"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? "");
+  const pieces = (literals.length > 0 ? literals : [r]).flatMap((s) => s.split(/\$\{[^}]*\}/));
+  return [...new Set(pieces.map((s) => s.replace(/^[^A-Za-z0-9_]+|[^A-Za-z0-9_]+$/g, "")).filter((s) => s.length >= 12))];
+}
+/** The existing tests that pin `site` (vessel-relative) under `root`, and the read-only block that shows them. */
+export async function pinningTests(input: { root: string; vessel: string; site: string; siteText: string | null; region: string; exclude: readonly string[] }): Promise<PinningTests> {
+  const site = input.site.replace(/^\/+/, "");
+  const files: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    let ents: import("node:fs").Dirent[];
+    try { ents = await pinReaddir(`${input.root}/${rel}`, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.name.startsWith(".") || e.name === "node_modules") continue;
+      const p = `${rel}/${e.name}`;
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile() && PIN_TEST_FILE_RE.test(e.name)) files.push(p);
+    }
+  };
+  for (const d of PIN_TEST_DIRS) await walk(d);
+  files.sort();
+  const none: PinningTests = { block: "", scanned: files.length, found: [], shown: [] };
+  if (files.length === 0) return none;
+  const { testImportsFile } = await import("./scope-earn-in.js");
+  const text = input.siteText ?? "";
+  const region = input.region.trim();
+  const at = region && !region.includes("\n") && countLiteral(text, region) === 1 ? text.indexOf(region) : -1;
+  const decl = at >= 0 ? enclosingTopLevelSymbol(text, text.slice(0, at).split("\n").length) : null;
+  const word = (names: string[]): RegExp | null => names.length > 0 ? new RegExp(`(?<![\\w$])(?:${names.map((n) => n.replace(/\$/g, "\\$")).join("|")})(?![\\w$])`) : null;
+  const declRe = decl && decl.length >= 4 ? word([decl]) : null;
+  const frags = regionFragments(region);
+  const stem = (site.split("/").pop() ?? site).replace(/\.[cm]?[jt]sx?$/, "");
+  const exclude = new Set(input.exclude.map((p) => p.replace(/^\/+/, "")));
+  type Pin = { rel: string; why: string[]; score: number; lines: number[]; src: string[] };
+  const pins: Pin[] = [];
+  for (let i = 0; i < files.length; i += 32) {
+    const batch = files.slice(i, i + 32).filter((rel) => rel !== site && !exclude.has(rel));
+    const texts = await Promise.all(batch.map((rel) => parkReadFile(`${input.root}/${rel}`, "utf8").catch(() => null)));
+    batch.forEach((rel, k) => {
+      const src = texts[k];
+      if (!src || !(src.includes(stem) || frags.some((f) => src.includes(f)) || declRe?.test(src))) return;
+      const imports = src.includes(stem) && testImportsFile(src, rel, site);
+      const byFrag = frags.some((f) => src.includes(f));
+      const byDecl = !!declRe && declRe.test(src);
+      if (!imports && !byFrag && !byDecl) return;
+      // The names this test imports from the site: an assertion line that uses one pins the site's behaviour.
+      const locals = imports ? [...relativeImportBindings(src, true)].filter(([l, spec]) => l.length >= 3 && testImportsFile(`from "${spec}"`, rel, site)).map(([l]) => l) : [];
+      const localRe = word(locals);
+      const lines = src.split("\n");
+      const importAt: number[] = [];
+      // Assertions on the region's text or its declaration first, then those on other names imported from the site.
+      const regionAt: number[] = [];
+      const assertAt: number[] = [];
+      lines.forEach((l, n) => {
+        if (imports && /\bfrom\s*["']|\bimport\s*\(|\brequire\s*\(/.test(l) && testImportsFile(l, rel, site)) importAt.push(n);
+        else if (PIN_ASSERT_RE.test(l) && (frags.some((f) => l.includes(f)) || declRe?.test(l))) regionAt.push(n);
+        else if (PIN_ASSERT_RE.test(l) && localRe?.test(l)) assertAt.push(n);
+      });
+      if (importAt.length + regionAt.length + assertAt.length === 0) return;
+      const shownAt = [...importAt.slice(0, 2), ...regionAt, ...assertAt].slice(0, PIN_TESTS_MAX_LINES).sort((a, b) => a - b);
+      const why = [...(imports ? ["imports it"] : []), ...(byFrag ? ["the region's text"] : []), ...(byDecl ? [decl!] : [])];
+      pins.push({ rel, why, score: (byFrag ? 4 : 0) + (byDecl ? 2 : 0) + (imports ? 1 : 0) + Math.min(regionAt.length + assertAt.length, PIN_TESTS_MAX_LINES) / 100, lines: shownAt, src: lines });
+    });
+  }
+  if (pins.length === 0) return none;
+  pins.sort((a, b) => b.score - a.score || (a.rel < b.rel ? -1 : 1));
+  const header = `EXISTING TESTS THAT PIN THIS SITE: KEEP THESE GREEN — repos/${input.vessel}/${site} (READ-ONLY CONTEXT; NOT TARGET FILES).\n`
+    + `These suite tests import this file${decl ? `, name the region's declaration ${decl}` : ""} or assert on the region's text. Verify runs the suite on your draft: a draft that turns one of them red fails, even when the gap's own check passes. `
+    + "Keep the names, signatures, callers and output text they assert on unless the spec requires changing them. Do NOT edit these tests: a draft that edits them is refused.";
+  const parts: string[] = [header];
+  const shown: string[] = [];
+  let size = header.length;
+  for (const p of pins.slice(0, PIN_TESTS_MAX_FILES)) {
+    const body = p.lines.map((n) => `L${n + 1}: ${p.src[n]!.trim().slice(0, 300)}`).join("\n");
+    const part = `----- repos/${input.vessel}/${p.rel} (pins: ${p.why.join(", ")}) -----\n${renderWindowForDrafter(body)}`;
+    if (size + part.length + 2 > PER_FILE_SLICE) break;
+    parts.push(part);
+    shown.push(p.rel);
+    size += part.length + 2;
+  }
+  if (shown.length === 0) return { ...none, found: pins.map((p) => p.rel) };
+  if (pins.length > shown.length) parts.push(`… ${pins.length - shown.length} more pinning test file(s) not shown (cap ${PIN_TESTS_MAX_FILES} files, one window).`);
+  return { block: parts.join("\n\n"), scanned: files.length, found: pins.map((p) => p.rel), shown };
+}
 /** The compose's target files: edit_site, the relocation hint's files, then repos/ paths the spec names. */
 export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: string): string[] {
   const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
@@ -7849,6 +7954,28 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
       console.log(`[fc-own-check-grounding] check imports [${imports.join(", ")}]: added target(s) [${part.targets.join(", ")}], read-only [${part.readonly.map((r) => `${r.path}: ${r.why}`).join("; ")}]`);
     }
   }
+  // The suite tests that pin the edit site (pinningTests), read now from the same roots as the own check (the root
+  // verify runs in, else the clone; the first that holds test files) and shown read-only with it below. Not for a
+  // test-writing compose (it edits no source) or an edit site that is itself a test; the own check is not repeated.
+  let pinTests: PinningTests | null = null;
+  const pinSite = /^repos\/([\w.-]+)\/(.+)$/.exec(targetFiles[0] ?? "");
+  if (!testWritingScope && pinSite && !TEST_FILE_RE.test(pinSite[2]!)) {
+    const [, pinVessel, pinRel] = pinSite as unknown as [string, string, string];
+    try {
+      const exclude = ownCheckCtx && ownCheckCtx.vessel === pinVessel ? [ownCheckCtx.test_file] : [];
+      for (const root of new Set([vesselRoot(pinVessel), ownCheckCloneRoot(pinVessel)])) {
+        const siteText = await parkReadFile(`${root}/${pinRel}`, "utf8").catch(() => null);
+        const r = await pinningTests({ root, vessel: pinVessel, site: pinRel, siteText, region: regionHint, exclude });
+        if (r.scanned === 0) continue;
+        pinTests = r;
+        // Said only when a test pins the site: with none, the compose's prompt and journal are as before.
+        if (r.found.length > 0) console.log(`[fc-pin-tests] ${targetFiles[0]}: ${r.found.length} pinning test file(s) of ${r.scanned} scanned; showed ${r.shown.length} (cap ${PIN_TESTS_MAX_FILES} files, ${PIN_TESTS_MAX_LINES} lines each, ${r.block.length} bytes)${r.shown.length > 0 ? `: [${r.shown.join(", ")}]` : ""}`);
+        break;
+      }
+    } catch (err) {
+      console.log(`[fc-pin-tests] ${targetFiles[0]}: not read (${String(err)}); the drafter is not shown the tests that pin it`);
+    }
+  }
   // A PATH BINDING IS A PRECONDITION FOR PLANNING (measured 2026-08-06, 72h of this
   // vessel's own journal). Ungrounded decomposes ran 7 / 21 / 94 per day (Aug 4/5/6)
   // against 101 / 159 / 150 grounded, and with no real path in the prompt the planner
@@ -8084,6 +8211,9 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     grounding += `\n\n${ownCheckCtx.block}${importsBlock ? `\n\n${importsBlock}` : ""}`;
     console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }
+  // THE TESTS THAT PIN THE EDIT SITE, READ-ONLY (pinningTests), after the blind-window refusals for the same reason;
+  // nothing at all is appended when no test pins the site.
+  if (pinTests && pinTests.block) grounding += `\n\n${pinTests.block}`;
   // CROSS-FILE SYMBOL GROUNDING (2026-08-11).
   //
   // The window above is built from the TARGET files, so a symbol the request NAMES

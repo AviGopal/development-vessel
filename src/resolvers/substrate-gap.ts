@@ -38,14 +38,17 @@ import { selfAuthHeaders } from "../lib/self-auth.js";
 import { currentCallCredential, currentProducer, producerFromPointer, PRODUCER_EXECUTION_FIELD, PRODUCER_TEMPLATE_FIELD, runWithoutCallCredential } from "../lib/call-credential.js";
 import { bumpQueuedAttempt, deadLetterQueued, enqueueGapWrite, queuedFiles, readQueued, removeQueued } from "../lib/gap-forward-queue.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gateGapDirected } from "../lib/operator-direct.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem, TEST_SUITE_RESPONSE_FIELDS, testSuiteFileProblem, testSuiteCheckRoot } from "./test-suite.js";
+import { testChildEnv } from "../test-child-env.js";
+import { sweepGitOut } from "../judge/gap-check-judge.js";
+import { vesselsCloneRoot } from "../judge/gap-policy.js";
 import type { GoalReachVerdict } from "./goal-deficiency.js";
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
-import { dirname, join, resolve as resolvePath, sep } from "node:path";
+import { dirname, join, normalize, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
@@ -1935,6 +1938,46 @@ export function predicateSuspect(meta: Record<string, unknown> | null | undefine
   return "its check could not be evaluated at birth (unresolvable or timed out)";
 }
 
+export type LandedCheck = { state: "landed"; src: string } | { state: "absent" } | { state: "unreadable" };
+/**
+ * THE CHECK AS LANDED: the supplied test file read from the vessel clone's origin/dev (the ref the mirror keeps), in the
+ * object store, never the work tree. The arm read the work tree, so a check a REFUSED cutover left there untracked
+ * armed its gap; the mirror's next refresh removed the file and the gap stayed armed on a check no tree holds, so every
+ * fix draft for it ran a missing file and was "unjudged" (81 of 99 armed own-check runs on one node, 2026-10-26). Read
+ * from the blob, an untracked edit cannot add a title either. "absent": origin/dev is readable and holds no such file;
+ * "unreadable": the clone has no origin/dev (neither arms nor un-arms). `trees` caches each vessel's origin/dev file list
+ * for the tick (one `ls-tree` per vessel), so only a check that is there costs a further read.
+ * No fetch: the tick has none of its own; the mirror moves origin/dev.
+ */
+export function landedCheckSource(vessel: string, testFile: string, trees?: Map<string, Set<string> | null>): LandedCheck {
+  const dir = join(vesselsCloneRoot(), vessel);
+  let tree = trees?.get(vessel);
+  if (tree === undefined) {
+    const out = sweepGitOut(dir, ["ls-tree", "-r", "-z", "--name-only", "origin/dev"]);
+    tree = out === null ? null : new Set(out.split("\0").filter(Boolean));
+    trees?.set(vessel, tree);
+  }
+  if (tree === null) return { state: "unreadable" };
+  const rel = normalize(testFile).replace(/^(?:\.\/)+/, "");
+  if (!tree.has(rel)) return { state: "absent" };
+  // Read whole (sweepGitOut trims): the source is the check as landed, byte for byte (a lesson keeps its excerpt).
+  let src: string | null = null;
+  try {
+    const p = Bun.spawnSync(["git", "-C", dir, "show", `origin/dev:${rel}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000, env: testChildEnv() });
+    if (p.exitCode === 0) src = new TextDecoder().decode(p.stdout);
+  } catch { /* spawn failed: unreadable */ }
+  return src === null ? { state: "unreadable" } : { state: "landed", src };
+}
+/** The inputs a check-supply arm judgement reads besides its titles (gap-check-supply): the row's region and edit_site, and
+ *  the landed check's text. Here so inheritableParentCheck reads a parent's refusal the way the arm pass does. */
+export type JudgedInputs = { region: string; edit_site: string; check_sha256: string };
+export const judgedInputsOf = (meta: Record<string, unknown>, checkSrc: string): JudgedInputs => ({
+  region: regionOf(meta),
+  edit_site: String(meta["edit_site"] ?? "").trim(),
+  check_sha256: createHash("sha256").update(checkSrc).digest("hex"),
+});
+export const sameJudgedInputs = (a: JudgedInputs | undefined, b: JudgedInputs): boolean =>
+  !!a && typeof a === "object" && a.region === b.region && a.edit_site === b.edit_site && a.check_sha256 === b.check_sha256;
 /**
  * THE PARENT'S CHECK, FOR A CHILD WHOSE SCOPE STILL COVERS IT (narrowed and recommit children).
  * Measured 10-02: every `-narrowed` and `recommit-` child written 12:00-13:45Z was born falsifier=none
@@ -1969,6 +2012,16 @@ export function inheritableParentCheck(parentMeta: Record<string, unknown> | nul
   if (!parentSite || site(childEditSite) !== parentSite) return {};
   const siteVessel = /^repos\/([^/]+)\//.exec(parentSite)?.[1] ?? "";
   if (!siteVessel || String(input["vessel"] ?? "").replace(/^repos\//, "") !== siteVessel) return {};
+  // NOT A CHECK THE PARENT'S SUPPLY REFUSED (e.g. check_satisfied_by_gutting) on this file while the refusal stands: its
+  // judged_inputs are today's (the arm pass's own re-judge test, over the landed check). Handed down, it armed the child,
+  // which carries no ledger to say so; the child now gets its own check from the supply. A refusal of content since
+  // changed, or one that recorded no judged_inputs, is the supply's to judge again: inherited as before.
+  const ledger = m["check_supply"] as { state?: unknown; test_file?: unknown; vessel?: unknown; judged_inputs?: JudgedInputs } | null | undefined;
+  if (ledger && typeof ledger === "object" && ledger.state === "arm_refused" && typeof ledger.test_file === "string" && String(ledger.vessel ?? "").replace(/^repos\//, "") === siteVessel
+    && normalize(ledger.test_file).replace(/^(?:\.\/)+/, "") === normalize(String(input["test_file"])).replace(/^(?:\.\/)+/, "")) {
+    const landed = landedCheckSource(siteVessel, ledger.test_file);
+    if (landed.state === "landed" && sameJudgedInputs(ledger.judged_inputs, judgedInputsOf(m, landed.src))) return {};
+  }
   return { evidence_resolve: JSON.parse(JSON.stringify(er)) as Record<string, unknown>, predicate_source: "gap_falsify:inherit" };
 }
 

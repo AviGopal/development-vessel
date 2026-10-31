@@ -74,7 +74,8 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken, type MintedBirthVerdict } from "./substrate-gap.js";
+import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, judgedInputsOf, landedCheckSource, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, sameJudgedInputs, takeBirthVerdictWithReport, unrenderedBindingToken, type JudgedInputs, type MintedBirthVerdict } from "./substrate-gap.js";
+export { landedCheckSource, type LandedCheck } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -98,7 +99,6 @@ import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY, VOLUME_ROOT } from "../config.js";
 import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
-import { testChildEnv } from "../test-child-env.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
@@ -164,15 +164,6 @@ export const SEND_PENDING = "send_pending";
 export const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
 /** How many arm entries a ledger keeps (check_supply.arms); the oldest is dropped past it. */
 const ARM_HISTORY_MAX = 5;
-/** The inputs an arm judgement reads besides its titles: the row's region and edit_site, and the landed check's text. */
-type JudgedInputs = { region: string; edit_site: string; check_sha256: string };
-const judgedInputsOf = (meta: Row, checkSrc: string): JudgedInputs => ({
-  region: regionOf(meta),
-  edit_site: String(meta["edit_site"] ?? "").trim(),
-  check_sha256: createHash("sha256").update(checkSrc).digest("hex"),
-});
-const sameJudgedInputs = (a: JudgedInputs | undefined, b: JudgedInputs): boolean =>
-  !!a && typeof a === "object" && a.region === b.region && a.edit_site === b.edit_site && a.check_sha256 === b.check_sha256;
 const settledHistory = (l: Ledger): Row[] => {
   const prior = Array.isArray(l.history) ? l.history.slice(-4) : [];
   if (l.state === "dispatch_failed" || l.state === "dispatch_lost")
@@ -217,36 +208,6 @@ const runtimeRoot = (): string => process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessel
 
 /** The arm's and the re-evaluation's reason for a check that is in no landed tree. */
 export const CHECK_NOT_LANDED = "check_not_landed";
-export type LandedCheck = { state: "landed"; src: string } | { state: "absent" } | { state: "unreadable" };
-/**
- * THE CHECK AS LANDED: the supplied test file read from the vessel clone's origin/dev (the ref the mirror keeps), in the
- * object store, never the work tree. The arm read the work tree, so a check a REFUSED cutover left there untracked
- * armed its gap; the mirror's next refresh removed the file and the gap stayed armed on a check no tree holds, so every
- * fix draft for it ran a missing file and was "unjudged" (81 of 99 armed own-check runs on one node, 2026-10-26). Read
- * from the blob, an untracked edit cannot add a title either. "absent": origin/dev is readable and holds no such file;
- * "unreadable": the clone has no origin/dev (neither arms nor un-arms). `trees` caches each vessel's origin/dev file list
- * for the tick (one `ls-tree` per vessel), so only a check that is there costs a further read.
- * No fetch: the tick has none of its own; the mirror moves origin/dev.
- */
-export function landedCheckSource(vessel: string, testFile: string, trees?: Map<string, Set<string> | null>): LandedCheck {
-  const dir = join(clonesRoot(), vessel);
-  let tree = trees?.get(vessel);
-  if (tree === undefined) {
-    const out = sweepGitOut(dir, ["ls-tree", "-r", "-z", "--name-only", "origin/dev"]);
-    tree = out === null ? null : new Set(out.split("\0").filter(Boolean));
-    trees?.set(vessel, tree);
-  }
-  if (tree === null) return { state: "unreadable" };
-  const rel = normalize(testFile).replace(/^(?:\.\/)+/, "");
-  if (!tree.has(rel)) return { state: "absent" };
-  // Read whole (sweepGitOut trims): the source is the check as landed, byte for byte (a lesson keeps its excerpt).
-  let src: string | null = null;
-  try {
-    const p = Bun.spawnSync(["git", "-C", dir, "show", `origin/dev:${rel}`], { stdout: "pipe", stderr: "pipe", timeout: 10_000, env: testChildEnv() });
-    if (p.exitCode === 0) src = new TextDecoder().decode(p.stdout);
-  } catch { /* spawn failed: unreadable */ }
-  return src === null ? { state: "unreadable" } : { state: "landed", src };
-}
 
 /**
  * IS THIS CLONE'S origin/dev CURRENT ENOUGH TO SAY A CHECK IS NOT THERE? An "absent" read from a STALE ref (the mirror

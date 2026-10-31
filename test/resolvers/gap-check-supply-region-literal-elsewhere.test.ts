@@ -183,7 +183,8 @@ describe("the region gate applies to a literal region that is not in the check's
   it("[MUST-FAIL] end to end: 23f78717's check on a row whose literal names another file is refused by the region gate", async () => {
     const { row } = await landAndArm("le-elsewhere", CDB, CDB_SUMMARY, "resolveOverLibp2p", fixture("23f78717-concept-delete-write.check.ts.txt"));
     expect(ledgerOf(row)["state"]).toBe("arm_refused");
-    expect(String(ledgerOf(row)["reason"])).toStartWith("region_red_unchanged:");
-    expect(gateOf(row)["region_gate"]).toMatchObject({ region: "derived_from_text_anchor", anchor: "not yet implemented", changed: 0 });
+    // Its literal is not in its edit_site, so the row is flagged needs_region at filing (substrate-gap.ts
+    // flagNonLiteralRegion) and refused at arm for that, before the region gate runs (qa ruling (c) 2026-10-30).
+    expect(String(ledgerOf(row)["reason"])).toStartWith("needs_region:");
   }, 120_000);
 });

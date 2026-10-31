@@ -242,6 +242,29 @@ export function armRegionGate(
   };
 }
 
+/**
+ * A REGION THAT IS NOT LITERAL ONCE IS FLAGGED AT FILING, NOT REFUSED. A row filed (or updated) with a region that does not
+ * occur exactly once in its edit_site, read where grounding and the arm gate read it (regionLiteralVerdict, unchanged),
+ * was stored as written: grounding centred its draft on the file top, and the check supply drafted, landed and judged a
+ * check only for the arm write to refuse it (region_not_literal_once). Such a write is stored with region null, the
+ * text kept in region_prior_text, and needs_region true: flagged at filing, never armed. The check supply still
+ * dispatches its check goal (checkSupplyDisposition does not read needs_region) and refuses it at arm, terminal
+ * (gap-check-supply.ts); a later write that sets a literal-once region clears the flag. Checked, like the arm gate,
+ * only on a new row or a write that changes the region or the edit_site, so rows stored before stay editable as they
+ * are. A missing edit_site, or one grounding cannot read, is left alone: that is the edit site's question, not the
+ * region's. Returns the metadata to store, or null when the write is stored as it came.
+ */
+export function flagNonLiteralRegion(meta: Record<string, unknown>, priorMeta: Record<string, unknown>, created: boolean): Record<string, unknown> | null {
+  const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string).trim() : "";
+  const region = regionOf(meta);
+  if (!editSite || !region) return null;
+  if (!created && regionOf(priorMeta) === region && String(priorMeta["edit_site"] ?? "").trim() === editSite) return null;
+  const v = regionLiteralVerdict(region, editSite);
+  if (v.ok) return meta["needs_region"] === true ? { ...meta, needs_region: false } : null;
+  if (v.error === "edit_site_unreadable") return null;
+  return { ...meta, region: null, region_prior_text: String(meta["region"]), needs_region: true };
+}
+
 function workspaceRoot(): string {
   return WORKSPACE_ROOT_AT_LOAD;
 }
@@ -3425,6 +3448,15 @@ async function resolveSubstrateGapWriteInner(
         detail: `gap ${gap.id}: the arm-time region check threw (${String(err).slice(0, 200)}); refused rather than arm unchecked` } };
     }
     if (refused) return { early: refused };
+  }
+  // REGION AT FILING (flagNonLiteralRegion): after the arm gate, which still refuses an ARMING write whose region is
+  // not literal once; any other write is stored with its region flagged instead.
+  {
+    const flagged = flagNonLiteralRegion((gap.classification_metadata ?? {}) as Record<string, unknown>, priorMetaForBirth, action === "created");
+    if (flagged) {
+      if (flagged["needs_region"] === true) console.log(`[gap-region] ${gap.id}: region is not literal once in its edit_site; stored as needs_region (text kept in region_prior_text)`);
+      gap.classification_metadata = flagged as SubstrateGap["classification_metadata"];
+    }
   }
 
   // THE LANDING LEASE IS THE LEASE OP'S ALONE (see LANDING LEASE). A write that echoes a metadata snapshot

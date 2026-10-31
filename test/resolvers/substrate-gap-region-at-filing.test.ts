@@ -1,0 +1,251 @@
+// A REGION THAT IS NOT LITERAL ONCE IS FLAGGED AT FILING, NOT REFUSED (gap a-gap-row-can-be-filed-with-a-region-that-
+// does-not-occur-literally-once-in-its-edit-site).
+//
+// A row filed with a region that does not occur exactly once in its edit_site was stored as written, and only the arm
+// write refused it (region_not_literal_once). The write is now stored with region null, the text in region_prior_text,
+// needs_region true (substrate-gap.ts flagNonLiteralRegion, on regionLiteralVerdict unchanged): flagged at filing, never
+// armed. The check goal is still dispatched (checkSupplyDisposition does not read needs_region); the arm step records
+// a terminal arm_refused with a needs_region reason. A write correcting the region re-flags.
+//
+//   [MUST-FAIL] a filing with a region not literal once is stored as region null + region_prior_text + needs_region.
+//               Red BY ASSERTION at the parent with no new seam (it reads the stored row).
+//   [MUST-FAIL] the check supply refuses a needs_region row whose check has landed: arm_refused, reason needs_region.
+//   [CONTROL]   a literal-once region is stored as it came; an explicit null region is accepted.
+//   [CONTROL]   the arm-time refusal (armRegionGate) is unchanged for an arming write with a region not literal once.
+//   [CONTROL]   same address: a row whose region is literal once in its own edit_site still arms.
+// End to end on the harness of gap-check-supply-no-control.test.ts.
+import { createHash } from "node:crypto";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+import { __resetDiscoveryForTests } from "../../src/config.js";
+import { isolateLearnedStateInProcess } from "./isolated-gap-store-run.js";
+import { landCheck } from "./landed-check.fixture.js";
+
+const ROOT = join(tmpdir(), `gcs-region-filing-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const CLONES = join(ROOT, "clones");
+const RUNTIME = join(ROOT, "runtime");
+const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "SELF_RESOLVE_ENDPOINT"] as const;
+const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
+isolateLearnedStateInProcess(ROOT);
+process.env["VESSELS_CLONE_ROOT"] = CLONES;
+process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
+process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
+process.env["SELF_RESOLVE_ENDPOINT"] = "http://self.test/v2/impulses/resolve";
+delete process.env["GAP_STORE_ENDPOINT"];
+
+const sg = await import("../../src/resolvers/substrate-gap.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
+const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
+const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
+
+type Row = Record<string, unknown>;
+const RUN = Math.random().toString(36).slice(2, 8);
+const VESSEL = "fixture-vessel";
+const SITE_REL = "src/widget.ts";
+const SITE = `repos/${VESSEL}/${SITE_REL}`;
+// The defect: add subtracts. add(2, 1) must be 3; add(5, 0) is 5 either way (the control's input, untouched by it).
+const TREE: Record<string, string> = { [SITE_REL]: "export function add(a: number, b: number): number {\n  return a - b;\n}\n" };
+const originalFetch = globalThis.fetch;
+const origLog = console.log;
+const origWarn = console.warn;
+let lastShellOutput = "";
+let execGuard: ExecGuard | null = null;
+let gapStore: { restore: () => Promise<void> } | null = null;
+const dueRhythm = (): Row => ({ id: `rhythm-gap-check-supply-${RUN}`, shape: "timeShapedRhythm", updated_at: new Date().toISOString(), body: { axis: "load", family: "gap-check-supply", budget: 0.2, alpha: 3, beta: 1, staleness: 1, max_per_tick: 50, backoff_hours: 24, max_attempts: 5 } });
+
+beforeAll(() => {
+  gapStore = snapshotGapStore(sg.gapStoreRootForTest(), sg.__settleBirthEvaluationsForTests);
+  const root = sg.gapStoreRootForTest();
+  if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
+  mkdirSync(join(root, "gaps"), { recursive: true });
+  for (const base of [join(CLONES, VESSEL), join(RUNTIME, VESSEL)]) {
+    for (const d of ["test/checks", "node_modules"]) mkdirSync(join(base, d), { recursive: true });
+    for (const [rel, text] of Object.entries(TREE)) { mkdirSync(join(base, rel, ".."), { recursive: true }); writeFileSync(join(base, rel), text); }
+  }
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
+    if (/\/executions\/[^/?#]+$/.test(url)) return new Response("not found", { status: 404 });
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const imp = body?.impulse ?? {};
+    if (url.endsWith("/run-goal")) return Response.json({ dispatchId: `d-${RUN}-${Math.random().toString(36).slice(2, 8)}` }, { status: 202 });
+    if (url === "http://self.test/v2/impulses/resolve" && imp?.pointer?.type === "test_suite") {
+      const r = await resolveTestSuite(imp.pointer);
+      return Response.json({ shape: r.shape, body: r.body });
+    }
+    if ((body?.pointer ?? imp?.pointer)?.type === "vesselCapability" && (body?.pointer ?? imp?.pointer)?.shape === "shellResult") {
+      return Response.json({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/resolve", health_score: 1 }] } });
+    }
+    if (url.startsWith("http://shell.test")) {
+      const local = String(imp?.pointer?.command ?? "").replace(/^ROOT='[^']*'/, `ROOT='${join(CLONES, VESSEL)}'`);
+      const p = Bun.spawnSync(["bash", "-c", local], { cwd: join(CLONES, VESSEL), env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", TMPDIR: tmpdir() }, stdout: "pipe", stderr: "pipe" });
+      lastShellOutput = new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
+      return Response.json({ stdout: lastShellOutput });
+    }
+    if (imp?.type === "poolImpulse" && imp?.shape === "timeShapedRhythm") return Response.json({ body: { impulses: [dueRhythm()], count: 1 } });
+    if (imp?.type === "poolImpulse" && imp?.shape === "rhythmFamilyGoal") return Response.json({ body: { impulses: [], count: 0 } });
+    if (imp?.type === "poolImpulse_write") return Response.json({ body: { ok: true } });
+    if (imp?.type === "poolImpulse") return openPolicyAnswer(imp.shape);
+    if ((body?.pointer ?? imp?.pointer)?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
+    return Response.json({ body: { impulses: [] } });
+  }) as unknown as typeof fetch;
+  console.log = () => {};
+  console.warn = () => {};
+});
+afterAll(async () => {
+  await gapStore?.restore();
+  globalThis.fetch = originalFetch;
+  console.log = origLog;
+  console.warn = origWarn;
+  restoreCutoverExecModules();
+  __resetDiscoveryForTests();
+  for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
+  try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
+});
+beforeEach(() => { execGuard = installCutoverExecGuard(); g2fPolicy.__resetPolicyReadsForTests(); });
+afterEach(() => { expect(execGuard?.restore() ?? []).toEqual([]); });
+
+async function storeRow(id: string): Promise<Row | undefined> {
+  const r = await sg.resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never);
+  return ((r.body as { gaps?: Row[] }).gaps ?? [])[0];
+}
+const metaOf = (r: Row | undefined): Row => ((r?.["classification_metadata"] ?? {}) as Row);
+const ledgerOf = (r: Row | undefined): Row => ((metaOf(r)["check_supply"] ?? {}) as Row);
+async function seed(id: string): Promise<void> {
+  const summary = `fixture ${id}: ${SITE} \`add\` returns 1 for add(2, 1) where 3 is required`;
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: {} } } as never);
+  if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
+  await sg.__settleBirthEvaluationsForTests();
+}
+async function tick(now: number): Promise<void> {
+  await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: now } as never);
+  await sg.__settleBirthEvaluationsForTests();
+}
+function T(prefix: string): string {
+  for (let i = 0; i < 1000; i++) { const id = `${prefix}-${RUN}-${i}`; if (supply.checkSupplyArm(id) === "treatment") return id; }
+  throw new Error("no treatment id");
+}
+const checkPathOf = (id: string): string => `test/checks/${(csa["checkSupplyCheckFile"] as (x: string) => string)(id)}`;
+let clock = Date.now() + 5000 * 3600_000;
+const later = (): number => (clock += 30 * 3600_000);
+/** Seed a gap, let the supply dispatch for it, land `check` as its check file, and let the arm step judge it. */
+async function landAndArm(prefix: string, check: string): Promise<Row> {
+  const id = T(prefix);
+  await seed(id);
+  await tick(later());
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: SITE });
+  writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
+  await tick(later());
+  return (await storeRow(id))!;
+}
+
+const RED_TITLE = "add(2, 1) is 3";
+const GREEN_TITLE = "add(5, 0) stays 5 (control)";
+const RED = `  test("${RED_TITLE}", () => { expect(mod.add(2, 1)).toBe(3); });\n`;
+const GREEN = `  test("${GREEN_TITLE}", () => { expect(mod.add(5, 0)).toBe(5); });\n`;
+const checkOf = (...tests: string[]): string => `import { describe, expect, test } from "bun:test";\nimport * as mod from "../../src/widget";\ndescribe("add", () => {\n${tests.join("")}});\n`;
+/** Inside the 24 h backoff and past the 600 s bookkeeping floor. */
+const soon = (): number => (clock += 11 * 60_000);
+/** Write the row's check_supply ledger as an earlier arm step left it. */
+async function setLedger(id: string, patch: Row): Promise<void> {
+  const row = (await storeRow(id))!;
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: "open", classification_metadata: { check_supply: { ...ledgerOf(row), ...patch } } } } as never);
+  if (w.shape === "structuredError") throw new Error("ledger write refused: " + JSON.stringify(w.body));
+  await sg.__settleBirthEvaluationsForTests();
+}
+/** Seed a gap, let the supply dispatch for it, and land `check` as its check file (not yet judged). */
+async function dispatchAndLand(prefix: string, check: string): Promise<string> {
+  const id = T(prefix);
+  await seed(id);
+  await tick(later());
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id) });
+  writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
+  landCheck(join(CLONES, VESSEL), checkPathOf(id));
+  return id;
+}
+/** What the next attempt's goal is told, read from the ledger as the dispatch step reads it: a test-side copy of the
+ *  private settledHistory (history, plus the current state when it is a judged-not-armed one), into priorAttemptSentence. */
+function nextAttemptSentence(l: Row): string {
+  const prior = Array.isArray(l["history"]) ? (l["history"] as Row[]).slice(-4) : [];
+  const judged = supply.JUDGED_NOT_ARMED.has(String(l["state"] ?? "")) ? [{ attempt: Number(l["attempts"] ?? 0), state: l["state"], reason: l["reason"] ?? "", titles: Array.isArray(l["judged_titles"]) ? l["judged_titles"] : [] }] : [];
+  return supply.priorAttemptSentence([...prior, ...judged]);
+}
+const PROSE_REGION = "the line where add combines its two inputs";
+const LITERAL_REGION = "return a - b;";
+/** Write row metadata fields (not the ledger) as an operator correction would. */
+async function setMeta(id: string, patch: Row): Promise<void> {
+  const row = (await storeRow(id))!;
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: "open", classification_metadata: patch } } as never);
+  if (w.shape === "structuredError") throw new Error("meta write refused: " + JSON.stringify(w.body));
+  await sg.__settleBirthEvaluationsForTests();
+}
+/** The inputs the arm step records for a judgement, computed test-side from the row as stored and the landed check. */
+function inputsOf(row: Row | undefined, check: string): Row {
+  const m = metaOf(row);
+  const r = m["region"];
+  return { region: r === undefined || r === null ? "" : String(r).trim(), edit_site: String(m["edit_site"] ?? "").trim(), check_sha256: createHash("sha256").update(check).digest("hex") };
+}
+const PAIR = checkOf(RED, GREEN);
+/** File a new row with this metadata, as a detector or an operator would. */
+async function file(id: string, meta: Row): Promise<Row | undefined> {
+  const summary = `fixture ${id}: ${SITE} \`add\` returns 1 for add(2, 1) where 3 is required`;
+  const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: meta } } as never);
+  if (w.shape === "structuredError") throw new Error("filing refused: " + JSON.stringify(w.body));
+  await sg.__settleBirthEvaluationsForTests();
+  return storeRow(id);
+}
+
+describe("a region not literal once is flagged at filing", () => {
+  it("[MUST-FAIL] a filing whose region is not literal once is stored as null + region_prior_text + needs_region", async () => {
+    const m = metaOf(await file(T("rf-prose"), { edit_site: SITE, region: PROSE_REGION }));
+    expect(m["region"] ?? null).toBeNull();
+    expect(m["region_prior_text"]).toBe(PROSE_REGION);
+    expect(m["needs_region"]).toBe(true);
+  });
+
+  it("[MUST-FAIL] the check supply refuses a needs_region row whose check has landed, terminal, with a needs_region reason", async () => {
+    const id = await dispatchAndLand("rf-arm", PAIR);
+    await setMeta(id, { edit_site: SITE, region: PROSE_REGION });
+    const report = await supply.resolveGapCheckSupplyTick({ type: "gap_check_supply_tick", now_ms: soon() } as never);
+    await sg.__settleBirthEvaluationsForTests();
+    const l = ledgerOf(await storeRow(id));
+    expect(l["state"]).toBe("arm_refused"); // an outcome on the ledger, never armed
+    expect(String(l["reason"])).toStartWith("needs_region:");
+    expect(String(l["reason"])).toContain(PROSE_REGION);
+    const notArmed = ((report.body ?? {}) as { not_armed?: Array<{ id: string; reason: string }> }).not_armed ?? [];
+    expect(notArmed.find((n) => n.id === id)?.reason ?? "").toStartWith("needs_region:");
+  });
+});
+
+describe("what the flag leaves as it was", () => {
+  it("[CONTROL] a literal-once region is stored as it came; an explicit null region is accepted", async () => {
+    const lit = metaOf(await file(T("rf-literal"), { edit_site: SITE, region: LITERAL_REGION }));
+    expect(lit["region"]).toBe(LITERAL_REGION);
+    expect(lit["needs_region"]).toBeUndefined();
+    const nul = metaOf(await file(T("rf-null"), { edit_site: SITE, region: null }));
+    expect(nul["region"] ?? null).toBeNull();
+    expect(nul["needs_region"]).toBeUndefined();
+  });
+
+  it("[CONTROL] an arming write whose region is not literal once is still refused by the arm-time gate", () => {
+    const refused = sg.armRegionGate("rf-gate", "open", { falsifier: "class2", edit_site: SITE, region: PROSE_REGION }, "open", {});
+    expect(refused?.shape).toBe("structuredError");
+    expect((refused?.body as Row | undefined)?.["error"]).toBe("region_not_literal_once");
+    expect(sg.armRegionGate("rf-gate", "open", { falsifier: "class2", edit_site: SITE, region: LITERAL_REGION }, "open", {})).toBeNull();
+  });
+
+  it("[CONTROL] same address: a row whose region is literal once in its own edit_site still arms", async () => {
+    const id = await dispatchAndLand("rf-same", PAIR);
+    await setMeta(id, { edit_site: SITE, region: LITERAL_REGION });
+    expect(metaOf(await storeRow(id))["needs_region"]).toBeUndefined();
+    await tick(soon());
+    expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
+  }, 120_000);
+});

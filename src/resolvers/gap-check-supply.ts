@@ -1860,6 +1860,17 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // other row on every tick.
     if (gapStoreIsLocal()) armBudget -= 1;
     touched.add(id);
+    // A ROW FLAGGED needs_region (substrate-gap.ts flagNonLiteralRegion) is never armed: its region was not literal once
+    // in its edit_site, and the arm write would refuse it. Refused here, terminal, with the region text it was filed
+    // with, so the ledger records an outcome rather than a dispatch with none. A write that sets a literal-once region
+    // clears the flag, and its changed judged_inputs take the row again.
+    if (meta["needs_region"] === true) {
+      const reason = `needs_region: ${String(meta["region_prior_text"] ?? "").slice(0, 160)} (not literal once in the row's edit_site)`;
+      refused += 1;
+      notArmed.push({ id, reason });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason, ...judgedNow } });
+      continue;
+    }
     // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
     // form testImportsFile reads; with none, an existing src module the test imports becomes it.
     const vesselDir = ledger.vessel;

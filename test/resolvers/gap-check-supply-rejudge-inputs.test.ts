@@ -198,8 +198,9 @@ const PAIR = checkOf(RED, GREEN);
 describe("a settled row is judged again when its inputs changed", () => {
   it("[MUST-FAIL] arm_refused(region_not_literal_once), region corrected to a literal: armed next tick from the landed check", async () => {
     const id = await dispatchAndLand("rji-region", PAIR);
-    await setMeta(id, { region: PROSE_REGION });
-    await tick(soon());
+    // The refusal as the arm step left it on a row stored before region-at-filing (a prose region can no longer be
+    // stored by a plain write: substrate-gap.ts flagNonLiteralRegion), its judged inputs naming that prose region.
+    await setLedger(id, { state: "arm_refused", judged_titles: [RED_TITLE, GREEN_TITLE], judged_inputs: { ...inputsOf(await storeRow(id), PAIR), region: PROSE_REGION }, reason: "arm write refused: region_not_literal_once" });
     const refusedRow = await storeRow(id);
     expect(ledgerOf(refusedRow)["state"]).toBe("arm_refused");
     expect(String(ledgerOf(refusedRow)["reason"])).toContain("region_not_literal_once");

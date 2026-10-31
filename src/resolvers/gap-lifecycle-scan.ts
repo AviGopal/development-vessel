@@ -48,9 +48,25 @@ export interface GapLifecycleScanPointer {
   devVesselImpulsesUrl?: string;
   dry_run?: boolean;
   region_lint?: boolean;      // read-only: list OPEN armed gaps whose region is not a once-literal of edit_site, and return
+  rankBudgetMs?: number;      // wall budget for gap_priority_ranking (ms); default: tuning row gap_lifecycle_scan.rank_budget_ms, else 60 s
 }
 
 const DEFAULT_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
+// The ranking yields to the event loop at least this often (ms).
+const RANK_SLICE_MS = 20;
+// BOOTSTRAP DEFAULT for the ranking's wall budget, used when neither the pointer nor the tuning row
+// gap_lifecycle_scan.rank_budget_ms gives one (that row is not seeded yet).
+const RANK_WALL_BUDGET_MS = 60_000;
+const RANK_BUDGET_TUNING_ROW = "gap_lifecycle_scan.rank_budget_ms";
+async function rankWallBudgetMs(p: GapLifecycleScanPointer): Promise<number> {
+  if (typeof p.rankBudgetMs === "number" && Number.isFinite(p.rankBudgetMs) && p.rankBudgetMs >= 0) return p.rankBudgetMs;
+  try {
+    const { readTuningNumber } = await import("../judge/gap-policy.js");
+    const v = await readTuningNumber(RANK_BUDGET_TUNING_ROW);
+    if (v !== null && v >= 0) return v;
+  } catch { /* tuning unreadable: the bootstrap default */ }
+  return RANK_WALL_BUDGET_MS;
+}
 const sanitizeId = (id: string): string => id.replace(/:/g, "-").replace(/[^a-zA-Z0-9._-]/g, "_");
 
 interface Gap {
@@ -975,6 +991,39 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   } catch {
     funnelHistory = [runRecord];
   }
+  // GAP PRIORITY RANKING, TIME-SLICED (2026-10-31). Each open gap is scored against EVERY gap's summary (citations,
+  // unlock fan-out), so the work is open x total. Written as one synchronous map, it lower-cased each summary again for
+  // every open gap: 5075 open x 11297 gaps measured 50.8 s of CPU on a copy of the live store, and the event loop was
+  // blocked for all of it. Every scan that reached this point left the vessel silent for 45-71 s (no timer, no /health),
+  // and on 2026-10-31 self-recovery stopped it mid-compose. The scores are unchanged: each summary is lower-cased once,
+  // the loop yields to the event loop every RANK_SLICE_MS, and a wall budget stops it, logging how many gaps were
+  // ranked. The ranking is a per-run report (the next scan ranks afresh), so nothing is carried between runs.
+  const rankBudgetMs = await rankWallBudgetMs(p);
+  const lowerSummaries = gaps.map((o) => (o.summary ?? "").toLowerCase());
+  const openSummaryIdx: number[] = [];
+  gaps.forEach((o, i) => { if (o.status === "open") openSummaryIdx.push(i); });
+  const ranked: Array<{ id: string | undefined; citations: number; unlock_fan_out: number; drafter_fit: string; score: number; justification: string }> = [];
+  const rankStart = Date.now();
+  let sliceStart = rankStart;
+  for (const g of remainingOpen) {
+    if (Date.now() - rankStart > rankBudgetMs) break;
+    if (Date.now() - sliceStart >= RANK_SLICE_MS) { await new Promise<void>((r) => setImmediate(r)); sliceStart = Date.now(); }
+    const meta = ((g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {}) as Record<string, unknown>;
+    const shape = String(meta.desired_shape ?? "").toLowerCase();
+    let cited = 0;
+    if (shape.length > 3) for (let i = 0; i < gaps.length; i++) if (gaps[i]!.id !== g.id && lowerSummaries[i]!.includes(shape)) cited++;
+    const citations = Number(meta.failed_attempts ?? 0) + cited;
+    const idLower = String(g.id ?? "").toLowerCase();
+    let unlock = 0;
+    for (const i of openSummaryIdx) if (gaps[i]!.id !== g.id && lowerSummaries[i]!.includes(idLower)) unlock++;
+    const surgical = (typeof meta.target_file === "string" || typeof meta.edit_site === "string" || typeof meta.matched_excerpt === "string" || typeof meta.code_site === "string") ? 1 : 0;
+    const score = citations * 3 + unlock * 2 + surgical + landability(g);
+    ranked.push({ id: g.id, citations, unlock_fan_out: unlock, drafter_fit: surgical ? "surgical" : "unanchored", score, justification: "cited by " + citations + " failure signal(s), unlocks " + unlock + " other gap(s), " + (surgical ? "surgical (anchored code site)" : "needs localization") + ", landability " + landability(g).toFixed(2) });
+  }
+  if (ranked.length < remainingOpen.length) {
+    console.log(`[gap_lifecycle_scan] gap_priority_ranking stopped at the wall budget (${rankBudgetMs} ms): ranked ${ranked.length} of ${remainingOpen.length} open gap(s); the rest are unranked this run`);
+  }
+  const gapPriorityRanking = ranked.sort((a, b) => b.score - a.score).slice(0, 15);
 
   return {
     shape: "gapLifecycleReport",
@@ -988,7 +1037,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       expire_hours: expireHours,
       funnel_history: funnelHistory,
       consumption_queue: remainingOpen.filter((g) => !expired.includes(g.id!)).map((g) => ({ id: g.id, category: g.category, landability: landability(g) })).sort((a, b) => b.landability - a.landability).slice(0, 10),
-      gap_priority_ranking: remainingOpen.map((g) => { const meta = ((g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {}) as Record<string, unknown>; const shape = String(meta.desired_shape ?? "").toLowerCase(); const citations = Number(meta.failed_attempts ?? 0) + (shape.length > 3 ? gaps.filter((o) => o.id !== g.id && (o.summary ?? "").toLowerCase().includes(shape)).length : 0); const unlock = gaps.filter((o) => o.id !== g.id && o.status === "open" && (o.summary ?? "").toLowerCase().includes(String(g.id ?? "").toLowerCase())).length; const surgical = (typeof meta.target_file === "string" || typeof meta.edit_site === "string" || typeof meta.matched_excerpt === "string" || typeof meta.code_site === "string") ? 1 : 0; const score = citations * 3 + unlock * 2 + surgical + landability(g); return { id: g.id, citations, unlock_fan_out: unlock, drafter_fit: surgical ? "surgical" : "unanchored", score, justification: "cited by " + citations + " failure signal(s), unlocks " + unlock + " other gap(s), " + (surgical ? "surgical (anchored code site)" : "needs localization") + ", landability " + landability(g).toFixed(2) }; }).sort((a, b) => b.score - a.score).slice(0, 15),
+      gap_priority_ranking: gapPriorityRanking,
       backlog_meta_gap_posted: backlogPosted,
       top_stale_categories: Object.fromEntries(topCats),
       stale_hours: staleHours, dry_run: dryRun, auto_close: autoClose,

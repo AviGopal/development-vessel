@@ -218,8 +218,8 @@ export function ownCheckUnarmMeta(own: { site: string; check: string }, at: stri
 /** Why a gap row is not compose work, or null when it is: THE ONE ELIGIBILITY PREDICATE shared by the autonomous
  *  picker's admission, the drain observer's compose nudge and the gap-write path's compose nudge, so a nudge never
  *  fires for a gap the picker cannot take and the two cannot drift. Eligible = open, armed (falsifier class1/class2,
- *  as a string or {class}), naming an edit site (edit_site, file_path, change_site, suspected_real_location or a
- *  row-level file_path) that is not its own check (editSiteIsOwnCheck), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
+ *  as a string or {class}, on a check the supply did not refuse: checkSupplyRefusedOwnCheck), naming an edit site
+ *  (edit_site, file_path, change_site, suspected_real_location or a row-level file_path) that is not its own check (editSiteIsOwnCheck), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
 export type ComposeEligibilitySkipReason = "not_open" | "edit_site_is_own_check" | "unarmed" | "no_edit_site" | "held";
 
 /** The held-from-compose predicate composeEligibilitySkipReason's own "held" branch uses: operator_hold, a parking
@@ -298,6 +298,20 @@ export function inheritedOperatorHold(parentId: string, parentMeta: Record<strin
   };
 }
 
+/** A CHECK THE SUPPLY REFUSED TO ARM DOES NOT ARM THE ROW. check_supply.state arm_refused on the very file the row's
+ *  evidence_resolve test_suite runs (paths as editSiteIsOwnCheck compares them) means the supply judged that check unfit
+ *  (e.g. check_satisfied_by_gutting: deleting the behaviour turns it green); a falsifier class re-stamped from the same
+ *  evidence_resolve does not overrule it. A different check file, or a fresh arm (state armed), still arms. */
+function checkSupplyRefusedOwnCheck(meta: Record<string, unknown>): boolean {
+  const ledger = meta["check_supply"] as { state?: unknown; test_file?: unknown; vessel?: unknown } | null | undefined;
+  if (!ledger || typeof ledger !== "object" || ledger.state !== "arm_refused") return false;
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
+  if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input || typeof er.input !== "object") return false;
+  const refused = vesselFileOf(ledger.test_file, ledger.vessel);
+  const check = vesselFileOf(er.input.test_file, er.input.vessel);
+  return !!refused && !!check && refused.rel === check.rel && (!refused.vessel || !check.vessel || refused.vessel === check.vessel);
+}
+
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
   if (String(row["status"] ?? "open") !== "open") return "not_open";
   const rawMeta = row["classification_metadata"] ?? row["metadata"];
@@ -307,6 +321,7 @@ export function composeEligibilitySkipReason(row: Record<string, unknown>): Comp
   const rawFalsifier = meta["falsifier"];
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
+  if (checkSupplyRefusedOwnCheck(meta)) return "unarmed";
   if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
   if (isAdmissionHeld(row)) return "held";
   return null;

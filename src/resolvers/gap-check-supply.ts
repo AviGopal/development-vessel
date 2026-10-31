@@ -92,7 +92,7 @@ import { codeContract, type CodeContract } from "./code-introspect.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { coverageKnobs, RAN_PACING, redForTheRightReason, regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
-import { resolveDispatchGoal } from "./dispatch-goal.js";
+import { MAX_GOAL_LEN, resolveDispatchGoal } from "./dispatch-goal.js";
 import { dispatchGoalOnPeer, placeCompose, placementArmKnobs, readPlacedDispatch } from "./compose-placement.js";
 import { armRedReasonRefusal, testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
@@ -299,11 +299,11 @@ export function checkSupplyArm(gapId: string, controlFraction: number = HISTORIC
   return position < controlFraction ? "control" : "treatment";
 }
 
-const symptomOf = (summary: string): string => summary
+const symptomOf = (summary: string, max = 600): string => summary
   .replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "")
   .replace(/\s+/g, " ")
   .trim()
-  .slice(0, 600)
+  .slice(0, max)
   .replace(/[\s.]+$/, "");
 
 /** The edit site as the check imports it: its path relative to the check file, without the extension. */
@@ -458,8 +458,22 @@ export function quoteUnrenderedTokens(s: string): string {
   }
   return out;
 }
+/**
+ * THE GOAL BUDGET (MAX_GOAL_LEN, dispatch-goal.ts). dispatch_goal refuses a goal over the bound whole, so a goal the
+ * parts push past it lost every part, the row's must-fail or falsifier_spec sentence with it. The other parts keep
+ * their own bounds (the export list and signatures, the region line, the row texts, the prior attempt) and are never
+ * cut here; the symptom is cut LAST, to what they leave: a goal over the bound is rebuilt with the symptom shortened by
+ * the overflow, so the expected-value sentence stays intact. A goal inside the bound is unchanged; one still over it with no symptom left is
+ * returned as before, and dispatch_goal refuses it.
+ */
 export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = [], meta: Row | null = null): string {
-  return quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior, meta));
+  const whole = quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior, meta));
+  let goal = whole;
+  for (let max = symptomOf(summary).length; goal.length > MAX_GOAL_LEN && max > 0;) {
+    max = Math.max(0, max - (goal.length - MAX_GOAL_LEN));
+    goal = quoteUnrenderedTokens(checkSupplyGoalText(vessel, testFile, summary, site, reader, anchors, prior, meta, max));
+  }
+  return goal.length > MAX_GOAL_LEN ? whole : goal;
 }
 /**
  * THE DRAFTER IS TOLD THE REGION THE GATE WILL REPLACE (law 8). The arm step's region gate (regionMutantGate) replaces
@@ -494,14 +508,14 @@ export function regionGoalSentence(siteRel: string, siteSrc: string | null, summ
   return `The gap's region, derived from its evidence: ${region.kind} anchor ${JSON.stringify(region.anchor.slice(0, 120))} at ${at}${more1}, the statement \`${shown}\`. ` +
     `Assert on THIS: ${regionObservable(first)} at ${at}. The arm step replaces that statement, and a check whose red survives the replacement is refused. `;
 }
-function checkSupplyGoalText(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = [], meta: Row | null = null): string {
+function checkSupplyGoalText(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = [], meta: Row | null = null, symptomMax?: number): string {
   const siteRel = vesselRelativeEditSite(site);
   // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
   // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.
   const cfg = reader && siteRel ? configEditSite(siteRel, reader.read(siteRel)) : null;
   if (cfg && siteRel) {
     const consumerImports = consumerResolverModules(cfg.resolvers, reader!).map((module) => ({ module, spec: importSpecifier(testFile, module) }));
-    return configSiteCheckGoal({ vessel, testFile, symptom: symptomOf(summary), siteRel, siteImport: importSpecifier(testFile, siteRel), templates: cfg.templates, resolvers: cfg.resolvers, consumerImports });
+    return configSiteCheckGoal({ vessel, testFile, symptom: symptomOf(summary, symptomMax), siteRel, siteImport: importSpecifier(testFile, siteRel), templates: cfg.templates, resolvers: cfg.resolvers, consumerImports });
   }
   const imp = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel)
     ? `Import the module the defect lives in as a namespace, import * as mod from "${importSpecifier(testFile, siteRel)}", and assert on it`
@@ -514,7 +528,7 @@ function checkSupplyGoalText(vessel: string, testFile: string, summary: string, 
     : "";
   const exportsList = codeSite ? (reader ? exportListSentence(codeSite, reader, summary, contract ?? undefined) : unreadSiteSentence(codeSite)) : "";
   const regionLine = codeSite && reader && meta ? regionGoalSentence(codeSite, reader.read(codeSite), summary, meta) : "";
-  return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
+  return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary, symptomMax)}. ` +
     `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + exportsList + named + regionLine +
     mustFailControlSentence(meta) +
     priorAttemptSentence(prior) +
@@ -589,9 +603,13 @@ export function exportListSentence(siteRel: string, reader: SrcReader, summary: 
  * THE ROW'S MUST-FAIL AND CONTROL, SAID TO THE DRAFTER (law 8). The row's meta.must_fail and meta.control reached the
  * region gate (regionInputsOf) but never the goal, so the drafter guessed what the failing assertion should expect and
  * wrote no control: tonight's arming-only landing expected a literal no src line holds. The must-fail is the expected
- * (correct) value the failing assertion states; absent, the drafter is asked to name that value in the test's title.
- * A CONTROL is always asked for, and the arm step refuses a check with none (CHECK_NO_CONTROL_STAGE). Each row text is
- * clamped to MUST_FAIL_CONTROL_MAX_CHARS, as the export list is, so the goal stays inside MAX_GOAL_LEN.
+ * (correct) value the failing assertion states. A row with no must_fail but a prose falsifier_spec (the operator-written
+ * expected behaviour) has the spec said the same way: the spec reached only the region and anchor derivation, so the
+ * drafter of such a row was told only to name an expected value, guessed it, and drafted red for the wrong reason.
+ * With neither, the drafter is asked to name that value in the test's title. A CONTROL is always asked for, and the
+ * arm step refuses a check with none (CHECK_NO_CONTROL_STAGE). Each row text is clamped to MUST_FAIL_CONTROL_MAX_CHARS,
+ * as the export list is, so the goal stays inside MAX_GOAL_LEN; the spec is read only when must_fail is absent and
+ * under the same clamp, so it adds no more than a must_fail does.
  */
 export const MUST_FAIL_CONTROL_MAX_CHARS = 300;
 export const CONTROL_REQUEST = "Write a second test, a CONTROL: an input the defect does not touch, asserting behaviour that must stay the same. It passes now and after the fix.";
@@ -602,8 +620,11 @@ const clampRowText = (v: unknown): string => {
 export function mustFailControlSentence(meta: Row | null): string {
   const mustFail = clampRowText(meta?.["must_fail"]);
   const control = clampRowText(meta?.["control"]);
+  const spec = mustFail ? "" : clampRowText(meta?.["falsifier_spec"]);
   const mf = mustFail
     ? `After the fix, this must hold: ${mustFail}. The failing assertion states THAT expected value; it is red now because the code does something else. `
+    : spec
+    ? `After the fix, this must hold: ${spec}. The failing assertion states THAT expected value; it is red now because the code does something else. `
     : "Name the expected (correct) value in the failing test's title. ";
   return mf + `${CONTROL_REQUEST} ` + (control ? `The control: ${control}. ` : "");
 }

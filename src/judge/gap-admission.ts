@@ -25,7 +25,7 @@ import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
-import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
+import { readCalibration, landabilityScore, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
@@ -281,7 +281,11 @@ export function typecheckClassOf(gap: Record<string, unknown>): { vessel: string
   const structured = structuredTscErrorOf(gap);
   if (structured) return { vessel: structured.vessel, tsCode: structured.tsCode };
   const id = String(gap.id ?? "");
-  const summary = String(gap.summary ?? gap.title ?? "");
+  // The DEFECT text only: a narrowed child's appended prior-attempts section quotes earlier drafts' tsc errors, which
+  // would misread a failing-test (or any non-typecheck) gap as a typecheck phantom and exclude it on every pass.
+  const fullSummary = String(gap.summary ?? gap.title ?? "");
+  const priorAt = fullSummary.indexOf(PRIOR_ATTEMPTS_SECTION_HEADING);
+  const summary = priorAt >= 0 ? fullSummary.slice(0, priorAt) : fullSummary;
   const hay = `${id}\n${summary}`;
   // TSxxxx as a token — underscore-delimited ("_ts2322_") or spaced ("TS2322"); NOT inside a word
   // like "artifacts123". Underscore counts as a boundary here, so \b cannot be used.

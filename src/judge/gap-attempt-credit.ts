@@ -407,6 +407,9 @@ const NARROWED_DROP_CHECK = new Set([
   "decomposed_at", "decomposition", "own_check_broken", "own_check_unmeasurable_count", "own_check_last_reason", "own_check_last_at",
   "landed_unverified", "landed_unverified_reason", "disposition", "self_authored_check",
 ]);
+/** The heading of the section a chronic-failure narrowing appends to the child's summary (prior attempts' failure
+ * lessons). Text after it quotes earlier attempts, not the gap's own defect; readers that parse the defect cut here. */
+export const PRIOR_ATTEMPTS_SECTION_HEADING = "WHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):";
 /**
  * THE ONE NARROWED-CHILD BUILDER: chronic-failure narrowing (bumpFailedAttempts, checks:"inherit") and the
  * semantic-dissent child (feature-compose settleSemanticDissent, checks:"drop") both mint through it.
@@ -547,7 +550,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
         const childRecord = narrowedChildRecord(gap, meta, {
           id: plannedChildId,
           checks: "inherit",
-          summaryTail: "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + (lessonsForChild as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above.",
+          summaryTail: "\n\n" + PRIOR_ATTEMPTS_SECTION_HEADING + "\n" + (lessonsForChild as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above.",
           extra: {},
         });
         // An honoured direction propagates with its provenance (lib/operator-direct.ts); a legacy one does not.

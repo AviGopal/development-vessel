@@ -16,7 +16,8 @@ import { landingLeaseRefusalCounts, unarmableDetectorRowCounts } from "./resolve
 
 const app = new Hono();
 
-import { VESSEL_ID } from "./config.js";
+import { VESSEL_ID, VOLUME_ROOT } from "./config.js";
+import { noteActivity, setActivityMarkerFile, startLoopStallMonitor, LOOP_STALL_LOG_MS_ROW } from "./lib/loop-stall.js";
 
 // Published so lifecycle actors can SEE the work before deciding to restart us.
 // substrate-pull-sync defers a vessel's restart while it reports in-flight work,
@@ -418,6 +419,20 @@ const deadline = Date.now() + DEV_VESSEL_DRAIN_MS;
 process.on("SIGTERM", () => { void developmentVesselDrain("SIGTERM"); });
 process.on("SIGINT", () => { void developmentVesselDrain("SIGINT"); });
 
+// A STALLED EVENT LOOP NAMES ITSELF (lib/loop-stall.ts). The marker file is this process's only write of it: one line per
+// tick or resolver entry, so a vessel killed mid-stall still leaves the last entry on the volume. The threshold is the
+// tuning row, read through the one tuning reader at start and every 10 min (absent or unreadable: the default).
+setActivityMarkerFile(`${VOLUME_ROOT}/.dv-activity`);
+startLoopStallMonitor();
+const refreshLoopStallThreshold = (): void => {
+  void import("./judge/gap-policy.js")
+    .then((m) => m.readTuningNumber(LOOP_STALL_LOG_MS_ROW))
+    .then((v) => { if (v !== null && v > 0) startLoopStallMonitor({ thresholdMs: v }); })
+    .catch(() => { /* the default stays */ });
+};
+refreshLoopStallThreshold();
+setInterval(refreshLoopStallThreshold, 600_000).unref();
+
 // Non-blocking; failure logs but does not crash
 startDiscoveryRegistration();
 startRegistryChangeObserver();
@@ -463,13 +478,14 @@ const bunGlobal = globalThis as unknown as BunGlobal;
 setInterval(() => {
   const gc = bunGlobal.Bun?.gc;
   if (typeof gc === "function") {
+    const done = noteActivity("gc_tick");
     try {
       const freed = gc(true);
       const rssMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
       console.log(`[gc-tick] vessel=development-vessel freed=${freed}B rss_after=${rssMB}MB`);
     } catch (err) {
       console.warn(`[gc-tick] Bun.gc failed: ${(err as Error).message}`);
-    }
+    } finally { done(); }
   }
 }, GC_INTERVAL_MS).unref();
 
@@ -510,6 +526,7 @@ async function expGapWrite(gap: Record<string, unknown>): Promise<void> {
   await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ impulse: { type: "substrateGap_write", pointer: { type: "substrateGap_write", gap: { ...gap, detected_at: new Date().toISOString() } } } }), signal: AbortSignal.timeout(8000) });
 }
 setInterval(() => { void (async () => {
+  const done = noteActivity("expectation_scan_tick");
   try {
     const expectations = (await expResolveNote("expectation:")).filter((n) => (n.title ?? "").startsWith("expectation:"));
     let violationsFound = 0;
@@ -544,14 +561,14 @@ setInterval(() => { void (async () => {
     if (parsed.length > 0 || violationsFound > 0) console.log(`[expectation-scan] tick complete checked=${parsed.length} violations=${violationsFound}`);
   } catch (err) {
     console.warn(`[expectation-scan] tick failed (non-fatal): ${(err as Error).message}`);
-  }
+  } finally { done(); }
 })(); }, EXP_SCAN_INTERVAL_MS).unref();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TREND-EXPECTATION CHECK (2026-09-19): the standing commitment about the REACH
 // TREND itself, kept by observers/trend-expectation-check.ts on this rhythm.
 const trendExpectationTick = createTrendExpectationCheck({ self: EXP_SELF, goalHost: EXP_GOAL_HOST, key: EXP_KEY, resolveNote: expResolveNote, write: expWrite, gapWrite: expGapWrite });
-setInterval(() => { void trendExpectationTick(); }, 120000).unref();
+setInterval(() => { const done = noteActivity("trend_expectation_tick"); void trendExpectationTick().finally(done); }, 120000).unref();
 
 export default server;
 

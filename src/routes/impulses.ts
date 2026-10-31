@@ -249,6 +249,7 @@ import { resolveRemedyEffectivenessObserver } from "../resolvers/remedy-effectiv
 import { resolveUiScreenshot } from "../resolvers/ui-screenshot.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
 import { runWithRequestSignal } from "../lib/request-signal.js";
+import { noteActivity, startLoopStallMonitor } from "../lib/loop-stall.js";
 import { resolveFileList } from "../resolvers/file-list.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
@@ -256,13 +257,19 @@ type AnyPointer = { type: string } & Record<string, unknown>;
 
 /** Shared dispatch logic — used by both the HTTP route and the CLI. */
 export async function resolveDispatch(pointer: AnyPointer, opts: { signal?: AbortSignal } = {}): Promise<ResolverResult> {
-  const result = await runWithRequestSignal(opts.signal, () => dispatchInner(pointer));
-  // Nth-order self-check: validate every detector output against generic value
-  // invariants the moment it is produced (fraction out of [0,1], passing flag
-  // over an unmeasured dimension, non-finite number), emitting a meta-gap on
-  // violation. Fire-and-forget; never blocks or throws into the dispatch path.
-  void auditDetectorOutputSanity(result).catch(() => {});
-  return result;
+  // THE TICK-LEVEL ACTIVITY MARKER (lib/loop-stall.ts): every tick and resolver enters here, so a stalled event loop
+  // names the shape that was running. The monitor starts once and is unref'd.
+  startLoopStallMonitor();
+  const done = noteActivity(pointer.type);
+  try {
+    const result = await runWithRequestSignal(opts.signal, () => dispatchInner(pointer));
+    // Nth-order self-check: validate every detector output against generic value
+    // invariants the moment it is produced (fraction out of [0,1], passing flag
+    // over an unmeasured dimension, non-finite number), emitting a meta-gap on
+    // violation. Fire-and-forget; never blocks or throws into the dispatch path.
+    void auditDetectorOutputSanity(result).catch(() => {});
+    return result;
+  } finally { done(); }
 }
 
 async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {

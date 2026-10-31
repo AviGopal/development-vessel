@@ -54,7 +54,8 @@ import { seedDeliveryLesson, seedDeliveryReason, seedDeliveryRefusals, touchesSe
 import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
-import { heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
+import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
+import { countLiteral, regionOf } from "../lib/region-literal.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
@@ -5582,6 +5583,65 @@ export function fileScopeGate<O extends { kind: string; path: string; content?: 
   if (off.length === ops.length) return { ops: [], dropped_paths, dropped_reason, refusal_class: "no_effect_all_dropped", refused: "plan is off-target: it edits " + off.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" };
   return { ops: ops.filter((op) => !isOff(op)), dropped_paths, dropped_reason };
 }
+/**
+ * THE REGION SCOPE OF AN ARMED GAP'S PLAN. An armed gap whose region is one literal line occurring once in its edit site
+ * names one place to change. A plan that also rewrites a signature and its callers elsewhere is a wider change than the
+ * gap describes: such a 4-op draft once turned 17 green tests red and the attempt failed in the suite, before its own
+ * check ran. This places each op against the region's ENCLOSING DECLARATION (the top-level declaration that holds the
+ * region line, as enclosingTopLevelSymbol reads it, from its column-0 head to the line before the next column-0
+ * statement; a module-scope region is its own statement), so a one-line fix may still touch its neighbours.
+ * An op is outside when it targets another file, creates a file, or (edit / replace_lines) spans no line of that
+ * declaration. An edit whose anchor is not in the file is left to the apply step, which refuses it. Returns null when
+ * the region is not exactly once in the site text: the gate has no signal there and abstains.
+ */
+export function regionScopeWidening(ops: ReadonlyArray<{ kind: string; path: string; old_string?: string; start_line?: number; end_line?: number }>, site: { path: string; text: string; region: string }): { declaration: string; lo: number; hi: number; outside: number[] } | null {
+  const region = site.region.trim();
+  if (!region || region.includes("\n") || countLiteral(site.text, region) !== 1) return null;
+  const lines = site.text.split("\n");
+  const lineAt = (offset: number): number => site.text.slice(0, offset).split("\n").length;
+  const regionLine = lineAt(site.text.indexOf(region));
+  const head = (l: string): boolean => /^\S/.test(l) && !/^(?:\/\/|\/\*|\*)/.test(l);
+  let lo = regionLine;
+  while (lo > 1 && !head(lines[lo - 1]!)) lo--;
+  let hi = lo;
+  while (hi < lines.length && !(head(lines[hi]!) && !/^[}\])]/.test(lines[hi]!))) hi++;
+  while (hi > regionLine && lines[hi - 1]!.trim() === "") hi--;
+  const declaration = enclosingTopLevelSymbol(site.text, regionLine) ?? `the statement at line ${lo}`;
+  const norm = (p: string): string => String(p ?? "").replace(/:\d+.*$/, "").replace(/^(?:\.\/)+/, "").trim();
+  const sitePath = norm(site.path);
+  const outside: number[] = [];
+  ops.forEach((op, i) => {
+    if (norm(op.path) !== sitePath || op.kind === "create_file") { outside.push(i + 1); return; }
+    let a: number, b: number;
+    if (op.kind === "replace_lines" && Number.isInteger(op.start_line) && Number.isInteger(op.end_line)) { a = op.start_line!; b = op.end_line!; }
+    else if (op.kind === "edit" && op.old_string) {
+      const at = site.text.indexOf(op.old_string);
+      if (at < 0) return;
+      a = lineAt(at); b = a + op.old_string.split("\n").length - 1;
+    } else return;
+    if (b < lo || a > hi) outside.push(i + 1);
+  });
+  return { declaration, lo, hi, outside };
+}
+/**
+ * A REPAIR ROUND'S OP against the same scope (the fc-repair path). A repair round edits the file as the draft left it,
+ * where the region line itself may have changed, so it is placed by NAME: inside when any line it spans lies in the
+ * top-level declaration the plan gate found the region in (enclosingTopLevelSymbol), outside for another file or any
+ * other declaration. An edit whose anchor is not in the current text is left to the repair's own anchor refusal.
+ */
+export function repairOpOutsideRegion(op: { path: string; old_string?: string; start_line?: number; end_line?: number }, currentText: string, scope: { path: string; declaration: string }): boolean {
+  const norm = (p: string): string => String(p ?? "").replace(/:\d+.*$/, "").replace(/^(?:\.\/)+/, "").trim();
+  if (norm(op.path) !== norm(scope.path)) return true;
+  let a: number, b: number;
+  if (op.old_string) {
+    const at = currentText.indexOf(op.old_string);
+    if (at < 0) return false;
+    a = currentText.slice(0, at).split("\n").length; b = a + op.old_string.split("\n").length - 1;
+  } else if (Number.isInteger(op.start_line) && Number.isInteger(op.end_line)) { a = op.start_line!; b = op.end_line!; }
+  else return false;
+  for (let l = a; l <= b; l++) if (enclosingTopLevelSymbol(currentText, l) === scope.declaration) return false;
+  return true;
+}
 // The check's test file is read from the vessel CLONE, never the runtime tree: the runtime tree is an image
 // layer that omits most test/ files, and a copy there can be stale. Read at call time.
 const vesselCloneRootForChecks = (): string => { const v = process.env["VESSELS_CLONE_ROOT"]; return v && v.trim() ? v : "/workspace/git/vessels"; };
@@ -8634,6 +8694,56 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   }
   if (ops.length > maxOps) ops.length = maxOps;
 
+  // REGION SCOPE BEFORE APPLY (regionScopeWidening). An ARMED gap (composeEligibilitySkipReason) whose region is one
+  // literal line, once in its edit site, gets a plan that stays inside the region's enclosing declaration. A widening
+  // plan gets ONE re-plan naming the ops outside it. A re-plan that still widens is refused here, before any op is applied
+  // and before the suite runs, as a terminal refusal: no failed_attempts bump, full cooldown, because the gap as filed is
+  // narrower than the change and no re-draft fixes that. Its reason goes on the gap row as a failure lesson, which the
+  // next drafter prompt, decomposition and admission's identicalRepeatedFailure read. Every other compose abstains:
+  // no region, a region not once in the site, unarmed, test-writing, or goal-supplied exact / verbatim edits.
+  let regionScope: { path: string; declaration: string } | null = null;
+  {
+    const scopeRegion = regionOf(gapMeta);
+    // A test-writing compose has a write scope (testWritingWriteScope above, non-null exactly in that mode): its own gates hold it.
+    const testWritingCompose = testWritingScope !== null;
+    let siteText: string | null = null;
+    if (scopeRegion && lineHintFile && !exactOps && !verbatimOps && !testWritingCompose && pointer.gap && composeEligibilitySkipReason(pointer.gap as Record<string, unknown>) === null) {
+      try { siteText = readFileSync(opAbs(lineHintFile), "utf8"); } catch { siteText = null; }
+    }
+    const site = siteText !== null ? { path: lineHintFile, text: siteText, region: scopeRegion } : null;
+    let widening = site ? regionScopeWidening(ops, site) : null;
+    // The repair rounds below hold their ops to the same declaration (repairOpOutsideRegion); a module-scope region has no name to hold them to.
+    if (site && widening && enclosingTopLevelSymbol(site.text, site.text.slice(0, site.text.indexOf(scopeRegion)).split("\n").length) !== null) regionScope = { path: site.path, declaration: widening.declaration };
+    if (site && widening && widening.outside.length > 0) {
+      const outsideWhy = (w: { outside: number[]; declaration: string; lo: number; hi: number }): string => `ops ${w.outside.join(",")} outside the region's enclosing declaration ${w.declaration} (${site.path} lines ${w.lo}-${w.hi})`;
+      console.log(`[fc-region-scope] re-plan: ${outsideWhy(widening)}`);
+      const suffix = `REGION SCOPE: your plan's ${outsideWhy(widening)}. This gap's region is the one line ${JSON.stringify(scopeRegion)}; make the change inside ${widening.declaration} only, and do not change a signature or its callers elsewhere.`;
+      let replanRaw: string;
+      try {
+        replanRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles.concat(composeLessons), priorFeedback, netNewTargets) + "\n\n" + suffix, model);
+      } catch (e) {
+        const error = `region-scope re-plan unavailable: ${(e as Error)?.message ?? String(e)}`.slice(0, 300);
+        console.log(`[fc-region-scope] ${error}; nothing applied`);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "region_replan_unavailable", failure_kind: "environment", error } };
+      }
+      const replanned = parseJsonObject(replanRaw);
+      const replannedOps = (replanned?.ops as PlanOp[] | undefined) ?? [];
+      if (replanned && Array.isArray(replannedOps) && replannedOps.length > 0) {
+        const refused = await unsafeOpPathRefusal(replanned, replannedOps);
+        if (refused) return refused;
+        planRaw = replanRaw; plan = replanned; ops = replannedOps.slice(0, maxOps);
+        widening = regionScopeWidening(ops, site);
+      }
+      if (widening && widening.outside.length > 0) {
+        const reason = `[deterministic] region_too_narrow: ${outsideWhy(widening)} after one re-plan; the change needs more than the gap's region, so the gap should be re-filed with a region that covers it`;
+        console.log(`[fc-region-scope] plan REFUSED before any op was applied: ${reason}`);
+        await appendComposeLesson("region_too_narrow", reason, "", pointer.gap).catch(() => undefined);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "region_too_narrow", failure_kind: "terminal_refusal", terminal_refusal: reason, error: reason, outside_ops: widening.outside, region_declaration: { name: widening.declaration, path: site.path, lo: widening.lo, hi: widening.hi } } };
+      }
+      console.log(`[fc-region-scope] re-plan stays inside the region's enclosing declaration (${ops.length} op(s))`);
+    }
+  }
+
   // APPLY SAME-FILE EDITS BOTTOM-UP (2026-08-07). Two ops on one file interfered:
   // the first edit shifted the bytes the second anchored on, the second failed
   // `old_string not found` / `no_unique_anchor`, and the WHOLE plan rolled back —
@@ -10288,7 +10398,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const MAX_REPAIR_CREATE = MAX_REPAIR + 2;
   const repairCap = created.length > 0 ? MAX_REPAIR_CREATE : MAX_REPAIR;
   if (terminalRefusal) console.log(`[fc-own-check] terminal refusal for ${pointer.gap?.id ?? "?"}: ${terminalRefusal}; no repair attempts`);
-  for (let attempt = 0; attempt < repairCap && !applyFailed && !terminalRefusal && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
+  // A repair op outside the armed region's enclosing declaration is not applied and ends the repairs (regionScope above):
+  // the same reason text and the same failure-lesson field as the plan gate. The repair prompt has no re-plan channel, so
+  // the plan stage's one re-plan has no repair-round twin; the draft's own verify failure is graded as before.
+  let regionRepairRefused: string | null = null;
+  for (let attempt = 0; attempt < repairCap && !applyFailed && !terminalRefusal && !regionRepairRefused && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
     let anyFixed = false;
     for (const fv of verify.filter((v) => !v.ok)) {
       const errText = (fv.output || "").trim();
@@ -10431,6 +10545,21 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             : `[fc-repair] repair target refused: it does not pass the plan-path rule (planPathProblem)`);
         }
         const efAbs = efNorm ? opAbs(efNorm) : "";
+        if (regionScope && efNorm && fix) {
+          const rc = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
+          const rcText = (rc.body as { content?: unknown })?.content;
+          const rop: { path: string; old_string?: string; start_line?: number; end_line?: number } = { path: efNorm, ...(fix.old_string ? { old_string: String(fix.old_string) } : { start_line: Number(fix.start_line), end_line: Number(fix.end_line) }) };
+          const rcCur = typeof rcText === "string" ? rcText : "";
+          if (repairOpOutsideRegion(rop, rcCur, regionScope)) {
+            // The whole round is dropped (fail-closed): a round carries one op per failing vessel, and it is not applied.
+            const at = rop.old_string ? rcCur.indexOf(rop.old_string) : -1;
+            const opLine = rop.old_string ? (at >= 0 ? rcCur.slice(0, at).split("\n").length : null) : rop.start_line;
+            regionRepairRefused = `[deterministic] region_repair_refused: repair op ${efNorm}${opLine ? `:${opLine}` : ""} outside the region's enclosing declaration ${regionScope.declaration}; the change needs more than the gap's region, so the gap should be re-filed with a region that covers it`;
+            console.warn(`[fc-repair] repair op REFUSED, round dropped, repairs end: ${regionRepairRefused}`);
+            await appendComposeLesson("region_repair_refused", regionRepairRefused, "", pointer.gap).catch(() => undefined);
+            break;
+          }
+        }
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.
         //
@@ -10515,6 +10644,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         }
       } catch (err) { console.warn(`[fc-repair] repair round threw for ${fv.vessel}: ${String(err).slice(0, 200)}`); }
     }
+    if (regionRepairRefused) break;
     if (!anyFixed) { console.warn(`[fc-repair] round ${attempt} wrote nothing (no parsable fix, unreadable path, or old_string not found) — repair stops`); break; }
     verify = [];
     for (const v of touched) verify.push(await runVerify(v));
@@ -11771,6 +11901,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,
+      ...(regionRepairRefused ? { region_repair_refused: regionRepairRefused } : {}),
       failure_kind: composeFailure,
       ...(conceptsApplied.applied.length > 0 ? { applied_concept_ids: conceptsApplied.applied, concept_credits: conceptCredits } : {}),
       summary: plan.summary,

@@ -705,9 +705,14 @@ export function lineCenteredSlice(content: string, start: number, end: number, w
  */
 export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
   if (!Array.isArray(lessons)) return "";
-  const recs = (lessons as Array<Record<string, unknown>>).filter((l) => l && (Array.isArray(l.edited_spans) || l.own_check || l.stage)).slice(-max);
+  const staged = (l: Record<string, unknown>): boolean => Boolean(l && (Array.isArray(l.edited_spans) || l.own_check || l.stage));
+  const recs = (lessons as Array<Record<string, unknown>>).filter(staged).slice(-max);
+  // A region-scope refusal (class region_too_narrow / region_repair_refused) is written with no attempt record, so the
+  // filter above drops it; for a recommit, whose parent's lessons reach the prompt only through this block, its drafter
+  // never saw why the parent's plan was refused. Shown after the staged records, so their lines are unchanged.
+  const regionRefusals = (lessons as Array<Record<string, unknown>>).filter((l) => l && !staged(l) && typeof l.class === "string" && l.class.startsWith("region_")).slice(-max);
   const active = activeMustBeCalled(lessons);
-  if (recs.length === 0 && active.length === 0) return "";
+  if (recs.length === 0 && active.length === 0 && regionRefusals.length === 0) return "";
   const lines: string[] = ["", "PRIOR ATTEMPT RECORD (measured on the previous drafts of THIS gap; data, not advice):"];
   for (const r of recs) {
     const spans = (Array.isArray(r.edited_spans) ? (r.edited_spans as EditedSpan[]) : []).map((s) => `${s.path}:${s.start}-${s.end}`);
@@ -735,6 +740,7 @@ export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
       if (f.diff) for (const d of f.diff.split("\n").slice(0, 8)) lines.push(`      ${d}`);
     }
   }
+  for (const r of regionRefusals) lines.push(`- attempt ${String(r.at ?? "?")}: refused by the region scope gate; class ${String(r.class)}; reason: ${String(r.reason ?? "")}`);
   const refused = noEffectSpans(lessons).map((s) => `${s.path}:${s.start}-${s.end}`);
   if (refused.length) lines.push(`REFUSED REGIONS (an edit op overlapping one of these is refused before it is written): ${[...new Set(refused)].join(", ")}`);
   for (const c of active) lines.push(`CONSTRAINT must_be_called(${c.symbol}) (introduced in ${c.introduced_in || "?"}): a draft that defines ${c.symbol} is refused before verify unless it also calls it on the live path, outside its own definition. A call in a test file, a comment or string, dead code (if (false), after a return) or a call whose result is discarded does not count.`);

@@ -10,7 +10,9 @@
  *   - `stage`: where the draft failed (install / resolve / typecheck / shape-dispatch / tests / own_check /
  *     scope), from the verify run's own markers;
  *   - `no_effect_vs_parent`: the own check failed IDENTICALLY on the untouched parent, so the edited
- *     regions are demonstrably not on the path the check exercises.
+ *     regions are demonstrably not on the path the check exercises;
+ *   - `own_check.call_path`: where the red check DOES go (checkCallPathFromRun), so the next attempt is told the
+ *     functions to edit as well as the regions it may not.
  *
  * Measured on gap-drain-redispatches (09-30, node 2): 9 drafts, 7 different sites, none at the defect,
  * because each retry was told test NAMES, a lesson from another gap's test, and a class from a regex that
@@ -61,7 +63,7 @@ export type DrafterAttribution = { variant: string | null; version: string | nul
 export interface AttemptRecord {
   stage: FailStage | null;
   edited_spans: EditedSpan[];
-  own_check?: { test_file: string; failing: OwnCheckFailure[] };
+  own_check?: { test_file: string; failing: OwnCheckFailure[]; call_path?: CallPathEntry[] };
   /** true: the check failed identically on the parent. false: it differed. absent: not measured. */
   no_effect_vs_parent?: boolean;
   base_sha?: string;
@@ -253,12 +255,18 @@ const isExcerpt = (l: string): boolean => /^\s*\d+\s*\|/.test(l) || /^\s*\^\s*$/
 const isExpectedOrDiff = (l: string): boolean => /^\s*Expected\b/.test(l) || /^\s*[-+]\s/.test(l);
 const ERROR_LINE = /^\s*(?:error|[A-Za-z]*Error):\s?/;
 const capLine = (s: string, n = 240): string => (s.length > n ? s.slice(0, n) + "…" : s);
+/** A stack frame's location ("at fn (/abs/file.ts:12:5)", "at /abs/file.ts:12:5"): file, line, column. */
+const FRAME_LOC_RE = /\(?((?:[A-Za-z]:)?[^\s()]+):(\d+):(\d+)\)?\s*$/;
+/** The LAST error line of a failure's block is the failure's own; an earlier one is an error the code under test logged. */
+const ownErrorIndex = (block: readonly string[]): number => {
+  for (let i = block.length - 1; i >= 0; i--) if (!isExcerpt(block[i]!) && ERROR_LINE.test(block[i]!)) return i;
+  return -1;
+};
 
 /** Classify one failure's block (the lines bun printed for it) plus any trailer printed after its (fail) line. */
 function classifyFailureBlock(name: string, block: string[], trailer: string[]): ClassifiedFailure {
   // The LAST error line is the failure's own; an earlier one is an error the code under test logged.
-  let at = -1;
-  for (let i = block.length - 1; i >= 0; i--) if (!isExcerpt(block[i]!) && ERROR_LINE.test(block[i]!)) { at = i; break; }
+  const at = ownErrorIndex(block);
   const tail = at >= 0 ? block.slice(at) : block;
   const errLine = at >= 0 ? block[at]!.trim() : null;
   // The matcher's printout: the lines after the error line, up to the stack.
@@ -278,8 +286,7 @@ function classifyFailureBlock(name: string, block: string[], trailer: string[]):
 
 /** The values an assertion failure's printout compared, and its first stack frame (the block as classifyFailureBlock reads it). */
 function comparedValues(name: string, block: string[]): ComparedValues {
-  let at = -1;
-  for (let i = block.length - 1; i >= 0; i--) if (!isExcerpt(block[i]!) && ERROR_LINE.test(block[i]!)) { at = i; break; }
+  const at = ownErrorIndex(block);
   const tail = at >= 0 ? block.slice(at + 1) : [];
   const stack = tail.findIndex((l) => /^\s*at\s/.test(l));
   const printout = stack < 0 ? tail : tail.slice(0, stack);
@@ -289,7 +296,7 @@ function comparedValues(name: string, block: string[]): ComparedValues {
     const ls = printout.filter((l) => l.trimStart().startsWith(`${sign} `) && !/^\s*[-+]\s+(?:Expected|Received)\s+[-+]\s*\d/.test(l)).map((l) => l.trimStart().slice(2).trim());
     return ls.length ? capLine(ls.join(" "), 300) : null;
   };
-  const frame = stack < 0 ? null : /\(?((?:[A-Za-z]:)?[^\s()]+):(\d+):(\d+)\)?\s*$/.exec(tail[stack]!);
+  const frame = stack < 0 ? null : FRAME_LOC_RE.exec(tail[stack]!);
   return { name, file: frame ? frame[1]! : null, line: frame ? Number(frame[2]) : null, col: frame ? Number(frame[3]) : null, expected: value(/^\s*Expected\b[^:]*:/) ?? side("-"), received: value(/^\s*Received\b[^:]*:/) ?? side("+") };
 }
 
@@ -343,6 +350,104 @@ export function classifyCheckRun(raw: string): CheckRunClass {
     failures: failures.slice(0, 50),
     compared: compared.slice(0, 50),
   };
+}
+
+// ─── the check's call path: where a red own check goes ──────────────────────────────────────────────────────
+
+/**
+ * THE CHECK'S CALL PATH (positive localization). A red own check used to tell the next attempt only where NOT to edit
+ * (the no-effect lock's refused regions): measured, 7 of 8 lane drafts with a valid red own check in a day edited code
+ * the check never exercises, and the next round was told the region it had wasted and nothing about where the check
+ * goes. The path is read from the check's own red run, two ways:
+ *   (i) a THROWN error: the frames of the failing tests' stacks under the vessel's src/ (the tree is found from the
+ *       check file's own frame, so a run in a parent worktree maps too), each with the frame's function name, or the
+ *       declaration enclosing its line when the frame names none;
+ *   (ii) an expect() on a RETURNED value (no src frame on the stack): the src symbols the failing test's body calls,
+ *       through the check's imports, at their declarations (feature-compose staticCheckCallPath, which owns the
+ *       import readers).
+ * One entry per (file, function), vessel src/ only, at most CALL_PATH_MAX. Carried on own_check.call_path, rendered
+ * by attemptEvidenceBlock beside the refused regions.
+ */
+export type CallPathEntry = { path: string; fn: string | null; line: number };
+export const CALL_PATH_MAX = 8;
+const FRAME_FN_RE = /^\s*at\s+(?:async\s+)?([^\s()]+)\s+\(/;
+
+/** The stack frames of a run's FAILING tests (each from the failure's own error line on; `only` as parseOwnCheckFailures). */
+export function failureStackFrames(raw: string, only: string[] = []): Array<{ fn: string | null; file: string; line: number }> {
+  const out: Array<{ fn: string | null; file: string; line: number }> = [];
+  let block: string[] = [];
+  for (const line of stripAnsi(raw).split("\n")) {
+    const r = RESULT_LINE.exec(line);
+    if (!r) { block.push(line); continue; }
+    const kind = r[1] ?? RESULT_KIND[r[2] ?? ""] ?? "";
+    const name = r[3] ?? "";
+    if (kind === "fail" && (only.length === 0 || only.some((n) => name.includes(n)))) {
+      const at = ownErrorIndex(block);
+      for (const l of at >= 0 ? block.slice(at + 1) : block) {
+        if (!/^\s*at\s/.test(l)) continue;
+        const loc = FRAME_LOC_RE.exec(l);
+        if (!loc) continue;
+        const fn = FRAME_FN_RE.exec(l)?.[1] ?? null;
+        out.push({ fn: fn && fn !== "<anonymous>" ? fn : null, file: loc[1]!, line: Number(loc[2]) });
+      }
+    }
+    block = [];
+  }
+  return out;
+}
+
+const DECL_NAME_RES: readonly RegExp[] = [
+  /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\*?\s+([A-Za-z_$][\w$]*)/,
+  /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(?:async\s+)?(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>)/,
+  /^\s+(?:(?:public|private|protected|static|async)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[^{=]+)?\{\s*$/,
+];
+const NOT_A_DECL_NAME: ReadonlySet<string> = new Set(["if", "for", "while", "switch", "catch", "return", "function", "with"]);
+/** The cheap source lookup: the nearest function / const-arrow / method declaration at or above `line` (1-based), or null. */
+export function enclosingDeclaration(src: string, line: number): string | null {
+  const lines = src.split("\n");
+  for (let i = Math.min(line, lines.length) - 1; i >= 0; i--) {
+    for (const re of DECL_NAME_RES) { const m = re.exec(lines[i]!); if (m && !NOT_A_DECL_NAME.has(m[1]!)) return m[1]!; }
+  }
+  return null;
+}
+
+/** Add one entry unless the path is full or already holds it (same file and function; an unnamed one by its line). */
+export function addCallPathEntry(out: CallPathEntry[], e: CallPathEntry, max = CALL_PATH_MAX): void {
+  if (out.length >= max) return;
+  if (out.some((x) => x.path === e.path && x.fn === e.fn && (e.fn !== null || x.line === e.line))) return;
+  out.push(e);
+}
+
+/**
+ * (i) The call path a red run's stacks show: frames under `<root>/src/`, where a root is the tree the check file ran in
+ * (its frame's path minus `testFile`) or one of `roots`; test files, node_modules and runtime frames are dropped.
+ * `prefix` is put before the vessel-relative path ("repos/<vessel>/", as edited spans are written); `read` gives a
+ * vessel-relative file's source for the enclosing-declaration lookup.
+ */
+export function checkCallPathFromRun(raw: string, testFile: string, opts: { roots?: readonly string[]; prefix?: string; read?: (rel: string) => string | null; only?: string[]; max?: number } = {}): CallPathEntry[] {
+  const frames = failureStackFrames(raw, opts.only ?? []);
+  const tf = "/" + testFile.replace(/^\.?\/+/, "");
+  const roots = [...new Set([...frames.filter((f) => f.file.endsWith(tf)).map((f) => f.file.slice(0, -tf.length)), ...(opts.roots ?? [])])].filter(Boolean);
+  const out: CallPathEntry[] = [];
+  for (const f of frames) {
+    const root = roots.find((r) => f.file.startsWith(r + "/"));
+    if (!root) continue;
+    const rel = f.file.slice(root.length + 1);
+    if (!rel.startsWith("src/") || TEST_PATH_RE.test(rel) || rel.includes("/node_modules/")) continue;
+    let src = "";
+    if (f.fn === null) { try { src = opts.read?.(rel) ?? ""; } catch { src = ""; } }
+    addCallPathEntry(out, { path: (opts.prefix ?? "") + rel, fn: f.fn ?? enclosingDeclaration(src, f.line), line: f.line }, opts.max);
+  }
+  return out;
+}
+
+const SAFE_CALL_PATH_RE = /^[A-Za-z0-9_./-]+$/;
+const SAFE_FN_RE = /^[A-Za-z_$<][\w$.<>]*$/;
+/** The prompt line for a call path ("" for none). Entries read back from a gap row are shown only when well-formed. */
+export function callPathLine(entries: unknown): string {
+  const ok = (Array.isArray(entries) ? entries : []).filter((e): e is CallPathEntry => Boolean(e) && typeof e.path === "string" && SAFE_CALL_PATH_RE.test(e.path) && (e.fn === null || (typeof e.fn === "string" && SAFE_FN_RE.test(e.fn))) && Number.isInteger(e.line) && e.line > 0);
+  if (ok.length === 0) return "";
+  return `the check's call path: ${ok.slice(0, CALL_PATH_MAX).map((e) => `${e.path}:${e.fn ?? "?"}:${e.line}`).join(", ")} (what the own check's latest red run executes, vessel src/ only: an edit the check can see is on this path)`;
 }
 
 /** The drafter-facing cure for each wrong reason (carried in the refusal, read by the next attempt's prompt). */
@@ -743,6 +848,9 @@ export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
   for (const r of regionRefusals) lines.push(`- attempt ${String(r.at ?? "?")}: refused by the region scope gate; class ${String(r.class)}; reason: ${String(r.reason ?? "")}`);
   const refused = noEffectSpans(lessons).map((s) => `${s.path}:${s.start}-${s.end}`);
   if (refused.length) lines.push(`REFUSED REGIONS (an edit op overlapping one of these is refused before it is written): ${[...new Set(refused)].join(", ")}`);
+  // Where the check DOES go, beside where an edit may not: from the latest attempt whose red own check recorded a path.
+  const pathRec = (lessons as Array<Record<string, unknown>>).filter((l) => staged(l) && callPathLine((l.own_check as { call_path?: unknown } | undefined)?.call_path) !== "").pop();
+  if (pathRec) lines.push(callPathLine((pathRec.own_check as { call_path?: unknown }).call_path));
   for (const c of active) lines.push(`CONSTRAINT must_be_called(${c.symbol}) (introduced in ${c.introduced_in || "?"}): a draft that defines ${c.symbol} is refused before verify unless it also calls it on the live path, outside its own definition. A call in a test file, a comment or string, dead code (if (false), after a return) or a call whose result is discarded does not count.`);
   return lines.join("\n");
 }

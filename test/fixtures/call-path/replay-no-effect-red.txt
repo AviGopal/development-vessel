@@ -1,0 +1,24 @@
+bun test v1.4.2 (744846f84)
+
+test/checks/a-check-judged-green-at-head-by-a-since-fixed-judging-defect.check.ts:
+16 | 
+17 |     // This fails. Currently it returns a string like:
+18 |     // "An earlier attempt wrote a test in test/checks/some.check.ts, which already PASSES at HEAD, so it does not reproduce the defect: write a dif"
+19 |     // The defect is that this message causes the check to be considered settled and not re-judged.
+20 |     // The fix should be to return an empty string, allowing the check to be re-evaluated.
+21 |     expect(sentence).toBe("");
+                          ^
+error: expect(received).toBe(expected)
+
+Expected: ""
+Received: "An earlier attempt wrote the previous check, which already PASSES at HEAD, so it does not reproduce the defect: write a different test whose assertion fails because of the defect. Tests already in the file do not count. "
+
+      at <anonymous> (/work/development-vessel/test/checks/a-check-judged-green-at-head-by-a-since-fixed-judging-defect.check.ts:21:22)
+      at run (node:async_hooks:144:29)
+(fail) gap-check-supply: green_at_head settlement defect > priorAttemptSentence for green_at_head should return an empty string to allow re-judging [0.70ms]
+(pass) gap-check-supply: green_at_head settlement defect > CONTROL: priorAttemptSentence with no prior attempts should be empty [0.02ms]
+
+ 1 pass
+ 1 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [49.00ms]

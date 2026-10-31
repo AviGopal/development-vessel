@@ -57,6 +57,7 @@ import { sweepGitOut } from "../judge/gap-check-judge.js";
 import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
+import { addCallPathEntry, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
 /**
@@ -5313,6 +5314,16 @@ export function resolveVesselImport(vesselRoot: string, testFile: string, spec: 
   const cands = /\.[cm]?js$/.test(base) ? [base.replace(/\.([cm]?)js$/, ".$1ts"), base.replace(/\.([cm]?)js$/, ".$1tsx"), base] : /\.[cm]?tsx?$/.test(base) ? [base] : [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`];
   return cands.find((c) => mountExistsSync(`${vesselRoot}/${c}`)) ?? null;
 }
+/** The source of the failing test `name` (its " > " leaf) up to the next it(/test( in `src`, or null when the leaf is not in it. */
+export function failingTestBody(src: string, name: string): string | null {
+  const leaf = name.split(" > ").pop()?.trim() ?? "";
+  if (!leaf) return null;
+  const at = src.indexOf(leaf);
+  if (at < 0) return null;
+  const rest = src.slice(at + leaf.length);
+  const next = /\n\s*(?:it|test)(?:\.\w+)?\(/.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
 export function deriveRelocationHint(input: { vessel_root: string; vessel: string; test_file: string; failing: ReadonlyArray<{ name?: unknown }>; no_effect_vs_parent?: boolean; edit_site?: string }): RelocationHint | null {
   if (input.no_effect_vs_parent !== true) return null;
   // The vessel and test file come from gap metadata: confine the read to the vessel root.
@@ -5335,14 +5346,9 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
   const names: string[] = [];
   for (const f of input.failing) {
     const full = String(f?.name ?? "");
-    const leaf = full.split(" > ").pop()?.trim() ?? "";
-    if (!leaf) continue;
-    const at = src.indexOf(leaf);
-    if (at < 0) continue;
+    const body = failingTestBody(src, full);
+    if (body === null) continue;
     names.push(full);
-    const rest = src.slice(at + leaf.length);
-    const next = /\n\s*(?:it|test)(?:\.\w+)?\(/.exec(rest);
-    const body = next ? rest.slice(0, next.index) : rest;
     for (const id of new Set(body.match(/[A-Za-z_$][\w$]*/g) ?? [])) {
       const spec = bindings.get(id);
       if (!spec) continue;
@@ -5353,6 +5359,42 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
     }
   }
   return files.length > 0 ? { files, derived_from: "own_check_failure", at: new Date().toISOString(), test_file: input.test_file, failing_tests: names.slice(0, 5) } : null;
+}
+/**
+ * (ii) THE CHECK'S CALL PATH WHEN NO SRC FRAME IS ON THE STACK (an expect() on a returned value): the src symbols the
+ * failing tests' bodies call through the check's relative imports (a named import `fn(`, a namespace `ns.fn(`), at their
+ * declaration in the module the import resolves to. Unlike the relocation hint it keeps the edit_site's own file: the
+ * point is the FUNCTION the check reaches there. `read` gives a vessel-relative file's source (the check's too).
+ */
+export function staticCheckCallPath(input: { vessel_root: string; test_file: string; failing: ReadonlyArray<{ name?: unknown }>; prefix: string; read: (rel: string) => string | null; max?: number }): CallPathEntry[] {
+  const out: CallPathEntry[] = [];
+  const src = input.read(input.test_file);
+  if (!src) return out;
+  const bindings = relativeImportBindings(src, true);
+  const sources = new Map<string, string | null>();
+  const declare = (sym: string, spec: string): void => {
+    const rel = resolveVesselImport(input.vessel_root, input.test_file, spec);
+    if (!rel || !rel.startsWith("src/") || TEST_FILE_RE.test(rel)) return;
+    if (!sources.has(rel)) sources.set(rel, input.read(rel));
+    const content = sources.get(rel);
+    const d = content ? findDeclarations(sym, [{ path: rel, content }])[0] : undefined;
+    if (d) addCallPathEntry(out, { path: input.prefix + rel, fn: sym, line: d.line }, input.max ?? CALL_PATH_MAX);
+  };
+  for (const f of input.failing) {
+    const body = failingTestBody(src, String(f?.name ?? ""));
+    if (body === null) continue;
+    // In call order: each call site of an imported binding in the body.
+    for (const m of body.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?\s*\(/g)) {
+      const spec = bindings.get(m[1]!);
+      if (spec) declare(m[2] ?? m[1]!, spec);
+    }
+  }
+  return out;
+}
+/** The own check's call path from one red run: its src stack frames (i), else the static path of its failing tests (ii). */
+export function ownCheckCallPath(input: { raw: string; test_file: string; only: string[]; failing: ReadonlyArray<{ name?: unknown }>; vessel_root: string; prefix: string; read: (rel: string) => string | null }): CallPathEntry[] {
+  const frames = checkCallPathFromRun(input.raw, input.test_file, { roots: [input.vessel_root], prefix: input.prefix, read: input.read, only: input.only });
+  return frames.length > 0 ? frames : staticCheckCallPath({ vessel_root: input.vessel_root, test_file: input.test_file, failing: input.failing, prefix: input.prefix, read: input.read });
 }
 // THE OWN CHECK IN THE DRAFTER'S GROUNDING (gap the-drafter-never-sees-the-check-it-must-pass). A gap's class-2 own
 // check was resolved only at verify, to run it; the drafter never saw the API it calls, the options it passes or the
@@ -6290,7 +6332,7 @@ const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss"; call_path?: CallPathEntry[] }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
 /**
  * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
@@ -6468,7 +6510,7 @@ export function composeAttemptEvidence(
   const record: AttemptRecord = {
     stage,
     edited_spans: [...applied.filter((a) => a.ok && a.base_span).map((a) => a.base_span!), ...repairSpans],
-    ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
+    ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing, ...(ownV.own.call_path?.length ? { call_path: ownV.own.call_path } : {}) }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
   };
   // C-window-1: what the composer showed and ran, from its own reads and runs (never from the draft). Written only when the
   // caller passes it (composeGroundingPolicy on), so with the policy off the record is unchanged.
@@ -10333,6 +10375,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let ownRef: { test_file: string; only_tests: string[] } | null = null;
     let ownFailing: OwnCheckFailure[] = [];
     let ownNoEffect: boolean | undefined;
+    let ownCallPath: CallPathEntry[] = [];
     let ownBaseSha: string | undefined;
     let ownParentCached: "hit" | "miss" | undefined;
     if (gateGapMeta) {
@@ -10371,6 +10414,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           ownBaseSha = parent.sha || undefined;
           ownParentCached = parent.cached;
           if (parent.raw !== null && ownCheckStillRed(parent.raw, own.only_tests) !== null) ownNoEffect = sameOwnCheckFailures(ownFailing, parseOwnCheckFailures(parent.raw, own.only_tests));
+          // THE CHECK'S CALL PATH (positive localization, retry-evidence checkCallPathFromRun): where the red check goes,
+          // read on the PARENT (the base the next attempt edits) when it is red there, else on the draft. Sources are read
+          // as of the parent: an edited file's pre-edit text.
+          const parentRed = parent.raw !== null && (ownCheckStillRed(parent.raw, own.only_tests) ?? []).length > 0;
+          const readBase = (rel: string): string | null => { const abs = `${vAbs}/${rel}`; const pre = preEditContent.get(abs); if (pre !== undefined) return pre; try { return readFileSync(abs, "utf8"); } catch { return null; } };
+          const prefix = `repos/${v.replace(/^repos\//, "")}/`;
+          ownCallPath = ownCheckCallPath({ raw: parentRed ? parent.raw! : draftRaw, test_file: own.test_file, only: own.only_tests, failing: ownFailing, vessel_root: vAbs, prefix, read: readBase });
         }
         // THE CHECK CONTRACT (09-30): a green own check certifies the draft only against the parent. Run the
         // same file on the untouched parent (a detached worktree at HEAD; the draft is uncommitted) and refuse
@@ -10432,7 +10482,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }

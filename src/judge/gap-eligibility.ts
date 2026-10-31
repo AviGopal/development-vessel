@@ -298,6 +298,15 @@ export function inheritedOperatorHold(parentId: string, parentMeta: Record<strin
   };
 }
 
+/** The row's evidence_resolve test_suite check as a vessel file (vesselFileOf), or null. */
+function testSuiteCheckOf(meta: Record<string, unknown>): { vessel: string | null; rel: string } | null {
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
+  if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input || typeof er.input !== "object") return null;
+  return vesselFileOf(er.input.test_file, er.input.vessel);
+}
+const sameVesselFile = (a: { vessel: string | null; rel: string }, b: { vessel: string | null; rel: string }): boolean =>
+  a.rel === b.rel && (!a.vessel || !b.vessel || a.vessel === b.vessel);
+
 /** A CHECK THE SUPPLY REFUSED TO ARM DOES NOT ARM THE ROW. check_supply.state arm_refused on the very file the row's
  *  evidence_resolve test_suite runs (paths as editSiteIsOwnCheck compares them) means the supply judged that check unfit
  *  (e.g. check_satisfied_by_gutting: deleting the behaviour turns it green); a falsifier class re-stamped from the same
@@ -305,11 +314,49 @@ export function inheritedOperatorHold(parentId: string, parentMeta: Record<strin
 function checkSupplyRefusedOwnCheck(meta: Record<string, unknown>): boolean {
   const ledger = meta["check_supply"] as { state?: unknown; test_file?: unknown; vessel?: unknown } | null | undefined;
   if (!ledger || typeof ledger !== "object" || ledger.state !== "arm_refused") return false;
-  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
-  if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input || typeof er.input !== "object") return false;
   const refused = vesselFileOf(ledger.test_file, ledger.vessel);
-  const check = vesselFileOf(er.input.test_file, er.input.vessel);
-  return !!refused && !!check && refused.rel === check.rel && (!refused.vessel || !check.vessel || refused.vessel === check.vessel);
+  const check = testSuiteCheckOf(meta);
+  return !!refused && !!check && sameVesselFile(refused, check);
+}
+
+/** One open row's check-supply arm refusal: the refused check file, the row that carries it, and the content it judged
+ *  (judged_inputs.check_sha256, "" when the record has none). */
+export type RefusedSupplyCheck = { vessel: string | null; rel: string; gap_id: string; check_sha256: string };
+/**
+ * EVERY OPEN ROW'S ARM REFUSALS, built ONCE per pass by a caller that lists the rows (the auto-pick admission). A row
+ * reads only its own check_supply, but the supply's check path is per gap id truncated (check-supply-admission
+ * checkSupplyCheckPath), so a derived row (-narrowed, a recommit) runs its parent's file: the parent's refusal of that
+ * file then arms the child, whose own row carries no ledger. Keyed by the vessel-relative file. The row's own
+ * refusal stays decided on the row (checkSupplyRefusedOwnCheck); the current content at the file is the supply's to
+ * re-judge (a changed check re-opens the parent's judgement, which drops it from the next pass's set).
+ */
+export type RefusedSupplyChecks = ReadonlyMap<string, readonly RefusedSupplyCheck[]>;
+export function refusedSupplyChecks(rows: Iterable<Record<string, unknown>>): RefusedSupplyChecks {
+  const out = new Map<string, RefusedSupplyCheck[]>();
+  for (const row of rows) {
+    if (String(row["status"] ?? "open") !== "open") continue;
+    const rawMeta = row["classification_metadata"] ?? row["metadata"];
+    const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+    const ledger = meta["check_supply"] as { state?: unknown; test_file?: unknown; vessel?: unknown; judged_inputs?: { check_sha256?: unknown } } | null | undefined;
+    if (!ledger || typeof ledger !== "object" || ledger.state !== "arm_refused") continue;
+    const f = vesselFileOf(ledger.test_file, ledger.vessel);
+    if (!f) continue;
+    const sha = ledger.judged_inputs && typeof ledger.judged_inputs === "object" && typeof ledger.judged_inputs.check_sha256 === "string" ? ledger.judged_inputs.check_sha256 : "";
+    const list = out.get(f.rel) ?? [];
+    list.push({ vessel: f.vessel, rel: f.rel, gap_id: String(row["id"] ?? ""), check_sha256: sha });
+    out.set(f.rel, list);
+  }
+  return out;
+}
+/** Another open row's arm refusal of the file this row's test_suite check runs, or null (an empty set: always null). The
+ *  auto-pick admission asks it of every row the predicate admits (gap-admission refusedCheckExclusion). */
+export function refusedSupplyCheckFor(row: Record<string, unknown>, refused?: RefusedSupplyChecks): RefusedSupplyCheck | null {
+  if (!refused || refused.size === 0) return null;
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const check = testSuiteCheckOf((rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>);
+  if (!check) return null;
+  const id = String(row["id"] ?? "");
+  return refused.get(check.rel)?.find((r) => r.gap_id !== id && sameVesselFile(r, check)) ?? null;
 }
 
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {

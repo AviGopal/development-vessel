@@ -22,7 +22,7 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { heldLineageAncestor, lineageParentIds, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
@@ -390,6 +390,10 @@ export async function admitActionableGaps(
     return { admitted: [], excluded: excludedAll };
   }
   const runner = opts?.typecheckRunner ?? defaultTypecheckRunner;
+  // Every open row's check-supply arm refusal, once per pass, from the whole open read when the caller passes it (a
+  // refused parent may be filtered out of `gaps` by the pick brakes): a derived row on its parent's refused check file
+  // is not armed (gap-eligibility refusedSupplyChecks).
+  const refused = refusedSupplyChecks(opts?.lineageIndex?.values() ?? gaps);
   // One scope read for the whole pass, so every candidate is judged against the same answer.
   const scope = await autonomyScope();
   // An UNREADABLE scope excludes every autonomous candidate, sited or not (no partial admission):
@@ -518,7 +522,7 @@ export async function admitActionableGaps(
       } else if (park) parkNote = `; parked awaiting ${park.awaits}`;
     }
     {
-      const exclusion = composeAdmissionExclusion(g);
+      const exclusion = composeAdmissionExclusion(g) ?? refusedCheckExclusion(g, refused);
       if (exclusion) { excluded.push({ id, reason: parkNote ? exclusion.reason.replace(/\)$/, `${parkNote})`) : exclusion.reason }); continue; }
     }
     // AUTONOMY SCOPE (contained-self-development 1.2). Admission is the autonomous path, so a gap
@@ -820,6 +824,18 @@ export async function admitActionableGaps(
     console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → ${admitted.length} admitted, ${excluded.length} excluded ${JSON.stringify(byReason)}`);
   }
   return { admitted, excluded };
+}
+
+/** A row the predicate admits whose test_suite check runs a file ANOTHER open row's check supply refused to arm
+ *  (refusedSupplyCheckFor over the pass's refusedSupplyChecks): not armed. A derived row (-narrowed, a step, a
+ *  recommit) runs its parent's truncated check path and carries no ledger of its own, so only the pass sees the
+ *  parent's refusal. One line per refusal. */
+function refusedCheckExclusion(g: Record<string, unknown>, refused: RefusedSupplyChecks): { skip: ComposeEligibilitySkipReason; reason: string } | null {
+  const by = refusedSupplyCheckFor(g, refused);
+  if (!by) return null;
+  const reason = `check_supply_refused(${by.rel} by ${by.gap_id}${by.check_sha256 ? ` @${by.check_sha256.slice(0, 12)}` : ", no judged sha"})`;
+  console.log(`[gap-admission] not armed ${String(g.id ?? "")}: ${reason}`);
+  return { skip: "unarmed", reason };
 }
 
 /**

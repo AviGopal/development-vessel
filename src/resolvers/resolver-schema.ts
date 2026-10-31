@@ -53,7 +53,26 @@ export interface ResolverSchemaResult {
  * input: a reusable template must bind it from a slot, never freeze one call's value (author-producer reads this flag;
  * CHANGE-37e). Omitted means not constant.
  */
-export interface ContractField { name: string; required: boolean; type: string; constant?: boolean; }
+export interface ContractField { name: string; required: boolean; type: string; constant?: boolean; synthesize_from?: SynthesizeFrom; }
+
+/**
+ * How the walk may MAKE a required field it holds no value for. goal-host's bindRequiredInputs reads it per field before
+ * invoking the producer: a required field that is unbound and declares no synthesize_from is refused ("unbindable
+ * required input"), and one that declares it is synthesized from the goal text and/or the step's bound upstream content.
+ * Two forms: "goal_and_upstream", or the list of its sources (["goal", "upstream"], either alone).
+ */
+export type SynthesizeFrom = "goal_and_upstream" | ReadonlyArray<"goal" | "upstream">;
+
+/** A served field carries synthesize_from only in a form the walk can honour; any other value is dropped, so the contract
+ *  never promises a synthesis the walk would refuse. */
+function servedField(f: ContractField): ContractField {
+  const s: unknown = f.synthesize_from;
+  if (s === undefined) return f;
+  const honourable = s === "goal_and_upstream" || (Array.isArray(s) && s.length > 0 && s.every((x) => x === "goal" || x === "upstream"));
+  if (honourable) return f;
+  const { synthesize_from: _dropped, ...rest } = f;
+  return rest;
+}
 
 interface Contract {
   /** Omit for shapes whose resolver reads a flat pointer. */
@@ -84,16 +103,23 @@ const CONTRACTS: Record<string, Contract> = {
       'id is a stable kebab-case slug; status is one of open|closed|rejected; detected_at is an ISO-8601 timestamp; summary must be real prose describing the gap (an empty summary or an uninterpolated {{placeholder}} is rejected).',
   },
   // Tolerant by construction: reads a `note` envelope OR a flat pointer, and aliases content→body.
-  // Declared anyway so the synthesizer emits the fields rather than inferring them, and so the
-  // conformance test pins the tolerance instead of leaving it to be rediscovered.
+  // Declared anyway so the synthesizer emits the fields rather than inferring them.
+  // NO FIELD IS MARKED REQUIRED, because none is required in the form `required` expresses: the
+  // resolver needs a non-empty body, which may arrive as `body`, as its alias `content`, or under
+  // the `note` envelope, and a title is optional. The walk's bind gate (goal-host bindRequiredInputs)
+  // refuses any required field that is not bound under its own name, with no alias or one-of notion,
+  // so marking `body` required would refuse the content-carrying and enveloped writes the resolver
+  // accepts, and marking `title` required refused body-only notes. The resolver's own runtime
+  // check (empty body → rejected; neither title nor body → rejected) stays the enforcement.
   memoryNote_write: {
     fields: [
-      { name: "title", required: true, type: "string" },
-      { name: "body", required: true, type: "string" },
+      { name: "title", required: false, type: "string" },
+      { name: "body", required: false, type: "string" },
       { name: "note_type", required: false, type: "string" },
       { name: "id", required: false, type: "string" },
     ],
-    notes: "Flat pointer. `content` is accepted as an alias for `body`. title or body suffices.",
+    notes:
+      "Flat pointer. `body` must be non-empty real content (`content` is accepted as an alias for `body`); a write with an empty body is rejected. `title` is optional; give it when the goal names the note.",
   },
   // Post-landing suite verification. Flat pointer; `vessel` is the only hard requirement.
   test_suite: {
@@ -109,13 +135,15 @@ const CONTRACTS: Record<string, Contract> = {
   },
   llm_completion_dispatch: {
     fields: [
-      { name: "prompt", required: true, type: "string" },
+      // The walk often reaches this producer with no prompt impulse bound; the prompt is then made
+      // from the goal plus the step's bound upstream content rather than refused.
+      { name: "prompt", required: true, type: "string", synthesize_from: "goal_and_upstream" },
       { name: "system_prompt", required: false, type: "string" },
       { name: "model", required: false, type: "string" },
       { name: "max_tokens", required: false, type: "number" },
       { name: "tools", required: false, type: "array" },
     ],
-    notes: "Flat pointer. `prompt` is required.",
+    notes: "Flat pointer. `prompt` is required; the walk synthesizes it from the goal and bound upstream content when none is bound.",
   },
   // Read-only commit history. Declared in git-log.ts and rendered from the constants the resolver
   // enforces (repo name pattern, limit cap, since charset/length), so the two cannot drift. All
@@ -149,7 +177,7 @@ export function resolveResolverSchema(pointer: Record<string, unknown>): Resolve
     shape,
     known: true,
     ...(c.envelope ? { envelope: c.envelope } : {}),
-    fields: c.fields,
+    fields: c.fields.map(servedField),
     required,
     invocation: c.envelope
       ? `pointer:{type:"${shape}", ${c.envelope}:{${required.join(", ")}}}`

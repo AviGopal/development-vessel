@@ -73,7 +73,10 @@ describe("resolver_schema", () => {
 
   // A read whose every field is optional (an empty pointer is a complete call) declares no required
   // field. Named here, one by one, so an EMPTY required list cannot slip in for any other shape.
-  const ALL_OPTIONAL = new Set(["git_log"]);
+  // memoryNote_write is named for a different reason: its requirement (a non-empty body, under
+  // `body`, its alias `content`, or the `note` envelope) is one the `required` list cannot express,
+  // so it declares none and its resolver enforces it (pinned in served-contracts-admit-the-bind-gate).
+  const ALL_OPTIONAL = new Set(["git_log", "memoryNote_write"]);
   it("every declared shape answers known:true with a non-empty required list (all-optional reads named)", () => {
     expect(CONTRACT_SHAPES.length).toBeGreaterThan(0);
     for (const shape of CONTRACT_SHAPES) {

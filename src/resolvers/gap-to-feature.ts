@@ -30,6 +30,7 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { readFile } from "node:fs/promises";
+import { resolvePoolImpulse, resolvePoolImpulseWrite } from "./pool-impulse.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, editSiteIsOwnCheck, isNonAttemptComposeResult, ownCheckUnarmMeta } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
@@ -1224,7 +1225,7 @@ export function __setPriorityRngForTests(rng: (() => number) | null): void { pri
 export function choosePriorityVariant(prio: Record<string, { alpha: number; beta: number }>, rng: () => number): "baseline" | "terms" {
   return sampleClassTheta("variant:terms", prio, rng) > sampleClassTheta("variant:baseline", prio, rng) ? "terms" : "baseline";
 }
-function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
+function pickMostLandable(gaps: Record<string, unknown>[], onFloored?: (ids: string[]) => void): Record<string, unknown> | null {
   // The judging steps (hopeless exclusion, floor, pick-skip) are the closed pickCandidate (gap-admission); this
   // residue supplies the ranker (score, class rerank) and records the pick.
   // IMPACT-RANKED SELECTION (2026-07-09): landability alone drains the easiest gaps
@@ -1324,6 +1325,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const priorityPool = termsRanked.map((r) => ({ id: String(r.g.id ?? ""), ranks: Object.fromEntries(PRIORITY_TERMS.map((t) => [t, pv(r.ranks[t])])) }));
   return pickCandidate(gaps, {
     lineageIndex: pickLineageIndex,
+    onFloored,
     score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g) * impactOf(g) * humanWeight(g),
     rerank: (ranked) => {
       if (variant === "terms") return; // the terms variant already weighs viability (the class posterior) as a term
@@ -1436,6 +1438,55 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
 }
 
 const PICK_DECISIONS_PATH = "/workspace/proposals/pick-decisions.jsonl";
+
+/**
+ * THE ADMISSION PASS RECORD: why the auto-pick admitted what it did, readable by resolve. Admission builds a reason
+ * for every row it excludes and the landability floor drops rows inside the pick, but both only ever printed counts,
+ * so no reader could say why a given gap is never picked. One pool row per node (shape gapAdmissionPass, id
+ * gap-admission-pass:<node>), upserted after each auto-pick and read with {type:"poolImpulse", id}. It carries the
+ * admitted rows (id, landability, in admission order), the floored ids, and every exclusion EXCEPT the parked ones
+ * (needs_information, disposition), which carry their reason on their own row; by_reason counts every exclusion.
+ * Bounded: at most ADMISSION_PASS_MAX_ENTRIES entries, the rest counted in `truncated`. Written only when its content
+ * changes (`since` is when it last did): a pass that admits, floors and excludes as the last one did writes nothing.
+ * Fail-open: a lost record never blocks or changes the pick.
+ */
+export const ADMISSION_PASS_SHAPE = "gapAdmissionPass";
+export const ADMISSION_PASS_MAX_ENTRIES = 1000;
+const PARKED_EXCLUSION = /^(needs_information|disposition)\b/;
+let admissionPassLast: { id: string; digest: string } | null = null;
+export function __resetAdmissionPassForTests(): void { admissionPassLast = null; }
+export function admissionPassBody(p: { node: string; candidates: number; admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; floored: string[] }): Record<string, unknown> {
+  let room = ADMISSION_PASS_MAX_ENTRIES;
+  let truncated = 0;
+  const take = <T>(xs: T[]): T[] => { const kept = xs.slice(0, Math.max(0, room)); room -= kept.length; truncated += xs.length - kept.length; return kept; };
+  const byReason: Record<string, number> = {};
+  for (const e of p.excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
+  const admitted = take(p.admitted.map((g) => ({ id: String(g.id ?? ""), landability: Number(landabilityScore(g).toFixed(4)) })));
+  const floored = take([...p.floored].sort());
+  const notParked = p.excluded.filter((e) => !PARKED_EXCLUSION.test(e.reason)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const excluded = Object.fromEntries(take(notParked).map((e) => [e.id, e.reason]));
+  return { node: p.node, candidates: p.candidates, admitted, floored, excluded, by_reason: Object.fromEntries(Object.entries(byReason).sort()), parked: p.excluded.length - notParked.length, truncated };
+}
+export function recordAdmissionPass(p: Parameters<typeof admissionPassBody>[0]): "written" | "unchanged" | "failed" {
+  try {
+    const id = `gap-admission-pass:${p.node}`;
+    const body = admissionPassBody(p);
+    const digest = JSON.stringify(body);
+    if (admissionPassLast?.id === id && admissionPassLast.digest === digest) return "unchanged";
+    if (admissionPassLast?.id !== id) {
+      // First pass in this process: the stored row may already say exactly this (a restart between unchanged passes).
+      const { since: _since, ...stored } = (resolvePoolImpulse({ type: "poolImpulse", id }).body.impulses[0]?.body ?? {}) as Record<string, unknown>;
+      if (JSON.stringify(stored) === digest) { admissionPassLast = { id, digest }; return "unchanged"; }
+    }
+    const w = resolvePoolImpulseWrite({ type: "poolImpulse_write", id, shape: ADMISSION_PASS_SHAPE, source: "gap_to_feature", status: "open", body: { ...body, since: new Date().toISOString() } });
+    if (!w.body.ok) { console.warn(`[gap-to-feature] admission pass record not written: ${String((w.body as { error?: unknown }).error ?? "refused").slice(0, 200)}`); return "failed"; }
+    admissionPassLast = { id, digest };
+    return "written";
+  } catch (err) {
+    console.warn(`[gap-to-feature] admission pass record not written: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
+    return "failed";
+  }
+}
 /**
  * The same principle, applied to SELECTION rather than to credit.
  *
@@ -2291,7 +2342,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // (no-producer orphans; phantom typecheck gaps whose error is already fixed) OUT of the
       // auto-pick set so they stop hollowing dispatches and starving the proven-landable path.
       // The whole open read is the lineage index: a recommit's fresh-green ancestor may be filtered out of `eligible`.
-      const { admitted } = await duringActivity("gap_to_feature:eligibility_pass", () => admitActionableGaps(eligible, { lineageIndex: gapsById }));
+      const { admitted, excluded } = await duringActivity("gap_to_feature:eligibility_pass", () => admitActionableGaps(eligible, { lineageIndex: gapsById }));
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
@@ -2302,7 +2353,9 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
         console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
         return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };
       }
-      gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows)) : null;
+      let floored: string[] = [];
+      gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows, (ids) => { floored = ids; })) : null;
+      recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored });
     }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

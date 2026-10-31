@@ -1127,6 +1127,9 @@ export type PickHooks = {
   score: (g: Record<string, unknown>) => number;
   rerank: (ranked: Array<{ g: Record<string, unknown>; s: number }>) => void;
   onPicked: (p: { chosen: { g: Record<string, unknown>; s: number }; skippedPending: number; ranked: Array<{ g: Record<string, unknown>; s: number }>; selectionPool: Record<string, unknown>[] }) => void;
+  /** The ids LANDABILITY_FLOOR dropped this pick (empty when it dropped none), handed out before the rerank whether or
+   *  not anything is then picked. Observation only: nothing it does changes the ranking or the pick. */
+  onFloored?: (ids: string[]) => void;
   ask: Ask;
 };
 export function pickCandidate(gaps: Record<string, unknown>[], hooks: PickHooks): Record<string, unknown> | null {
@@ -1191,6 +1194,10 @@ export function pickCandidate(gaps: Record<string, unknown>[], hooks: PickHooks)
   // over a 0.9 one. Candidates below the floor are dropped before any posterior is consulted.
   const LANDABILITY_FLOOR = 0.15;
   const aboveFloor = ranked.filter((r) => landabilityScore(r.g) >= LANDABILITY_FLOOR);
+  if (hooks.onFloored) {
+    const kept = new Set(aboveFloor);
+    try { hooks.onFloored(ranked.filter((r) => !kept.has(r)).map((r) => String(r.g.id ?? ""))); } catch { /* observation, never control flow */ }
+  }
   if (aboveFloor.length < ranked.length) {
     console.log(`[gap-to-feature] landability_floor excluded ${ranked.length - aboveFloor.length} of ${ranked.length} candidates (floor=${LANDABILITY_FLOOR})`);
     ranked.splice(0, ranked.length, ...aboveFloor);

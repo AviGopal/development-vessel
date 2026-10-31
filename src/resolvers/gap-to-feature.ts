@@ -38,6 +38,7 @@ import { composeExitReach } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
+import { duringActivity } from "../lib/loop-stall.js";
 
 // The evaluator's tree is ONE resolver (lib/evaluator-tree.ts), shared with the class-1 classifier in substrate-gap
 // so the label and the measurement read the same file.
@@ -1998,12 +1999,14 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   kickAutoRevert("tick");
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
-  await sweepIfCloneHeadsMoved({ ask: askHuman });
+  // NAMED SECTIONS (lib/loop-stall.ts duringActivity): each phase of this pass is one activity entry inside the
+  // resolve's own, so an event-loop stall during a pick names the phase ("gap_to_feature:<phase>"), not only the resolve.
+  await duringActivity("gap_to_feature:sweep", () => sweepIfCloneHeadsMoved({ ask: askHuman }));
   // Causal attempt ledger: outcomes and settlements for registered landings. Started without
   // awaiting (snapshots can take tens of seconds) and guarded so sweeps never overlap.
   if (!attemptSweepInFlight) {
     attemptSweepInFlight = true;
-    void sweepAttempts()
+    void duringActivity("gap_to_feature:attempt_sweep", () => sweepAttempts())
       .then((r) => { if (r.outcomes_written || r.settlements_written || r.errors.length) console.log(`[attempt-sweep] outcomes=${r.outcomes_written} settlements=${r.settlements_written} lessons=${r.lessons_written} errors=${r.errors.length}${r.errors.length ? " first=" + r.errors[0] : ""}`); })
       .catch((e) => console.error(`[attempt-sweep] failed: ${(e as Error).message}`))
       .finally(() => { attemptSweepInFlight = false; });
@@ -2014,7 +2017,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   if (!scopeApplyInFlight) {
     scopeApplyInFlight = true;
     void import("./scope-earn-in.js")
-      .then((m) => m.applyScopeProposals())
+      .then((m) => duringActivity("gap_to_feature:scope_apply", () => m.applyScopeProposals()))
       .then((r) => { if (r.applied.length || r.refused.length) console.log(`[scope-earn-in] applied=${JSON.stringify(r.applied.map((a) => `${a.change}:${a.path}`))} refused=${JSON.stringify(r.refused).slice(0, 400)}`); })
       .catch((e) => console.error(`[scope-earn-in] evaluator failed: ${(e as Error).message}`))
       .finally(() => { scopeApplyInFlight = false; });
@@ -2144,7 +2147,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
   try {
-    const read = await resolveSubstrateGap({
+    const read = await duringActivity("gap_to_feature:read_store", () => resolveSubstrateGap({
       type: "substrateGap",
       // Targeted dispatch: pass the id straight to the read so a SPECIFIC gap is
       // fetched directly. Without this, selection read a limit-25 window and did
@@ -2171,7 +2174,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // window ended at 09-23 and aged operator gaps starved again (b11c6fb's class, recurring).
       // Any number that encodes a backlog size recurs when the store grows, so read it all.
       limit: pointer.limit ?? Number.MAX_SAFE_INTEGER,
-    } as never);
+    } as never));
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     // Exclude gaps composed within the cooldown from AUTO-pick (per-candidate filter, exactly
     // boredom's cooling-candidate skip) so the picker advances to the next-landable gap. Targeted
@@ -2212,7 +2215,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // The per-row line is said once: on the pass that un-arms the row (it then carries own_check_unarmed), or once per
     // process for a row this pass cannot un-arm (class1, a refused write). Every pass with any says how many: one line.
     const ownChecks = new Map<string, { site: string; check: string }>();
-    if (!pointer.gap_id) {
+    if (!pointer.gap_id) await duringActivity("gap_to_feature:check_supply_refusals", async () => {
       for (const g of gaps) {
         const own = editSiteIsOwnCheck(g);
         if (!own) continue;
@@ -2230,16 +2233,16 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
         console.log(w.shape === "structuredError" ? `[check-supply] un-arm of ${id} refused: ${JSON.stringify(w.body).slice(0, 200)}` : `[check-supply] un-armed ${id}: edit_site_is_own_check (${own.site})`);
       }
       if (ownChecks.size > 0) console.log(`[check-supply] own-check refused: ${ownChecks.size}`);
-    }
+    });
     let cappedHolderCandidates = 0;
-    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps, (g) => { if (ownChecks.has(String(g.id ?? ""))) return false; const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; });
+    const predicateHolds = pointer.gap_id ? new Map<string, string>() : duringActivity("gap_to_feature:lineage_holds", () => inheritedPredicateHolds(gaps, (g) => { if (ownChecks.has(String(g.id ?? ""))) return false; const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; }));
     if (cappedHolderCandidates > 0) console.log(`[gap-to-feature] predicate hold: ${cappedHolderCandidates} lineage-capped gap(s) passed over as holder; the next workable member holds`);
     const heldLines: string[] = [];
     const inFlightLines: string[] = [];
     const crossNodeLines: string[] = [];
     const { thisNode } = await import("./self-fact-reconcile.js");
     const pickNode = thisNode();
-    const eligible = gaps.filter((g) => {
+    const eligible = duringActivity("gap_to_feature:pick_brakes", () => gaps.filter((g) => {
       if (ownChecks.has(String(g.id ?? ""))) return false;
       const holder = predicateHolds.get(String(g.id ?? ""));
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
@@ -2263,7 +2266,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
         return false;
       }
       return refusal === null;
-    });
+    }));
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
@@ -2288,17 +2291,17 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // (no-producer orphans; phantom typecheck gaps whose error is already fixed) OUT of the
       // auto-pick set so they stop hollowing dispatches and starving the proven-landable path.
       // The whole open read is the lineage index: a recommit's fresh-green ancestor may be filtered out of `eligible`.
-      const { admitted } = await admitActionableGaps(eligible, { lineageIndex: gapsById });
+      const { admitted } = await duringActivity("gap_to_feature:eligibility_pass", () => admitActionableGaps(eligible, { lineageIndex: gapsById }));
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
-      if (admitted.length) await refreshHeldCalibration();
+      if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
       pickLineageIndex = gapsById;
       const pool = pickPoolForCapacity(admitted, armedOnlyPick);
       if (pool.skipped) {
         console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
         return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };
       }
-      gap = pool.rows.length ? pickMostLandable(pool.rows) : null;
+      gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows)) : null;
     }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

@@ -6,9 +6,10 @@
  * stall say which work was running.
  *
  * Two halves, both cheap:
- *   - THE MARKER, at the tick level only: the one resolver dispatcher (routes/impulses.ts resolveDispatch) and the
- *     in-process loops in index.ts call noteActivity(label) on entry and the returned done() on exit. In memory it is
- *     the set of work in flight, with start times. When a marker file is configured (index.ts, under the volume root;
+ *   - THE MARKER, at the tick level: the one resolver dispatcher (routes/impulses.ts resolveDispatch) and the
+ *     in-process loops in index.ts call noteActivity(label) on entry and the returned done() on exit; a resolver with a
+ *     long pass names its phases inside that entry with duringActivity (gap-to-feature.ts), one entry per phase. In
+ *     memory it is the set of work in flight, with start times. When a marker file is configured (index.ts, under the volume root;
  *     nothing is written otherwise, so a test process never touches live state) the entry's label is also written
  *     synchronously as one line: a vessel killed DURING a stall still leaves the last entry behind for a post-mortem.
  *   - THE MONITOR: a 1 s timer that measures how late it fires. A blocked loop cannot run it, so the line is logged
@@ -28,8 +29,8 @@ export const LOOP_STALL_LOG_MS_ROW = "development_vessel.loop_stall_log_ms";
 const LOOP_STALL_INTERVAL_MS = 1_000;
 
 let seq = 0;
-const inFlight = new Map<number, { label: string; at: number }>();
-let last: { label: string; at: number } | null = null;
+const inFlight = new Map<number, { label: string; at: number; id: number }>();
+let last: { label: string; at: number; id: number } | null = null;
 let markerFile: string | null = null;
 
 /** Configure (or, with null, stop) the synchronous one-line marker file written at each entry. */
@@ -39,7 +40,7 @@ export function setActivityMarkerFile(path: string | null): void { markerFile = 
 export function noteActivity(label: string): () => void {
   const at = Date.now();
   const id = ++seq;
-  last = { label, at };
+  last = { label, at, id };
   inFlight.set(id, last);
   if (markerFile) {
     try { writeFileSync(markerFile, `${new Date(at).toISOString()} pid=${process.pid} ${label}\n`); } catch { /* best-effort: never fails the work */ }
@@ -52,8 +53,20 @@ export function noteActivity(label: string): () => void {
     if (e) { recentlyEnded.push({ ...e, ended: Date.now() }); if (recentlyEnded.length > RECENT_KEEP) recentlyEnded.shift(); }
   };
 }
+/**
+ * Run `fn` as one named section: noteActivity(label) on entry, done() when it returns, throws or (for a promise) settles.
+ * A resolver names its own phases this way (gap-to-feature.ts: "gap_to_feature:<phase>"), once per pass, never per item.
+ */
+export function duringActivity<T>(label: string, fn: () => T): T {
+  const done = noteActivity(label);
+  let r: T;
+  try { r = fn(); } catch (e) { done(); throw e; }
+  if (r instanceof Promise) { r.then(done, done); return r; }
+  done();
+  return r;
+}
 const RECENT_KEEP = 16;
-const recentlyEnded: Array<{ label: string; at: number; ended: number }> = [];
+const recentlyEnded: Array<{ label: string; at: number; id: number; ended: number }> = [];
 
 /** The most recent entry and everything still in flight, oldest first (ages relative to `nowMs`). */
 export function activitySnapshot(nowMs: number = Date.now()): { last: { label: string; age_ms: number } | null; in_flight: Array<{ label: string; age_ms: number }> } {
@@ -71,8 +84,14 @@ export function loopStallLine(lagMs: number, thresholdMs: number, nowMs: number 
   const s = activitySnapshot(nowMs);
   const lastText = s.last ? `${s.last.label} (entered ${s.last.age_ms}ms ago)` : "<none>";
   const flight = s.in_flight.length ? s.in_flight.map((e) => `${e.label}@${e.age_ms}ms`).join(",") : "<none>";
-  const ended = recentlyEnded.filter((e) => e.ended >= stallStartMs && e.at <= stallStartMs).map((e) => `${e.label}@${nowMs - e.at}ms`);
-  return `[loop-stall] event loop blocked ${lagMs}ms (threshold ${thresholdMs}ms); last activity: ${lastText}; still in flight: ${flight}; ended as the loop resumed: ${ended.length ? ended.join(",") : "<none>"}`;
+  const endedRows = recentlyEnded.filter((e) => e.ended >= stallStartMs && e.at <= stallStartMs);
+  const ended = endedRows.map((e) => `${e.label}@${nowMs - e.at}ms`);
+  // SUSPECT: of the entries running when the loop blocked (entered before it, in flight or ended after it), the one entered
+  // LAST (by entry order), so a named section wins over the resolve that contains it ("gap_to_feature:eligibility_pass",
+  // not "gap_to_feature"), and work queued behind the block (often the last activity) is never the suspect.
+  const covering = [...[...inFlight.values()].filter((e) => e.at <= stallStartMs), ...endedRows];
+  const suspect = covering.reduce<{ label: string; at: number; id: number } | null>((b, e) => (!b || e.id > b.id ? e : b), null);
+  return `[loop-stall] event loop blocked ${lagMs}ms (threshold ${thresholdMs}ms); last activity: ${lastText}; still in flight: ${flight}; ended as the loop resumed: ${ended.length ? ended.join(",") : "<none>"}; suspect: ${suspect ? `${suspect.label}@${nowMs - suspect.at}ms` : "<none>"}`;
 }
 
 let monitor: { timer: ReturnType<typeof setInterval>; threshold: number } | null = null;
@@ -94,7 +113,8 @@ export function startLoopStallMonitor(opts: { thresholdMs?: number; intervalMs?:
       timer: setInterval(() => {
         const now = Date.now();
         const lag = now - expected;
-        if (lag >= m.threshold) log(loopStallLine(lag, m.threshold, now, expected - intervalMs));
+        // The stall began after the tick was DUE (`expected`): work entered before then and still running at it was blocked.
+        if (lag >= m.threshold) log(loopStallLine(lag, m.threshold, now, expected));
         expected = now + intervalMs;
       }, intervalMs),
     };

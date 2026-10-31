@@ -22,7 +22,7 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { heldLineageAncestor, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { heldLineageAncestor, lineageParentIds, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import { readCalibration, landabilityScore } from "./gap-attempt-credit.js";
@@ -344,6 +344,22 @@ export async function defaultTypecheckRunner(vessel: string): Promise<{ ran: boo
   }
 }
 
+/** The nearest lineage ancestor whose own check is fresh-green on the parent (greenOnParentFresh), or null. Walked over
+ *  lineageParentIds as heldLineageAncestor walks a hold: past an ancestor the index does not hold, on its id. */
+function greenOnParentAncestor(row: Record<string, unknown>, lookup: (id: string) => Record<string, unknown> | undefined): string | null {
+  const seen = new Set<string>([String(row.id ?? "")]);
+  const queue = lineageParentIds(row);
+  for (let n = 0; queue.length > 0 && n < 32; n++) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const r = lookup(pid);
+    if (r && greenOnParentFresh((r.classification_metadata ?? r.metadata ?? {}) as Record<string, unknown>)) return pid;
+    queue.push(...lineageParentIds(r ?? { id: pid }));
+  }
+  return null;
+}
+
 export interface AdmissionResult {
   admitted: Record<string, unknown>[];
   excluded: Array<{ id: string; reason: string }>;
@@ -358,7 +374,7 @@ export interface AdmissionResult {
  */
 export async function admitActionableGaps(
   gaps: Record<string, unknown>[],
-  opts?: { typecheckRunner?: TypecheckRunner },
+  opts?: { typecheckRunner?: TypecheckRunner; lineageIndex?: Map<string, Record<string, unknown>> },
 ): Promise<AdmissionResult> {
   // LANDINGS STOPPED → ADMIT NOTHING. MITOSIS_DIRECT_PUSH=0 is the emergency stop the cutover
   // refuses every landing on (vessel-mitosis-cutover.ts, push-policy.ts landingsStopped). An
@@ -571,6 +587,14 @@ export async function admitActionableGaps(
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
+    // A RECOMMIT INHERITS IT. recommit-<id>-<cls> is the same defect at the same site and carries its source's own check
+    // (inheritableParentCheck), so a fresh green on an ancestor is the child's own check green too. Read only on its own
+    // row, the exclusion let the root's recommit and recommit-recommit children through inside the root's window, and
+    // each was refused at compose for the same green (3 of 5 such refusals, 2026-10-30/31).
+    if (id.startsWith("recommit-")) {
+      const anc = greenOnParentAncestor(g, (pid) => opts?.lineageIndex?.get(pid) ?? candidatesById.get(pid));
+      if (anc) { excluded.push({ id, reason: `own_check_green_on_parent(lineage ${anc})` }); continue; }
+    }
     // PREDICATE SUSPECT (contained-self-development 8.5; gap_falsify v2). A class-2 check that did not read
     // 'present' when it was written has never seen the defect: a landing "verified" by it verifies nothing.
     // The write seam stamps the birth verdict; rows that predate it carry none and are unaffected.

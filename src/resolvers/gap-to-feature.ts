@@ -2287,7 +2287,8 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // ACTIONABILITY ADMISSION (auto-pick only): keep structurally-unclosable candidates
       // (no-producer orphans; phantom typecheck gaps whose error is already fixed) OUT of the
       // auto-pick set so they stop hollowing dispatches and starving the proven-landable path.
-      const { admitted } = await admitActionableGaps(eligible);
+      // The whole open read is the lineage index: a recommit's fresh-green ancestor may be filtered out of `eligible`.
+      const { admitted } = await admitActionableGaps(eligible, { lineageIndex: gapsById });
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await refreshHeldCalibration();

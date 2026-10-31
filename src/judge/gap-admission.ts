@@ -360,6 +360,13 @@ function greenOnParentAncestor(row: Record<string, unknown>, lookup: (id: string
   return null;
 }
 
+/** Rows by landabilityScore, highest first; ties keep their input order (Array.prototype.sort is stable). A sorted
+ *  copy, each score computed once. Admission walks its candidates in this order and the auto-pick keeps it. */
+export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+  const score = new Map<T, number>(rows.map((r) => [r, landabilityScore(r)] as [T, number]));
+  return [...rows].sort((a, b) => score.get(b)! - score.get(a)!);
+}
+
 export interface AdmissionResult {
   admitted: Record<string, unknown>[];
   excluded: Array<{ id: string; reason: string }>;
@@ -439,7 +446,12 @@ export async function admitActionableGaps(
   // vessel -> push_scope_refused reason, or null when the landing gate allows it (this pass only).
   const pushScopeRefusalByVessel = new Map<string, string | null>();
 
-  for (const g of gaps) {
+  // LANDABILITY ORDER FEEDS THE CAP. The edit-site cap below hands its slots to the first rows that reach it, so in
+  // store order a 0.90 row lost its file's slots to 0.50 rows filed earlier, and a row under the pick's landability
+  // floor could take a slot the floor then threw away. Rows are walked in orderByLandability's order (a sorted copy;
+  // the caller's array is untouched). No predicate, threshold or cap changes: the order only decides WHICH rows win a
+  // budgeted resource (the edit-site slots, the child-monopoly count, the drain and typecheck budgets).
+  for (const g of orderByLandability(gaps)) {
     const id = String(g.id ?? "");
     const cat = String(g.category ?? "");
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;

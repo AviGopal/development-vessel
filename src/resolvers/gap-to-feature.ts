@@ -36,7 +36,7 @@ import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVe
 import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { composeExitReach } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
-import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
+import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, orderByLandability, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
 import { duringActivity } from "../lib/loop-stall.js";
 
@@ -2296,7 +2296,8 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
       pickLineageIndex = gapsById;
-      const pool = pickPoolForCapacity(admitted, armedOnlyPick);
+      // Admission returns its rows in orderByLandability's order; the pick keeps it (it only breaks score ties there).
+      const pool = pickPoolForCapacity(orderByLandability(admitted), armedOnlyPick);
       if (pool.skipped) {
         console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
         return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };

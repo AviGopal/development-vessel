@@ -608,14 +608,16 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     for (const f of OPERATOR_ONLY_FIELDS) if (f !== "filed_by" && km[f] !== undefined && km[f] !== null && km[f] !== "") acts.push({ addendum: "operator-field", on: k, at: null, detail: `row field ${f} is set on ${where} (only an operator writes it)` });
     if (String(km["closed_by"] ?? "").startsWith("operator:") || km["close_basis"] === "operator_exercised_falsifier") acts.push({ addendum: "hand-close", on: k, at: String(kr?.["closed_at"] ?? km["closed_at"] ?? "") || null, detail: `${where} closed by hand (${String(km["closed_by"] ?? km["close_basis"])})` });
   }
-  // 3: an operator scope act opening the edit site, effective inside the window
+  // 3: an operator scope act opening the edit site, effective inside the window: after the row's filing (standing
+  // configuration that pre-dates the gap is not an operator act on its landings) and at or before its end. An unread
+  // filing time keeps every earlier act counted.
   const site = String(m["edit_site"] ?? "");
   if (ctx.scopeActs === null) unread.push("scope acts");
   for (const a of ctx.scopeActs ?? []) {
     const eff = isoMs(a.effective_at);
     if (!site || !a.opened.includes(site)) continue;
     if (eff === null) { acts.push({ addendum: "3", at: null, detail: `edit_site opened to the lane by operator scope act ${a.id} (time unparsable; counted)` }); continue; }
-    if (untilMs === null || eff <= untilMs) acts.push({ addendum: "3", at: new Date(eff).toISOString(), detail: `edit_site opened to the lane by operator scope act ${a.id} effective ${new Date(eff).toISOString()}` });
+    if ((filedMs === null || eff > filedMs) && (untilMs === null || eff <= untilMs)) acts.push({ addendum: "3", at: new Date(eff).toISOString(), detail: `edit_site opened to the lane by operator scope act ${a.id} effective ${new Date(eff).toISOString()}` });
   }
   // operator commits to the edit site or the check file inside the window (after the fix too)
   if (ctx.siteCommits === null) unread.push("edit-site and check-file commits");

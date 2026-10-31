@@ -856,7 +856,8 @@ export interface JudgementDeps {
   /** A file at a commit, or null. */
   show: (dir: string, sha: string, path: string) => string | null;
   /** Operator scope acts in ALL of the super-repo's scope history that opened each of `sites` to the lane (read once per
-   *  run), or null when unreadable. Never from the row window's start: an act before the window still opened the site. */
+   *  run), or null when unreadable. The judge (operatorActsOf) counts only those effective after the row's filing:
+   *  standing configuration that pre-dates the gap is not an operator act on its landings. */
   scopeActs: (sites: string[]) => Promise<Map<string, ScopeAct[]> | null>;
   /** goal-host's dispatch records (activeDispatches, every page), read once per run; null when unreadable or cut. */
   dispatches?: () => Promise<DispatchStoreEntry[] | null>;

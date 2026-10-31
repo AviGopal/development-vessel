@@ -1,6 +1,8 @@
 // qa's SECOND 10-22 REVIEW OF THE §14 ROWS (A-D), on the harness of self-fact-repair-review-fixes.test.ts. Each case is
 // tagged [A]..[D]; each was seen red under the named mutant in the commit message, then green.
-//   A scope acts are read from ALL scope history, not the window: a real act opening the edit site before the window counts.
+//   A scope acts are read from ALL scope history, and addendum 3 counts only an opening effective AFTER the row's filing:
+//     standing configuration that pre-dates the gap is not an operator act on its landings (A′), an opening after the
+//     filing and before the window's end still counts (A″).
 //   B oracle labels are fetched for EVERY provenance trace the reader considers, not only the authoring execution.
 //   C a torn spool file and a landing whose attempt has no intent (or names no gap) are expected and unjudged.
 //   D hand closes and operator-only fields count on ANCESTORS; the filing time accepts detected_at.
@@ -147,21 +149,32 @@ describe("the positive control these cases perturb", () => {
   });
 });
 
-describe("[A] scope acts from ALL history, not the window", () => {
-  it("[A] a real operator scope commit that opened the edit site BEFORE the window makes the closure assisted", async () => {
+describe("[A] scope acts from ALL history; addendum 3 counts only an opening after the filing", () => {
+  const scope = join(SUPER, "scripts", "substrate", "autonomy-scope.json");
+  const commitAs = (at: string, excluded: string[]) => {
+    writeFileSync(scope, JSON.stringify({ autonomyScope: { excluded_paths: excluded } }));
+    sh(SUPER, ["add", "."]); sh(SUPER, ["-c", "user.name=An Operator", "commit", "-q", "-m", "scope", "--date", at], { GIT_COMMITTER_DATE: at });
+  };
+  const scopeActs = (j: J) => ((j["operator_acts"] as { acts?: Array<{ addendum: string; at: string | null; detail: string }> } | null)?.acts ?? []).filter((a) => a.addendum === "3");
+  it("[A′] a real operator scope commit that opened the edit site BEFORE the row's filing is no addendum-3 act", async () => {
     // Its own edit site, so the opening (which stays in history: once opened, opened) touches no other case.
     reset(); counting("g-scope-old", {}, { edit_site: "repos/v/src/opened.ts" });
-    const scope = join(SUPER, "scripts", "substrate", "autonomy-scope.json");
-    const commitAs = (at: string, excluded: string[]) => {
-      writeFileSync(scope, JSON.stringify({ autonomyScope: { excluded_paths: excluded } }));
-      sh(SUPER, ["add", "."]); sh(SUPER, ["-c", "user.name=An Operator", "commit", "-q", "-m", "scope", "--date", at], { GIT_COMMITTER_DATE: at });
-    };
     commitAs(h(400), ["repos/v/src/opened.ts"]); // the site excluded
-    commitAs(h(300), []);                         // opened, 300 h ago: before the 168 h window and before the row's filing
+    commitAs(h(300), []);                         // opened, 300 h ago: before the row's filing (100 h ago)
     sh(SUPER, ["update-ref", "refs/remotes/origin/dev", "HEAD"]);
     const j = await judged("g-scope-old");
+    expect(j.failing_links).not.toContain("operator_act:3");
+    expect(scopeActs(j)).toEqual([]);
+  });
+  it("[A″] a real operator scope commit that opened the edit site AFTER the filing, before the landing, makes the closure assisted", async () => {
+    reset(); counting("g-scope-late", {}, { edit_site: "repos/v/src/opened-late.ts" });
+    commitAs(h(400), ["repos/v/src/opened-late.ts"]); // the site excluded
+    commitAs(h(80), []);                               // opened, 80 h ago: after the filing (100 h), before the landing (50 h)
+    sh(SUPER, ["update-ref", "refs/remotes/origin/dev", "HEAD"]);
+    const j = await judged("g-scope-late");
     expect(j.verdict).toBe("not_counted");
     expect(j.failing_links).toContain("operator_act:3");
+    expect(scopeActs(j).map((a) => a.at)).toEqual([h(80)]);
     expect(JSON.stringify(j["operator_acts"])).toContain("super-repo");
   });
 });

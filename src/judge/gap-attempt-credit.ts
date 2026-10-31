@@ -440,7 +440,8 @@ export function narrowedChildRecord(
     detected_at: parent.detected_at,
     // A HELD PARENT'S CHILD IS BORN HELD (inheritedOperatorHold): the hold keys are never copied raw (above), only
     // through the one builder, which also names the row the hold was set on.
-    classification_metadata: { ...inherited, ...inheritedOperatorHold(parentId, meta), failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString(), ...opts.extra },
+    // The parent's failed_attempts come with the rest (never reset): a narrowed attempt cannot outrank its own parent.
+    classification_metadata: { ...inherited, ...inheritedOperatorHold(parentId, meta), parent_gap_id: parentId, narrowed_at: new Date().toISOString(), ...opts.extra },
     status: "open",
   };
 }
@@ -453,8 +454,7 @@ export function narrowedChildRecord(
 // re_commit/source_gap_id, never parent_gap_id, so without this check it looks like a
 // root to THIS guard and gets narrowed too — then, if the narrowed result fails compose
 // again, feature-compose wraps it in another recommit- layer (which again omits
-// parent_gap_id), making it eligible for narrowing all over again. Each narrowing resets
-// failed_attempts to 0 (and with it landability back to 1.0), so the two caps alternate
+// parent_gap_id), making it eligible for narrowing all over again, so the two caps alternate
 // forever instead of either ever holding — confirmed via the recommit-*-syntax_break-
 // -narrowed chain measured on 2026-08-07 (id: route-edit-2206dec0:1's lineage).
 export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Record<string, unknown>): boolean {
@@ -524,8 +524,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
     if (opts.out && bumpWrite?.shape !== "structuredError") opts.out.failed_attempts = fa;
     // Emit narrowed child gap when the gap has now reached the chronic-failure
     // threshold (>= 3 failed_attempts). The child carries a tighter description
-    // and resets failed_attempts to 0 so it re-enters the dispatch queue at
-    // normal priority rather than being culled by the landabilityScore filter.
+    // and its parent's failed_attempts, so the narrowing never resets the family's count.
     const willExceedThreshold = shouldNarrowForChronicFailure(fa, meta0);
     if (willExceedThreshold) {
       try {

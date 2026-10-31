@@ -650,6 +650,13 @@ export async function resolveDocsAlignTick(
       sources: Array.isArray(rawBridgeBody["sources"])
         ? (rawBridgeBody["sources"] as string[])
         : [],
+      // The bridge's per-write answers (docs-align-bridge.ts): the writes the gap store accepted, each with the row it
+      // landed on (and updated_at when the store returned one), and the writes it did not accept. A reader that checks
+      // this report against the gap store reads these; gaps_emitted and sources alone cannot tell a filed gap from a
+      // refused one.
+      writes: Array.isArray(rawBridgeBody["writes"]) ? rawBridgeBody["writes"] : [],
+      saved_unconfirmed: Array.isArray(rawBridgeBody["saved_unconfirmed"]) ? rawBridgeBody["saved_unconfirmed"] : [],
+      refused: Array.isArray(rawBridgeBody["refused"]) ? rawBridgeBody["refused"] : [],
       dry_run: pointer.dry_run ?? false,
       by_invariant: byInvariant,
       // A check that could not run is reported, never read as a pass.

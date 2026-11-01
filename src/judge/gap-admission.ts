@@ -236,7 +236,7 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
     // The file the site names (editSitePath, the rule the autonomy-scope match reads too): a note after the first
     // repos/<vessel>/….(ts|tsx) token ("repos/llm-resolver-vessel/src/index.ts (policy handler outcome recording)") is
     // not part of the path, so a row naming a real file no longer reads as naming none.
-    const cand = editSitePath(v);
+    const cand = editSitePath(v, meta);
     if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand)) return cand;
   }
   return null;
@@ -637,7 +637,7 @@ export async function admitActionableGaps(
     {
       const siteForScope = String(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path || "");
       if (siteForScope) {
-        const scopeHit = autonomyScopeExcludes(scope, siteForScope);
+        const scopeHit = autonomyScopeExcludes(scope, siteForScope, meta);
         // A tightening hold does not block the repair of its own regression (gapInHoldLineage).
         const hold = scopeHit ? scopeHoldFor(scope, scopeHit) : null;
         if (scopeHit && hold && gapInHoldLineage(g, hold, candidatesById)) {

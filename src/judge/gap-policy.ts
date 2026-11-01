@@ -587,10 +587,15 @@ async function readAutonomyScopeLive(): Promise<AutonomyScope> {
  * recording)"), and a :symbol / :line suffix is stripped. Anything else comes back as given (a directory with function
  * names stays a directory). One rule for every reader of a site: admission's grounding (citedExistingFile) and the
  * autonomy-scope match (autonomyScopeExcludes), so a site cannot name a file to one and a non-path to the other.
+ * A VESSEL-RELATIVE site (src/… or test/…, as attempt-register's attempt_consequence rows were born) names a file only
+ * with the vessel the row itself records: pass the row's metadata as `ctx` and its `vessel` prefixes the site once. No
+ * vessel on the row, no prefix (nothing is guessed from a basename), and with no `ctx` every site reads as before.
  */
-export function editSitePath(site: string): string {
+export function editSitePath(site: string, ctx?: { vessel?: unknown } | null): string {
   let cand = String(site ?? "").trim().replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
   if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
+  const vessel = typeof ctx?.vessel === "string" ? ctx.vessel.trim() : "";
+  if (vessel && /^[A-Za-z0-9_.-]+$/.test(vessel) && /^(?:\.\/)?(src|tests?)\//.test(cand)) cand = `repos/${vessel}/${cand.replace(/^\.\//, "")}`;
   const lead = cand.match(/^repos\/[^/\s]+\/[^\s(]+?\.tsx?(?::[A-Za-z0-9_$]+|:\d+(?::\d+)?)?(?=[\s(:]|$)/);
   if (lead) cand = lead[0];
   return cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
@@ -602,8 +607,9 @@ export function editSitePath(site: string): string {
  *  A free-text site is also matched as the file it names (editSitePath): "<excluded file> (a note)" never equalled
  *  the entry, so a site at a lane-core file passed. TIGHTENING ONLY: the path as given is matched first, exactly as
  *  before, and the named file only when that matches nothing, so no path this refused before now passes and each
- *  keeps the entry it hit. */
-export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
+ *  keeps the entry it hit. `ctx` (the row's metadata) lets the named file be read with the vessel the row records
+ *  (editSitePath), so a vessel-relative site at an excluded file is refused by that entry. */
+export function autonomyScopeExcludes(scope: AutonomyScope, path: string, ctx?: { vessel?: unknown } | null): string | null {
   if (!scope.readable) return `scope ${scope.absent ? "absent" : "unreadable"} (${scope.reason})`;
   const strip = (p: string) => p.replace(/^\.\//, "").replace(/^repos\//, "");
   const exceptions = parseScopeExceptions(scope.exceptions).map(strip);
@@ -622,7 +628,7 @@ export function autonomyScopeExcludes(scope: AutonomyScope, path: string): strin
   };
   const asGiven = hit(String(path));
   if (asGiven) return asGiven;
-  const named = editSitePath(String(path));
+  const named = editSitePath(String(path), ctx);
   return named !== String(path) ? hit(named) : null;
 }
 

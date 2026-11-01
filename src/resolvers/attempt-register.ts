@@ -462,6 +462,22 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
   return { drained, outcomes_written, settlements_written, lessons_written, errors };
 }
 
+/**
+ * The site an attempt_consequence row is born with: the attempt's first touched file as a repo path,
+ * repos/<vessel>/<file>, with the vessel the intent already records (its repo, whose basename is the vessel), and that
+ * vessel beside it. touched_files are vessel-relative ("src/index.ts"), and a row born with the bare file named no
+ * vessel to any reader (check-supply skipped every such row as no_vessel). A file already under repos/ or absolute is
+ * kept as given; no repo, no vessel and no prefix.
+ */
+export function attemptConsequenceSite(intent: { repo?: unknown; touched_files?: unknown }): { edit_site?: string; vessel?: string } {
+  const file = Array.isArray(intent.touched_files) && typeof intent.touched_files[0] === "string" ? intent.touched_files[0].trim() : "";
+  const base = typeof intent.repo === "string" ? path.basename(intent.repo.replace(/\/+$/, "")) : "";
+  const vessel = /^[A-Za-z0-9_.-]+$/.test(base) && base !== "." && base !== ".." ? base : "";
+  if (!file) return vessel ? { vessel } : {};
+  if (!vessel || /^(?:repos\/|\/)/.test(file)) return { edit_site: file, ...(vessel ? { vessel } : {}) };
+  return { edit_site: `repos/${vessel}/${file.replace(/^(?:\.\/)+/, "")}`, vessel };
+}
+
 async function writeLesson(intent: any, attempt_id: string, shas: string[], reason_suffix: string): Promise<number> {
   const gapResult = await resolveSubstrateGap({ type: "substrateGap", id: intent.gap_id, limit: 1 });
   const gap = (gapResult.body as any)?.gaps?.[0];
@@ -494,7 +510,7 @@ async function writeLesson(intent: any, attempt_id: string, shas: string[], reas
         detected_at: now,
         summary: `Attempt ${attempt_id} landed ${shas.join(", ")} and ${reason_suffix}. The landing's own gap was never recorded, so this gap carries the consequence to address.`,
         classification_metadata: {
-          edit_site: Array.isArray(intent.touched_files) ? intent.touched_files[0] : undefined,
+          ...attemptConsequenceSite(intent),
           attempt_id,
           failure_lessons: [{ class: "attempt_consequence", reason, at: now, attempt_id }],
         },

@@ -1717,7 +1717,7 @@ export function landableBandOf(row: Row, byId: ReadonlyMap<string, Row>, scope: 
   if (!isSystemBornLineage(row, byId)) return 2;
   const m = metaOf(row);
   const site = m["edit_site"];
-  return scope?.readable && typeof site === "string" && site.trim().length > 0 && autonomyScopeExcludes(scope, editSitePath(site)) === null && !PARKING_DISPOSITIONS.includes(String(m["disposition"] ?? "")) ? 0 : 1;
+  return scope?.readable && typeof site === "string" && site.trim().length > 0 && autonomyScopeExcludes(scope, editSitePath(site, m)) === null && !PARKING_DISPOSITIONS.includes(String(m["disposition"] ?? "")) ? 0 : 1;
 }
 /** `rows` in landableBandOf order, each band keeping the order it was given. Ordering only: nothing is dropped. */
 function byLandableBand(rows: Row[], byId: ReadonlyMap<string, Row>, scope: AutonomyScope | null): Row[] {

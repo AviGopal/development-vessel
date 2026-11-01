@@ -12,6 +12,13 @@
 // THE CORPUS REACHES THE COMPARATOR WHOLE: every row is asserted a supply candidate with its vessel resolved, its age as
 // intended, and every row dispatched (dry run, max_per_tick above the corpus size) with none skipped or localized, so an
 // order is never compared over a silently dropped subset.
+// CHECK-WRITER TARGETING (user ruling): the comparator's order is then banded, honest (system-born) rows the lane could
+// land first, then the other honest rows, then the rest (gap-check-supply.ts landableBandOf), each band in the
+// comparator's order. In this corpus honest = source substrate_detected and landable = an edit_site in the row (the stub
+// scope excludes only another vessel), so every expected order below is banded(<the comparator's order>). One row
+// (sysSummarySited) is sited by its summary alone, with no edit_site: in the candidate_order band but not landable, so
+// the knob still changes the order inside the honest-not-landable band. The arrays were re-captured at the base commit
+// (4165798b) with that row added, banding off.
 // Harness: as gap-check-supply-order.test.ts (temp gap store, temp clones, stubbed fetch).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -123,7 +130,7 @@ async function storeRow(id: string): Promise<Row> {
   return row;
 }
 
-type Spec = { key: string; source: "operator" | "substrate_detected"; ledger?: Row; sited: boolean; spec: boolean; detected: string };
+type Spec = { key: string; source: "operator" | "substrate_detected"; ledger?: Row; sited: boolean; spec: boolean; detected: string; summaryOnly?: boolean };
 // THE CORPUS: due retries (failed, and a non-attempt past its wait), attempts 0 and 1, sited and unsited, with and
 // without a stated falsifier, both sources, every age distinct (no pair falls to an insertion-order tie).
 const CORPUS: Spec[] = [
@@ -133,6 +140,7 @@ const CORPUS: Spec[] = [
   { key: "sysFreshSited", source: "substrate_detected", sited: true, spec: false, detected: "2026-10-10T00:00:00Z" },
   { key: "sysFreshSitedSpec", source: "substrate_detected", sited: true, spec: true, detected: "2026-10-01T00:00:00Z" },
   { key: "sysFreshUnsited", source: "substrate_detected", sited: false, spec: true, detected: "2026-09-01T00:00:00Z" },
+  { key: "sysSummarySited", source: "substrate_detected", sited: true, summaryOnly: true, spec: true, detected: "2026-09-15T00:00:00Z" },
   { key: "sysTriedSited", source: "substrate_detected", ledger: { state: "green_at_head", attempts: 1, last_dispatch_at: DAYS_AGO(3) }, sited: true, spec: true, detected: "2026-09-04T00:00:00Z" },
   { key: "opFreshSited", source: "operator", sited: true, spec: true, detected: "2026-09-10T00:00:00Z" },
   { key: "opFreshSitedNoSpec", source: "operator", sited: true, spec: false, detected: "2026-09-20T00:00:00Z" },
@@ -150,7 +158,7 @@ async function seedCorpus(): Promise<Map<string, string>> {
     const summary = c.sited
       ? `candidate-order fixture ${RUN} ${c.key}: ${EDIT} widget returns 1; it must return 2`
       : `candidate-order fixture ${RUN} ${c.key}: ${ABSENT} widget returns 1; it must return 2`;
-    const meta: Row = { ...(c.sited ? { edit_site: EDIT } : {}), ...(c.spec ? { falsifier_spec: SPEC } : {}), ...(c.ledger ? { check_supply: c.ledger } : {}) };
+    const meta: Row = { ...(c.sited && !c.summaryOnly ? { edit_site: EDIT } : {}), ...(c.spec ? { falsifier_spec: SPEC } : {}), ...(c.ledger ? { check_supply: c.ledger } : {}) };
     const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: c.source, status: "open", detected_at: c.detected, summary, classification_metadata: meta } } as never);
     if (w.shape === "structuredError") throw new Error(`seed ${c.key} refused: ${JSON.stringify(w.body)}`);
     await sg.__settleBirthEvaluationsForTests();
@@ -161,6 +169,7 @@ async function seedCorpus(): Promise<Map<string, string>> {
     expect([c.key, supply.checkSupplyVessel(row)]).toEqual([c.key, VESSEL]);
     expect([c.key, Boolean(supply.checkSupplySite(row, VESSEL))]).toEqual([c.key, c.sited]);
     expect([c.key, String(row["source"])]).toEqual([c.key, c.source]);
+    expect([c.key, ((row["classification_metadata"] ?? {}) as Row)["edit_site"] ?? null]).toEqual([c.key, c.sited && !c.summaryOnly ? EDIT : null]);
     expect([c.key, String(row["first_detected_at"] ?? row["detected_at"] ?? "")]).toEqual([c.key, c.detected]);
   }
   return ids;
@@ -178,10 +187,14 @@ async function rankedKeys(ids: Map<string, string>): Promise<string[]> {
   return keys;
 }
 
-// TODAY'S ORDER over the corpus, captured from the base comparator (1ba9b19d) by running this file there.
-const GOLDEN = ["sysNonAttemptSited", "opRetry", "sysRetry", "opFreshSited", "sysFreshSitedSpec", "opFreshSitedNoSpec", "sysFreshSited", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
+// TODAY'S ORDER over the corpus, captured from the base comparator (1ba9b19d) by running this file there, and again at
+// 4165798b with sysSummarySited added.
+const GOLDEN = ["sysNonAttemptSited", "opRetry", "sysRetry", "opFreshSited", "sysSummarySited", "sysFreshSitedSpec", "opFreshSitedNoSpec", "sysFreshSited", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
 // BAND FIRST (never attempted, substrate_detected, sited), today's order within each band.
-const ELIGIBLE_FIRST = ["sysNonAttemptSited", "sysFreshSitedSpec", "sysFreshSited", "opRetry", "sysRetry", "opFreshSited", "opFreshSitedNoSpec", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
+const ELIGIBLE_FIRST = ["sysNonAttemptSited", "sysSummarySited", "sysFreshSitedSpec", "sysFreshSited", "opRetry", "sysRetry", "opFreshSited", "opFreshSitedNoSpec", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
+// THE LANDABLE BANDS (landableBandOf) over this corpus: 0 honest and landable, 1 honest, 2 the rest; each keeps its order.
+const bandOf = (k: string): number => { const c = CORPUS.find((x) => x.key === k)!; return c.source !== "substrate_detected" ? 2 : c.sited && !c.summaryOnly ? 0 : 1; };
+const banded = (keys: readonly string[]): string[] => [0, 1, 2].flatMap((b) => keys.filter((k) => bandOf(k) === b));
 
 describe("gap-check-supply candidate_order, read from the family rhythm", () => {
   it("MUST-FAIL (a): with candidate_order eligible_never_attempted_first, never-attempted system-filed sited rows rank first", async () => {
@@ -190,25 +203,27 @@ describe("gap-check-supply candidate_order, read from the family rhythm", () => 
     const keys = await rankedKeys(ids);
     // the headline: a never-attempted, system-filed, sited row outranks a due-retry operator row
     expect(keys.indexOf("sysFreshSited")).toBeLessThan(keys.indexOf("opRetry"));
-    expect(keys).toEqual(ELIGIBLE_FIRST);
+    // and inside the honest-not-landable band, the never-attempted sited row outranks the due retry
+    expect(keys.indexOf("sysSummarySited")).toBeLessThan(keys.indexOf("sysRetry"));
+    expect(keys).toEqual(banded(ELIGIBLE_FIRST));
     expect(logs.filter((l) => l.includes("[check-supply] candidate_order="))).toEqual(["[check-supply] candidate_order=eligible_never_attempted_first"]);
   });
 
   it("GOLDEN (b): with candidate_order absent, the order is today's, identical to the base comparator's", async () => {
     const ids = await seedCorpus();
-    expect(await rankedKeys(ids)).toEqual(GOLDEN);
+    expect(await rankedKeys(ids)).toEqual(banded(GOLDEN));
   });
 
   it("CONTROL: an unrecognised candidate_order orders exactly as today", async () => {
     rhythms = [dueRhythm({ candidate_order: "never_attempted_first" })];
     const ids = await seedCorpus();
-    expect(await rankedKeys(ids)).toEqual(GOLDEN);
+    expect(await rankedKeys(ids)).toEqual(banded(GOLDEN));
   });
 });
 
 // NEWEST FIRST WITHIN THE BAND (USER RULING 2026-10-22 "Newest first within the band (Recommended)"): the same band,
 // first, ordered newest first by today's age key; the rows outside the band keep today's order and follow.
-const NEWEST_FIRST = ["sysFreshSited", "sysFreshSitedSpec", "sysNonAttemptSited", "opRetry", "sysRetry", "opFreshSited", "opFreshSitedNoSpec", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
+const NEWEST_FIRST = ["sysFreshSited", "sysFreshSitedSpec", "sysNonAttemptSited", "sysSummarySited", "opRetry", "sysRetry", "opFreshSited", "opFreshSitedNoSpec", "sysFreshUnsited", "opFreshUnsited", "sysTriedSited", "opTried"];
 
 describe("gap-check-supply candidate_order eligible_never_attempted_newest_first", () => {
   it("MUST-FAIL (a): newest first within the band puts a newer band row ahead of an older band row", async () => {
@@ -216,7 +231,7 @@ describe("gap-check-supply candidate_order eligible_never_attempted_newest_first
     const ids = await seedCorpus();
     const keys = await rankedKeys(ids);
     expect(keys.indexOf("sysFreshSited")).toBeLessThan(keys.indexOf("sysNonAttemptSited"));
-    expect(keys).toEqual(NEWEST_FIRST);
+    expect(keys).toEqual(banded(NEWEST_FIRST));
     expect(logs.filter((l) => l.includes("[check-supply] candidate_order="))).toEqual(["[check-supply] candidate_order=eligible_never_attempted_newest_first"]);
   });
   it("MUST-FAIL (b): eligible_never_attempted_first keeps its old order, oldest first in the band", async () => {
@@ -224,11 +239,11 @@ describe("gap-check-supply candidate_order eligible_never_attempted_newest_first
     const ids = await seedCorpus();
     const keys = await rankedKeys(ids);
     expect(keys.indexOf("sysNonAttemptSited")).toBeLessThan(keys.indexOf("sysFreshSited"));
-    expect(keys).toEqual(ELIGIBLE_FIRST);
+    expect(keys).toEqual(banded(ELIGIBLE_FIRST));
   });
   it("MUST-FAIL (c): with candidate_order absent the order is byte-identical to the golden", async () => {
     const ids = await seedCorpus();
-    expect(JSON.stringify(await rankedKeys(ids))).toBe(JSON.stringify(GOLDEN));
+    expect(JSON.stringify(await rankedKeys(ids))).toBe(JSON.stringify(banded(GOLDEN)));
     expect(logs.filter((l) => l.includes("[check-supply] candidate_order="))).toEqual(["[check-supply] candidate_order=default"]);
   });
 });

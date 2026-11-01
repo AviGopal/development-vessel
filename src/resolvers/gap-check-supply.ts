@@ -1705,6 +1705,27 @@ let passInFlight = false;
 let lastBookkeepingAt: number | null = null;
 
 /**
+ * THE LANDABLE BAND of a row, shared by the two passes that pick which gaps get work first (the own-check baseline and
+ * the test-writing dispatch): 0 = system-born (operator-acts.ts isSystemBornLineage, over `byId`, the pass's store read
+ * indexed once) and landable, 1 = system-born and not landable, 2 = the rest. Landable = an edit_site whose file
+ * (editSitePath) the live autonomy scope does not exclude (autonomyScopeExcludes, over the tick's one scope read), and
+ * no parking disposition (PARKING_DISPOSITIONS: needs_information, needs_info, awaiting_operator_review park a row out
+ * of autonomous work). A row with no edit_site is not landable. An unreadable scope (or none) decides nothing: no row is
+ * in band 0, so the order is the honest-first order.
+ */
+export function landableBandOf(row: Row, byId: ReadonlyMap<string, Row>, scope: AutonomyScope | null): 0 | 1 | 2 {
+  if (!isSystemBornLineage(row, byId)) return 2;
+  const m = metaOf(row);
+  const site = m["edit_site"];
+  return scope?.readable && typeof site === "string" && site.trim().length > 0 && autonomyScopeExcludes(scope, editSitePath(site)) === null && !PARKING_DISPOSITIONS.includes(String(m["disposition"] ?? "")) ? 0 : 1;
+}
+/** `rows` in landableBandOf order, each band keeping the order it was given. Ordering only: nothing is dropped. */
+function byLandableBand(rows: Row[], byId: ReadonlyMap<string, Row>, scope: AutonomyScope | null): Row[] {
+  const band = new Map(rows.map((r) => [r, landableBandOf(r, byId, scope)]));
+  return [0, 1, 2].flatMap((b) => rows.filter((r) => band.get(r) === b));
+}
+
+/**
  * One own-check-baseline goal per row whose test_suite own check has no baseline (and no baseline goal) at its vessel's
  * current origin/dev, in three bands, each in landability order: system-born (isSystemBornLineage) rows the lane could
  * land, then the other system-born rows, then the rest; at most the shaped per-tick bound. Each goal is its own goal-host execution (selectable and traced); its dispatch is appended to the
@@ -1737,21 +1758,12 @@ export async function dispatchOwnCheckBaselines(
   // only them.
   const byId = lineageIndex(deps.byId ?? new Map<string, Row>(open.map((r) => [String(r["id"] ?? ""), r])));
   const candidates = orderByLandability(open.filter((r) => { const v = ownCheckVesselOf(metaOf(r)); return !!String(r["id"] ?? "") && !!v && /^[A-Za-z0-9_.-]+$/.test(v); }), byId);
-  const honest = new Set(candidates.filter((r) => isSystemBornLineage(r, byId)));
-  // LANDABLE BEFORE NOT: of the honest rows, those the lane could land go first. Landable = an edit_site whose file
-  // (editSitePath) the live autonomy scope does not exclude (autonomyScopeExcludes, over the tick's one scope read,
-  // deps.scope), and no parking disposition (PARKING_DISPOSITIONS: needs_information, needs_info,
-  // awaiting_operator_review park a row out of autonomous work). A row with no edit_site is not landable. An unreadable
-  // scope (or none given) decides nothing: no row is promoted, so the order is the honest-first order. Ordering only:
-  // every candidate is still walked, and the scope is read only when there is an honest row to band.
-  const scope = honest.size > 0 && deps.scope ? await deps.scope() : null;
-  const landable = (r: Row): boolean => {
-    const m = metaOf(r);
-    const site = m["edit_site"];
-    return !!scope?.readable && typeof site === "string" && site.trim().length > 0 && autonomyScopeExcludes(scope, editSitePath(site)) === null && !PARKING_DISPOSITIONS.includes(String(m["disposition"] ?? ""));
-  };
-  const first = new Set([...honest].filter(landable));
-  for (const row of [...candidates.filter((r) => first.has(r)), ...candidates.filter((r) => honest.has(r) && !first.has(r)), ...candidates.filter((r) => !honest.has(r))]) {
+  // LANDABLE BEFORE NOT: of the honest rows, those the lane could land go first (landableBandOf, over the tick's one
+  // scope read, deps.scope). An unreadable scope (or none given) decides nothing: no row is promoted, so the order is
+  // the honest-first order. Ordering only: every candidate is still walked, and the scope is read only when there is an
+  // honest row to band.
+  const scope = deps.scope && candidates.some((r) => isSystemBornLineage(r, byId)) ? await deps.scope() : null;
+  for (const row of byLandableBand(candidates, byId, scope)) {
     if (sent.length >= max) break;
     const id = String(row["id"] ?? "");
     const meta = metaOf(row);
@@ -2255,7 +2267,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // dispatch step's scope skip below, whichever asks first.
   let scopeRead: AutonomyScope | null = null;
   const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
-  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m), byId: new Map(rows.map((r) => [String(r["id"]), r])), scope: scopeOnce }) : [];
+  // The store read, indexed once for lineage reads (lineageIndex): the baseline's bands and the dispatch step's.
+  const byIdAll = lineageIndex(new Map(rows.map((r) => [String(r["id"]), r])));
+  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m), byId: byIdAll, scope: scopeOnce }) : [];
   if (baselinesSent.length > 0) console.log(`[gap-check-supply] own-check baselines dispatched: ${baselinesSent.map((b) => `${b.id}@${b.base_sha.slice(0, 12)}=${b.dispatch_id}`).join(", ")}`);
 
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
@@ -2460,7 +2474,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     return Number(ledgerOf(metaOf(r)).attempts ?? 0) === 0 && r["source"] === "substrate_detected" && Boolean(v && checkSupplySite(r, v));
   };
   console.log(`[check-supply] candidate_order=${eligibleFirst ? "eligible_never_attempted_first" : newestFirst ? "eligible_never_attempted_newest_first" : candidateOrder === undefined ? "default" : `default (unrecognised ${JSON.stringify(candidateOrder)})`}`);
-  const candidates = open
+  const ordered = open
     .filter((r) => !touched.has(String(r["id"])) && checkSupplyDisposition(r) !== null)
     .sort((a, b) => {
       // The band first (candidate_order above), then today's order within each band.
@@ -2487,6 +2501,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (hasFalsifierA !== hasFalsifierB) return hasFalsifierA ? -1 : 1; // stated falsifier FIRST
       return String(a["first_detected_at"] ?? a["detected_at"] ?? "").localeCompare(String(b["first_detected_at"] ?? b["detected_at"] ?? ""));
     });
+  // CHECK-WRITER TARGETING (user ruling): honest rows the lane could land get their check written first, then the other
+  // honest rows, then the rest (landableBandOf, the baseline's bands), each band in the order above. Ordering only:
+  // every candidate is still walked and the per-tick bound is unchanged. The scope is the tick's one read (scopeOnce,
+  // which the scope skip below reuses), taken only when there is an honest row to band; unreadable, nothing is promoted.
+  const twScope = ordered.some((r) => isSystemBornLineage(r, byIdAll)) ? await scopeOnce() : null;
+  const candidates = byLandableBand(ordered, byIdAll, twScope);
   const anchorsOf = new Map<string, CheckAnchor[]>();
   const declCache = new Map<string, Set<string>>();
   /** With no edit site, a symbol resolves only if the vessel's own src declares it (cached per tick). */

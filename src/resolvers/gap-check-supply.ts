@@ -85,8 +85,9 @@ import {
   ownCheckUnarmMeta,
   isAwaitingLandVerification,
   isParkingDisposition,
+  PARKING_DISPOSITIONS,
 } from "../judge/gap-eligibility.js";
-import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
+import { autonomyScopeExcludes, editSitePath, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { codeContract, type CodeContract } from "./code-introspect.js";
 import { isSystemBornLineage, lineageIndex } from "./operator-acts.js";
@@ -1705,8 +1706,8 @@ let lastBookkeepingAt: number | null = null;
 
 /**
  * One own-check-baseline goal per row whose test_suite own check has no baseline (and no baseline goal) at its vessel's
- * current origin/dev, system-born rows first (isSystemBornLineage), each group in landability order, at most the shaped
- * per-tick bound. Each goal is its own goal-host execution (selectable and traced); its dispatch is appended to the
+ * current origin/dev, in three bands, each in landability order: system-born (isSystemBornLineage) rows the lane could
+ * land, then the other system-born rows, then the rest; at most the shaped per-tick bound. Each goal is its own goal-host execution (selectable and traced); its dispatch is appended to the
  * row's own_check_baseline_dispatches (the last 5), so the same (gap, sha) is never sent twice, and each earlier
  * dispatch's execution id is read back from goal-host's record (own-check-baseline-credit.ts dispatchExecutionId) and
  * kept there: the baseline's content grade joins on it. An unreadable policy measures nothing. A failed send stops the
@@ -1714,7 +1715,7 @@ let lastBookkeepingAt: number | null = null;
  */
 export async function dispatchOwnCheckBaselines(
   open: Row[],
-  deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined>; byId?: ReadonlyMap<string, Row> },
+  deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined>; byId?: ReadonlyMap<string, Row>; scope?: () => Promise<AutonomyScope> },
 ): Promise<Array<{ id: string; base_sha: string; dispatch_id: string }>> {
   const { readOwnCheckEnvPolicy } = await import("./own-check-baseline.js");
   const { ownCheckVesselOf } = await import("../judge/gap-eligibility.js");
@@ -1737,7 +1738,20 @@ export async function dispatchOwnCheckBaselines(
   const byId = lineageIndex(deps.byId ?? new Map<string, Row>(open.map((r) => [String(r["id"] ?? ""), r])));
   const candidates = orderByLandability(open.filter((r) => { const v = ownCheckVesselOf(metaOf(r)); return !!String(r["id"] ?? "") && !!v && /^[A-Za-z0-9_.-]+$/.test(v); }), byId);
   const honest = new Set(candidates.filter((r) => isSystemBornLineage(r, byId)));
-  for (const row of [...candidates.filter((r) => honest.has(r)), ...candidates.filter((r) => !honest.has(r))]) {
+  // LANDABLE BEFORE NOT: of the honest rows, those the lane could land go first. Landable = an edit_site whose file
+  // (editSitePath) the live autonomy scope does not exclude (autonomyScopeExcludes, over the tick's one scope read,
+  // deps.scope), and no parking disposition (PARKING_DISPOSITIONS: needs_information, needs_info,
+  // awaiting_operator_review park a row out of autonomous work). A row with no edit_site is not landable. An unreadable
+  // scope (or none given) decides nothing: no row is promoted, so the order is the honest-first order. Ordering only:
+  // every candidate is still walked, and the scope is read only when there is an honest row to band.
+  const scope = honest.size > 0 && deps.scope ? await deps.scope() : null;
+  const landable = (r: Row): boolean => {
+    const m = metaOf(r);
+    const site = m["edit_site"];
+    return !!scope?.readable && typeof site === "string" && site.trim().length > 0 && autonomyScopeExcludes(scope, editSitePath(site)) === null && !PARKING_DISPOSITIONS.includes(String(m["disposition"] ?? ""));
+  };
+  const first = new Set([...honest].filter(landable));
+  for (const row of [...candidates.filter((r) => first.has(r)), ...candidates.filter((r) => honest.has(r) && !first.has(r)), ...candidates.filter((r) => !honest.has(r))]) {
     if (sent.length >= max) break;
     const id = String(row["id"] ?? "");
     const meta = metaOf(row);
@@ -2237,7 +2251,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // 2o. THE OWN-CHECK BASELINE (own-check-baseline.ts): on a due pass, at most `own_check_baseline_per_tick` (the shaped
   // ownCheckEnvironmentPolicy) open rows with a test_suite own check not yet measured at their vessel's current
   // origin/dev get one development-vessel:own-check-baseline goal each, the rows admission would pick next first.
-  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m), byId: new Map(rows.map((r) => [String(r["id"]), r])) }) : [];
+  // The live autonomyScope is read at most once per tick (scopeOnce): here, for the baseline's landable band, or at the
+  // dispatch step's scope skip below, whichever asks first.
+  let scopeRead: AutonomyScope | null = null;
+  const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
+  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m), byId: new Map(rows.map((r) => [String(r["id"]), r])), scope: scopeOnce }) : [];
   if (baselinesSent.length > 0) console.log(`[gap-check-supply] own-check baselines dispatched: ${baselinesSent.map((b) => `${b.id}@${b.base_sha.slice(0, 12)}=${b.dispatch_id}`).join(", ")}`);
 
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
@@ -2487,9 +2505,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     declCache.set(vessel, names);
     return names;
   };
-  let scopeRead: AutonomyScope | null = null;
   let scopeUnread: string | null = null;
-  const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
   // Goals placed on each peer this tick: debited from the free slots it reports (a peek, not a claim).
   const placedThisTick = new Map<string, number>();
   for (const row of candidates) {

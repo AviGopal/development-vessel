@@ -182,3 +182,71 @@ describe("CONTROLS: nothing else on a reading grounds a gap", () => {
     expect(by("ground-cw-none")).toBeUndefined();
   });
 });
+
+// THE SAME RULE FOR THE SCOPE MATCH. A free-text site naming a lane-core file ("<excluded file> (a note)") never equalled
+// the excluded entry, so it passed the autonomy-scope check; once the grounding read the file through the note, such a
+// row was admitted as lane work. The scope match now also reads the file the site names (gap-policy editSitePath, the
+// one rule citedExistingFile uses). Tightening only: what the match refused before it still refuses, by the same entry.
+// A code-reachable call path grounds only on a file the scope admits; one whose existing files are all excluded is
+// refused by scope.
+const autonomyScopeExcludes = modPolicy.autonomyScopeExcludes as (s: unknown, p: string) => string | null;
+const editSitePath = modPolicy.editSitePath as ((s: string) => string) | undefined;
+const EXCLUDED = ["repos/llm-resolver-vessel/src/index.ts", "repos/activity-api/src/lib/posterior-update.ts", "repos/goal-host-vessel/test/ratchet/"];
+const SCOPE = { excluded: EXCLUDED, readable: true, reason: "fixture scope", exceptions: [] };
+const setScopeDeps = modPolicy.__setAutonomyScopeDepsForTests as (d: unknown) => void;
+async function admitUnderScope(gs: Record<string, unknown>[], scope: Record<string, unknown> = SCOPE) {
+  setScopeDeps({ live: async () => scope, boundS: () => 0, now: Date.now });
+  try { return await admitSourced(gs); } finally { setScopeDeps(null); }
+}
+
+describe("the autonomy-scope match reads the file a free-text site names", () => {
+  it("MUST-FAIL '<excluded file> (prose)' is refused by the entry it names", () => {
+    expect(autonomyScopeExcludes(SCOPE, PAREN)).toBe("repos/llm-resolver-vessel/src/index.ts");
+    expect(autonomyScopeExcludes(SCOPE, "repos/llm-resolver-vessel/src/index.ts: where the outcome is recorded")).toBe("repos/llm-resolver-vessel/src/index.ts");
+  });
+
+  it("MUST-FAIL admission refuses the paren row by scope, not admitting it as lane work", async () => {
+    const { admittedIds, reasonOf } = await admitUnderScope([gap("scope-paren-adm", { edit_site: PAREN })]);
+    expect(admittedIds).not.toContain("scope-paren-adm");
+    expect(reasonOf("scope-paren-adm")).toBe("autonomy_scope(repos/llm-resolver-vessel/src/index.ts)");
+  });
+
+  it("MUST-FAIL a call path whose only existing files are excluded is refused by scope; with an in-scope file it grounds on that file", async () => {
+    const lane = await admitUnderScope([creditRow("scope-cw-lane", { own_check_baseline: reading("red_code_reachable", [CALL_PATH[0]!]) })]);
+    expect(lane.admittedIds).not.toContain("scope-cw-lane");
+    expect(lane.reasonOf("scope-cw-lane")).toBe("autonomy_scope(own_check_baseline call_path repos/activity-api/src/lib/posterior-update.ts)");
+    const mixed = await admitUnderScope([creditRow("scope-cw-mixed", { own_check_baseline: reading("red_code_reachable") })]);
+    expect(mixed.by("scope-cw-mixed")).toBe("own_check_baseline_call_path");
+    const pick = (modAdmission.ownCheckCallPathFile as (b: unknown, x?: (p: string) => string | null) => { file: string | null } | string | null)(reading("red_code_reachable"), (p) => autonomyScopeExcludes(SCOPE, p));
+    expect(typeof pick === "object" && pick !== null ? pick.file : pick).toBe("repos/activity-api/src/lib/failure-class.ts");
+  });
+
+  it("one exported normaliser: the scope match and citedExistingFile read the same file from a site", () => {
+    expect(typeof editSitePath).toBe("function");
+    for (const s of [PAREN, "repos/llm-resolver-vessel/src/index.ts:42", "/vessels/llm-resolver-vessel/src/index.ts (note)"]) {
+      expect(editSitePath!(s)).toBe("repos/llm-resolver-vessel/src/index.ts");
+      expect(citedExistingFile(gap("scope-norm", { edit_site: s }))).toBe(editSitePath!(s));
+    }
+    expect(editSitePath!(DIR)).toBe(DIR);
+  });
+});
+
+describe("CONTROLS: the scope match only tightens", () => {
+  it("CONTROL a bare excluded path, a :line form and a path under an excluded directory are refused by the same entry as before", () => {
+    expect(autonomyScopeExcludes(SCOPE, "repos/llm-resolver-vessel/src/index.ts")).toBe("repos/llm-resolver-vessel/src/index.ts");
+    expect(autonomyScopeExcludes(SCOPE, "repos/llm-resolver-vessel/src/index.ts:12")).toBe("repos/llm-resolver-vessel/src/index.ts");
+    expect(autonomyScopeExcludes(SCOPE, "repos/goal-host-vessel/test/ratchet/a.test.ts (a note)")).toBe("repos/goal-host-vessel/test/ratchet/");
+  });
+
+  it("CONTROL an in-scope 'path (prose)' passes the match and is admitted, grounded by its edit_site", async () => {
+    expect(autonomyScopeExcludes(SCOPE, "repos/activity-api/src/lib/failure-class.ts (failureClassOf)")).toBeNull();
+    const { admittedIds, by } = await admitUnderScope([gap("scope-in-adm", { edit_site: "repos/activity-api/src/lib/failure-class.ts (failureClassOf)" })]);
+    expect(admittedIds).toContain("scope-in-adm");
+    expect(by("scope-in-adm")).toBe("edit_site");
+  });
+
+  it("CONTROL a directory site with function names is not matched as a file, and an unreadable scope still excludes everything", () => {
+    expect(autonomyScopeExcludes(SCOPE, DIR)).toBeNull();
+    expect(autonomyScopeExcludes({ excluded: [], readable: false, reason: "down" }, "repos/activity-api/src/lib/failure-class.ts")).toBe("scope unreadable (down)");
+  });
+});

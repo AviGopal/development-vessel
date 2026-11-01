@@ -24,7 +24,7 @@ import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { lineageIndex, lineageOrigin } from "../resolvers/operator-acts.js";
 import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
-import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
+import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, editSitePath, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, sweepGitOut, type GapCheckVerdict } from "./gap-check-judge.js";
 import type { OwnCheckBaseline } from "../resolvers/own-check-baseline.js";
 import { readCalibration, landabilityScore, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
@@ -233,14 +233,10 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
   for (const f of ["edit_site", "file_path", "change_site", "suspected_real_location"]) {
     const v = meta[f];
     if (typeof v !== "string" || !v.trim()) continue;
-    let cand = v.trim().replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
-    if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
-    // A note after the first repos/<vessel>/….(ts|tsx) token is not part of the path: a trailing parenthetical or prose
-    // ("repos/llm-resolver-vessel/src/index.ts (policy handler outcome recording)") failed the extension test below, so
-    // a row naming a real file read as naming none. The token keeps its :symbol / :line suffix for the strip after it.
-    const lead = cand.match(/^repos\/[^/\s]+\/[^\s(]+?\.tsx?(?::[A-Za-z0-9_$]+|:\d+(?::\d+)?)?(?=[\s(:]|$)/);
-    if (lead) cand = lead[0];
-    cand = cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
+    // The file the site names (editSitePath, the rule the autonomy-scope match reads too): a note after the first
+    // repos/<vessel>/….(ts|tsx) token ("repos/llm-resolver-vessel/src/index.ts (policy handler outcome recording)") is
+    // not part of the path, so a row naming a real file no longer reads as naming none.
+    const cand = editSitePath(v);
     if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand)) return cand;
   }
   return null;
@@ -250,15 +246,21 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
  * (a'): the first EXISTING repos/<vessel>/….(ts|tsx) file on an own-check baseline's call_path (entries as
  * own-check-baseline.ts stores them: {path: "repos/<vessel>/src/…", fn, line}), only for a red_code_reachable reading.
  * A green, environmental or unrunnable reading names no target. The caller passes the reading admission already
- * accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names now).
+ * accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names now), and the
+ * autonomy-scope match: an excluded file is skipped, and `scopeHit` names the first one when no in-scope file grounds.
  */
-export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined): string | null {
-  if (!b || b.verdict !== "red_code_reachable" || !Array.isArray(b.call_path)) return null;
+export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: (path: string) => string | null): { file: string | null; scopeHit: string | null } {
+  let scopeHit: string | null = null;
+  if (!b || b.verdict !== "red_code_reachable" || !Array.isArray(b.call_path)) return { file: null, scopeHit };
   for (const e of b.call_path as Array<{ path?: unknown }>) {
     const p = typeof e?.path === "string" ? e.path.trim() : "";
-    if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) && repoPathExists(p)) return p;
+    if (!/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) || !repoPathExists(p)) continue;
+    // An existing file the autonomy scope excludes is lane core: it grounds nothing autonomous (the first hit is kept).
+    const hit = excludes ? excludes(p) : null;
+    if (hit) { scopeHit ??= hit; continue; }
+    return { file: p, scopeHit };
   }
-  return null;
+  return { file: null, scopeHit };
 }
 
 /** (b): the gap carries a proposal report naming required_code_modifications[].file that EXISTS. */
@@ -825,7 +827,12 @@ export async function admitActionableGaps(
     if (citedExistingFile(g)) { groundedBy[id] = "edit_site"; admitted.push(g); continue; }
     // (a') its own check's code-reachable red at the current base names the files the failing tests run through, and
     // one of them exists: the target the edit_site did not name (the reading feature-compose's baselineGrounding uses).
-    if (ownCheckCallPathFile(ocb)) { groundedBy[id] = "own_check_baseline_call_path"; admitted.push(g); continue; }
+    {
+      const onPath = ownCheckCallPathFile(ocb, (p) => autonomyScopeExcludes(scope, p));
+      if (onPath.file) { groundedBy[id] = "own_check_baseline_call_path"; admitted.push(g); continue; }
+      // Every existing file on the path is lane core: out of autonomous reach, refused by scope (not ungroundable).
+      if (onPath.scopeHit) { excluded.push({ id, reason: `autonomy_scope(own_check_baseline call_path ${onPath.scopeHit})` }); continue; }
+    }
 
     // (E1) ORPHAN / UNREACHABLE PRODUCER — no editable target; closes via author_producer /
     // reachability_gap_repair, not feature_compose. Admit a FRESH one for its single mint attempt,

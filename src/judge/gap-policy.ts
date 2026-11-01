@@ -581,24 +581,49 @@ async function readAutonomyScopeLive(): Promise<AutonomyScope> {
   }
   return v;
 }
+/**
+ * THE FILE A FREE-TEXT EDIT SITE NAMES: /vessels/<v>/… and bare <v>/src|test/… become repos/<v>/…, a note after the
+ * first repos/<vessel>/….(ts|tsx) token is cut ("repos/llm-resolver-vessel/src/index.ts (policy handler outcome
+ * recording)"), and a :symbol / :line suffix is stripped. Anything else comes back as given (a directory with function
+ * names stays a directory). One rule for every reader of a site: admission's grounding (citedExistingFile) and the
+ * autonomy-scope match (autonomyScopeExcludes), so a site cannot name a file to one and a non-path to the other.
+ */
+export function editSitePath(site: string): string {
+  let cand = String(site ?? "").trim().replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
+  if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
+  const lead = cand.match(/^repos\/[^/\s]+\/[^\s(]+?\.tsx?(?::[A-Za-z0-9_$]+|:\d+(?::\d+)?)?(?=[\s(:]|$)/);
+  if (lead) cand = lead[0];
+  return cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
+}
+
 /** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope excludes
  *  everything. Paths may be absolute, repo-relative or carry `:line`. A directory entry skips a path its
- *  exceptions name exactly (an exception outside the directory counts for nothing); an exact entry never does. */
+ *  exceptions name exactly (an exception outside the directory counts for nothing); an exact entry never does.
+ *  A free-text site is also matched as the file it names (editSitePath): "<excluded file> (a note)" never equalled
+ *  the entry, so a site at a lane-core file passed. TIGHTENING ONLY: the path as given is matched first, exactly as
+ *  before, and the named file only when that matches nothing, so no path this refused before now passes and each
+ *  keeps the entry it hit. */
 export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
   if (!scope.readable) return `scope ${scope.absent ? "absent" : "unreadable"} (${scope.reason})`;
-  const n = String(path).replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
   const strip = (p: string) => p.replace(/^\.\//, "").replace(/^repos\//, "");
   const exceptions = parseScopeExceptions(scope.exceptions).map(strip);
-  for (const e of scope.excluded) {
-    const s = strip(e);
-    if (s.endsWith("/")) {
-      const excepted = exceptions.some((x) => x.startsWith(s) && (n === x || n.endsWith("/" + x)));
-      if ((n.startsWith(s) || n.includes("/" + s)) && !excepted) return e;
-    } else if (n === s || n.endsWith("/" + s)) {
-      return e;
+  const hit = (raw: string): string | null => {
+    const n = raw.replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
+    for (const e of scope.excluded) {
+      const s = strip(e);
+      if (s.endsWith("/")) {
+        const excepted = exceptions.some((x) => x.startsWith(s) && (n === x || n.endsWith("/" + x)));
+        if ((n.startsWith(s) || n.includes("/" + s)) && !excepted) return e;
+      } else if (n === s || n.endsWith("/" + s)) {
+        return e;
+      }
     }
-  }
-  return null;
+    return null;
+  };
+  const asGiven = hit(String(path));
+  if (asGiven) return asGiven;
+  const named = editSitePath(String(path));
+  return named !== String(path) ? hit(named) : null;
 }
 
 /** The autonomy-scope floor for one autonomous compose: the scope entries its applied paths hit, and,

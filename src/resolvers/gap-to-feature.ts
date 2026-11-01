@@ -37,7 +37,7 @@ import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVe
 import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { composeExitReach } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
-import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, orderByLandability, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
+import { inheritedPredicateHolds, repoPathExists, existingEditTargets, ownCheckCallPathTargets, admitActionableGaps, orderByLandability, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
 import { duringActivity } from "../lib/loop-stall.js";
 
@@ -785,7 +785,7 @@ export interface LocalizeResult {
   file: string;
   description: string;
   vessel: string;
-  method: "metadata_edit_site" | "grep_unique" | "grep_dominant" | "llm_ranked";
+  method: "metadata_edit_site" | "own_check_call_path" | "grep_unique" | "grep_dominant" | "llm_ranked";
   candidates?: number;
 }
 
@@ -793,7 +793,7 @@ export interface LocalizeResult {
  * Derive a CONCRETE existing edit-site for a gap that has no proposal-report edit target.
  * Returns null when no confident single file emerges (NEVER fabricates). Bounded + graceful.
  */
-export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?: boolean }): Promise<LocalizeResult | null> {
+export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?: boolean; directed?: boolean }): Promise<LocalizeResult | null> {
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   const summary = String(gap.summary ?? gap.title ?? "");
 
@@ -846,6 +846,25 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
     }
   }
 
+  // THE OWN CHECK'S CALL PATH, before any search (gap-admission ownCheckCallPathTargets, the reader admission grounds on):
+  // a code-reachable red at the vessel's current origin/dev names the files the failing tests run through. Its first
+  // in-scope existing file is the change site the row's own text did not name. Without it a row admission grounded on
+  // its call path (a directory edit_site) went to the grep below, found no confident file and was marked
+  // localization_failed, with a "needs a change-site" question and an escalation, on every pick.
+  const directed = opts?.directed === true || gapDirected(meta);
+  const onPath = await ownCheckCallPathTargets(gap, { directed });
+  if (onPath[0]) return { file: onPath[0], description: "change site on the own check's code-reachable call path (own_check_baseline)", vessel: onPath[0].match(/^repos\/([^/]+)\//)?.[1] ?? "", method: "own_check_call_path" };
+  // A search pick is held to the same autonomy scope (directed work: none): an excluded pick is no confident file, and
+  // an unreadable scope excludes every pick (autonomyScopeExcludes), FAIL CLOSED: a consumer of the localized file can
+  // fail open on an unreadable read (gap-check-supply writes the localized edit_site onto the row when its scope check
+  // cannot run), so the localizer must not. Read only when a pick is about to be returned.
+  let scopeForPick: Awaited<ReturnType<typeof autonomyScope>> | null = null;
+  const pickInScope = async (file: string): Promise<boolean> => {
+    if (directed) return true;
+    scopeForPick ??= await autonomyScope();
+    return autonomyScopeExcludes(scopeForPick, file) === null;
+  };
+
   // (a) identify the target vessel.
   const vessel = identifyVessel(gap, meta);
   if (!vessel) return null;
@@ -862,15 +881,16 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
   // matched ≥2 terms). Otherwise optionally ask the LLM to pick among the close hits.
   const top = hits[0]!;
   if (hits.length === 1 && top.matched.length >= 1) {
+    if (!(await pickInScope(top.file))) return null;
     return { file: top.file, description: `derived via code-search (sole match on: ${top.matched.join(", ")})`, vessel, method: "grep_unique", candidates: 1 };
   }
   const runner = hits[1]!;
-  if (top.score >= 2 * runner.score && top.matched.length >= 2) {
+  if (top.score >= 2 * runner.score && top.matched.length >= 2 && (await pickInScope(top.file))) {
     return { file: top.file, description: `derived via code-search (dominant match on: ${top.matched.join(", ")})`, vessel, method: "grep_dominant", candidates: hits.length };
   }
   if (opts?.useLlm !== false) {
     const picked = await rankWithLlm(summary, hits);
-    if (picked) {
+    if (picked && (await pickInScope(picked))) {
       const h = hits.find((x) => x.file === picked)!;
       return { file: picked, description: `derived via code-search + LLM rank (matched: ${h.matched.join(", ")})`, vessel, method: "llm_ranked", candidates: hits.length };
     }
@@ -2855,7 +2875,7 @@ const familySample: string[] = await (async () => {
   let localized: LocalizeResult | null = null;
   if (editTargets.length === 0) {
     try {
-      localized = await localizeGap(gap, { useLlm: true });
+      localized = await localizeGap(gap, { useLlm: true, directed: (pointer as { directed?: boolean }).directed === true });
     } catch { localized = null; }
     if (localized) {
       editTargets = [{ file: localized.file, description: localized.description }];

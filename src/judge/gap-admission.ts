@@ -243,24 +243,48 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
 }
 
 /**
- * (a'): the first EXISTING repos/<vessel>/….(ts|tsx) file on an own-check baseline's call_path (entries as
- * own-check-baseline.ts stores them: {path: "repos/<vessel>/src/…", fn, line}), only for a red_code_reachable reading.
- * A green, environmental or unrunnable reading names no target. The caller passes the reading admission already
- * accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names now), and the
- * autonomy-scope match: an excluded file is skipped, and `scopeHit` names the first one when no in-scope file grounds.
+ * (a'): the EXISTING repos/<vessel>/….(ts|tsx) files on an own-check baseline's call_path, in call-path order (entries
+ * as own-check-baseline.ts stores them: {path: "repos/<vessel>/src/…", fn, line}, each read through editSitePath), only
+ * for a red_code_reachable reading. A green, environmental or unrunnable reading names no target. The caller passes a
+ * reading it accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names
+ * now) and, for autonomous work, the autonomy-scope match: an excluded file is skipped, and `scopeHit` names the first.
+ * ONE reader for every consumer of the call path as a target: admission's grounding and gap-to-feature's localizer.
  */
-export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: (path: string) => string | null): { file: string | null; scopeHit: string | null } {
+export function ownCheckCallPathFiles(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: ((path: string) => string | null) | null): { files: string[]; scopeHit: string | null } {
   let scopeHit: string | null = null;
-  if (!b || b.verdict !== "red_code_reachable" || !Array.isArray(b.call_path)) return { file: null, scopeHit };
+  const files: string[] = [];
+  if (!b || b.verdict !== "red_code_reachable" || !Array.isArray(b.call_path)) return { files, scopeHit };
   for (const e of b.call_path as Array<{ path?: unknown }>) {
-    const p = typeof e?.path === "string" ? e.path.trim() : "";
-    if (!/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) || !repoPathExists(p)) continue;
-    // An existing file the autonomy scope excludes is lane core: it grounds nothing autonomous (the first hit is kept).
+    const p = typeof e?.path === "string" ? editSitePath(e.path) : "";
+    if (!/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) || !repoPathExists(p) || files.includes(p)) continue;
+    // An existing file the autonomy scope excludes is lane core: it is no autonomous target (the first hit is kept).
     const hit = excludes ? excludes(p) : null;
     if (hit) { scopeHit ??= hit; continue; }
-    return { file: p, scopeHit };
+    files.push(p);
   }
-  return { file: null, scopeHit };
+  return { files, scopeHit };
+}
+/** The first file ownCheckCallPathFiles returns: what grounds a gap at admission. */
+export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: ((path: string) => string | null) | null): { file: string | null; scopeHit: string | null } {
+  const r = ownCheckCallPathFiles(b, excludes);
+  return { file: r.files[0] ?? null, scopeHit: r.scopeHit };
+}
+/** The vessel's origin/dev in its clone: the only sha an own-check baseline decides at. */
+export const vesselOriginDevSha = (vessel: string): string | null => sweepGitOut(join(vesselsCloneRoot(), vessel), ["rev-parse", "origin/dev"]);
+/**
+ * A gap's own-check call-path targets, read as admission reads them: its baseline only when measured at the vessel's
+ * current origin/dev for the check the row names (ownCheckBaselineFor), then ownCheckCallPathFiles under the autonomy
+ * scope (directed work: no scope). A row with no such reading reads nothing else (no scope read, no git).
+ */
+export async function ownCheckCallPathTargets(gap: Record<string, unknown>, opts?: { directed?: boolean; baseShaOf?: (vessel: string) => string | null }): Promise<string[]> {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  if (!meta.own_check_baseline) return [];
+  const vessel = ownCheckVesselOf(meta);
+  const ocb = vessel ? ownCheckBaselineFor<OwnCheckBaseline>(meta, (opts?.baseShaOf ?? vesselOriginDevSha)(vessel)) : null;
+  if (!ocb || ocb.verdict !== "red_code_reachable") return [];
+  let excludes: ((path: string) => string | null) | null = null;
+  if (opts?.directed !== true) { const scope = await autonomyScope(); excludes = (p) => autonomyScopeExcludes(scope, p); }
+  return ownCheckCallPathFiles(ocb, excludes).files;
 }
 
 /** (b): the gap carries a proposal report naming required_code_modifications[].file that EXISTS. */
@@ -490,7 +514,7 @@ export async function admitActionableGaps(
   const headCache = new Map<string, string | null>();
   const headOf = (vessel: string): string | null => {
     if (!vessel) return null;
-    if (!headCache.has(vessel)) headCache.set(vessel, (opts?.baseShaOf ?? ((v: string) => sweepGitOut(join(vesselsCloneRoot(), v), ["rev-parse", "origin/dev"])))(vessel));
+    if (!headCache.has(vessel)) headCache.set(vessel, (opts?.baseShaOf ?? vesselOriginDevSha)(vessel));
     return headCache.get(vessel) ?? null;
   };
   const vesselTypecheckClean = async (vessel: string): Promise<boolean | null> => {

@@ -53,7 +53,11 @@ beforeAll(() => {
   globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
-    if ((body?.pointer ?? body?.impulse?.pointer)?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
+    // A pool producer answers, so the open policy above is READ: the localizer holds a search pick to the autonomy scope
+    // and refuses it when the scope cannot be read.
+    const cap = (body?.pointer ?? body?.impulse?.pointer) as { type?: string; shape?: string } | undefined;
+    if (cap?.type === "vesselCapability" && cap.shape === "poolImpulse") return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
+    if (cap?.type === "vesselCapability") return Response.json({ content: { vessels: [] } });
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
   g2fPolicy.__resetPolicyReadsForTests();

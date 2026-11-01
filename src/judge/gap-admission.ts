@@ -364,11 +364,37 @@ function greenOnParentAncestor(row: Record<string, unknown>, lookup: (id: string
   return null;
 }
 
-/** Rows by landabilityScore, highest first; ties keep their input order (Array.prototype.sort is stable). A sorted
- *  copy, each score computed once. Admission walks its candidates in this order and the auto-pick keeps it. */
+/** A row an operator or a person filed, by the autonomy judge's own origin test (operatorActsOf's "operator-filed"
+ *  act, src/resolvers/operator-acts.ts): source operator:* or human_reported, or classification_metadata.filed_by
+ *  operator:*. Every other row is system-born. */
+export function operatorFiled(row: Record<string, unknown>): boolean {
+  const src = String(row.source ?? "");
+  const m = row.classification_metadata;
+  const filedBy = String((m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>).filed_by : undefined) ?? "");
+  return src.startsWith("operator:") || src === "human_reported" || filedBy.startsWith("operator:");
+}
+
+/** What "similar landability" means for the system-born-first order: rows whose landabilityScore falls in the same
+ *  band of this width (band = floor(score / LANDABILITY_SIMILAR_BAND)). One score step (a failed attempt 0.1, the
+ *  recommit 0.15, lessons 0.05) moves a row by less than a band; the concrete-site (0.3) and hard-category (0.4) terms
+ *  move it by more. The small epsilon keeps a band's lower edge in its band (0.6 / 0.2 is 2.9999999999999996). */
+export const LANDABILITY_SIMILAR_BAND = 0.2;
+const landabilityBand = (s: number): number => Math.floor(s / LANDABILITY_SIMILAR_BAND + 1e-9);
+
+/** Rows by landability band, highest first; inside a band system-born rows before operator-filed ones
+ *  (operatorFiled), then landabilityScore, highest first; ties keep their input order (Array.prototype.sort is
+ *  stable). A sorted copy, each score computed once. Admission walks its candidates in this order and the auto-pick
+ *  keeps it. Ordering only: an operator-filed row is still walked, and still picked when nothing else is. With one
+ *  origin throughout this is landabilityScore order exactly (the band is monotone in the score). */
 export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
-  const score = new Map<T, number>(rows.map((r) => [r, landabilityScore(r)] as [T, number]));
-  return [...rows].sort((a, b) => score.get(b)! - score.get(a)!);
+  const key = new Map<T, { band: number; op: number; s: number }>(rows.map((r) => {
+    const s = landabilityScore(r);
+    return [r, { band: landabilityBand(s), op: operatorFiled(r) ? 1 : 0, s }] as [T, { band: number; op: number; s: number }];
+  }));
+  return [...rows].sort((a, b) => {
+    const ka = key.get(a)!, kb = key.get(b)!;
+    return kb.band - ka.band || ka.op - kb.op || kb.s - ka.s;
+  });
 }
 
 export interface AdmissionResult {
@@ -454,7 +480,8 @@ export async function admitActionableGaps(
   // store order a 0.90 row lost its file's slots to 0.50 rows filed earlier, and a row under the pick's landability
   // floor could take a slot the floor then threw away. Rows are walked in orderByLandability's order (a sorted copy;
   // the caller's array is untouched). No predicate, threshold or cap changes: the order only decides WHICH rows win a
-  // budgeted resource (the edit-site slots, the child-monopoly count, the drain and typecheck budgets).
+  // budgeted resource (the edit-site slots, the child-monopoly count, the drain and typecheck budgets). Inside a
+  // landability band, system-born rows reach those budgets before operator-filed ones (orderByLandability).
   for (const g of orderByLandability(gaps)) {
     const id = String(g.id ?? "");
     const cat = String(g.category ?? "");

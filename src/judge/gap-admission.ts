@@ -25,9 +25,9 @@ import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { lineageIndex, lineageOrigin } from "../resolvers/operator-acts.js";
 import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, editSitePath, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
-import { verifyGapCondition, testSuiteWholeFileDefault, sweepGitOut, type GapCheckVerdict } from "./gap-check-judge.js";
+import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
 import type { OwnCheckBaseline } from "../resolvers/own-check-baseline.js";
-import { readCalibration, landabilityScore, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
+import { readCalibration, landabilityScore, vesselOriginDevSha, originDevShaOnce, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
@@ -271,8 +271,9 @@ export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown
   const r = ownCheckCallPathFiles(b, excludes);
   return { file: r.files[0] ?? null, scopeHit: r.scopeHit };
 }
-/** The vessel's origin/dev in its clone: the only sha an own-check baseline decides at. */
-export const vesselOriginDevSha = (vessel: string): string | null => sweepGitOut(join(vesselsCloneRoot(), vessel), ["rev-parse", "origin/dev"]);
+// The vessel's origin/dev reader is landabilityScore's too (a fresh red reading offsets its failed attempts), so it
+// lives beside it in gap-attempt-credit; re-exported here for this module's readers.
+export { vesselOriginDevSha };
 /**
  * A gap's own-check call-path targets, read as admission reads them: its baseline only when measured at the vessel's
  * current origin/dev for the check the row names (ownCheckBaselineFor), then ownCheckCallPathFiles under the autonomy
@@ -437,11 +438,11 @@ const landabilityBand = (s: number): number => Math.floor(s / LANDABILITY_SIMILA
  *  keeps it. Ordering only: an operator-filed row is still walked, and still picked when nothing else is. With one
  *  origin throughout this is landabilityScore order exactly (the band is monotone in the score). `byId` is the lineage
  *  index operatorFiled reads (the caller's store read, already in memory; indexed once per call, lineageIndex); with
- *  none, the rows themselves. */
-export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[], byId?: ReadonlyMap<string, Record<string, unknown>>): T[] {
+ *  none, the rows themselves. `headOf` is the pass's origin/dev per vessel (landabilityScore's fresh-reading input). */
+export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[], byId?: ReadonlyMap<string, Record<string, unknown>>, headOf?: (vessel: string) => string | null): T[] {
   const index = lineageIndex(byId ?? new Map<string, Record<string, unknown>>(rows.map((r) => [String(r.id ?? ""), r])));
   const key = new Map<T, { band: number; op: number; s: number }>(rows.map((r) => {
-    const s = landabilityScore(r);
+    const s = landabilityScore(r, headOf);
     return [r, { band: landabilityBand(s), op: operatorFiled(r, index) ? 1 : 0, s }] as [T, { band: number; op: number; s: number }];
   }));
   return [...rows].sort((a, b) => {
@@ -513,12 +514,8 @@ export async function admitActionableGaps(
   let tscRuns = 0;
   const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
   // The vessel's origin/dev in its clone, read once per vessel per pass: an own-check baseline decides only at this sha.
-  const headCache = new Map<string, string | null>();
-  const headOf = (vessel: string): string | null => {
-    if (!vessel) return null;
-    if (!headCache.has(vessel)) headCache.set(vessel, (opts?.baseShaOf ?? vesselOriginDevSha)(vessel));
-    return headCache.get(vessel) ?? null;
-  };
+  const headOnce = originDevShaOnce(opts?.baseShaOf ?? vesselOriginDevSha);
+  const headOf = (vessel: string): string | null => (vessel ? headOnce(vessel) : null);
   const vesselTypecheckClean = async (vessel: string): Promise<boolean | null> => {
     if (passCache.has(vessel)) return passCache.get(vessel) ?? null;
     const now = Date.now();
@@ -548,7 +545,7 @@ export async function admitActionableGaps(
   // the caller's array is untouched). No predicate, threshold or cap changes: the order only decides WHICH rows win a
   // budgeted resource (the edit-site slots, the child-monopoly count, the drain and typecheck budgets). Inside a
   // landability band, system-born rows reach those budgets before operator-filed ones (orderByLandability).
-  for (const g of orderByLandability(gaps, opts?.lineageIndex)) {
+  for (const g of orderByLandability(gaps, opts?.lineageIndex, headOf)) {
     const id = String(g.id ?? "");
     const cat = String(g.category ?? "");
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
@@ -1258,6 +1255,8 @@ export type PickHooks = {
   /** The ids LANDABILITY_FLOOR dropped this pick (empty when it dropped none), handed out before the rerank whether or
    *  not anything is then picked. Observation only: nothing it does changes the ranking or the pick. */
   onFloored?: (ids: string[]) => void;
+  /** The pick's origin/dev per vessel, for the floor's landabilityScore (a fresh red reading offsets failed attempts). */
+  headOf?: (vessel: string) => string | null;
   ask: Ask;
 };
 export function pickCandidate(gaps: Record<string, unknown>[], hooks: PickHooks): Record<string, unknown> | null {
@@ -1321,7 +1320,7 @@ export function pickCandidate(gaps: Record<string, unknown>[], hooks: PickHooks)
   // class theta BEFORE score, so a fresh class's uninformed posterior lifted a score-0 candidate
   // over a 0.9 one. Candidates below the floor are dropped before any posterior is consulted.
   const LANDABILITY_FLOOR = 0.15;
-  const aboveFloor = ranked.filter((r) => landabilityScore(r.g) >= LANDABILITY_FLOOR);
+  const aboveFloor = ranked.filter((r) => landabilityScore(r.g, hooks.headOf) >= LANDABILITY_FLOOR);
   if (hooks.onFloored) {
     const kept = new Set(aboveFloor);
     try { hooks.onFloored(ranked.filter((r) => !kept.has(r)).map((r) => String(r.g.id ?? ""))); } catch { /* observation, never control flow */ }

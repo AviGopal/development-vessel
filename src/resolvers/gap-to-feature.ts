@@ -34,7 +34,7 @@ import { resolvePoolImpulse, resolvePoolImpulseWrite } from "./pool-impulse.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, editSiteIsOwnCheck, isNonAttemptComposeResult, ownCheckUnarmMeta } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
-import { learningTableSource, landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
+import { learningTableSource, landabilityScore, originDevShaOnce, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
 import { composeExitReach } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, ownCheckCallPathTargets, admitActionableGaps, orderByLandability, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
@@ -1245,7 +1245,7 @@ export function __setPriorityRngForTests(rng: (() => number) | null): void { pri
 export function choosePriorityVariant(prio: Record<string, { alpha: number; beta: number }>, rng: () => number): "baseline" | "terms" {
   return sampleClassTheta("variant:terms", prio, rng) > sampleClassTheta("variant:baseline", prio, rng) ? "terms" : "baseline";
 }
-function pickMostLandable(gaps: Record<string, unknown>[], onFloored?: (ids: string[]) => void): Record<string, unknown> | null {
+function pickMostLandable(gaps: Record<string, unknown>[], onFloored?: (ids: string[]) => void, headOf: (vessel: string) => string | null = originDevShaOnce()): Record<string, unknown> | null {
   // The judging steps (hopeless exclusion, floor, pick-skip) are the closed pickCandidate (gap-admission); this
   // residue supplies the ranker (score, class rerank) and records the pick.
   // IMPACT-RANKED SELECTION (2026-07-09): landability alone drains the easiest gaps
@@ -1346,7 +1346,8 @@ function pickMostLandable(gaps: Record<string, unknown>[], onFloored?: (ids: str
   return pickCandidate(gaps, {
     lineageIndex: pickLineageIndex,
     onFloored,
-    score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g) * impactOf(g) * humanWeight(g),
+    headOf,
+    score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g, headOf) * impactOf(g) * humanWeight(g),
     rerank: (ranked) => {
       if (variant === "terms") return; // the terms variant already weighs viability (the class posterior) as a term
       // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
@@ -1377,7 +1378,7 @@ function pickMostLandable(gaps: Record<string, unknown>[], onFloored?: (ids: str
         category: String(chosen.g.category ?? ""),
         target: targetOf(chosen.g),
         score: Number(chosen.s.toFixed(4)),
-        landability: Number(landabilityScore(chosen.g).toFixed(4)),
+        landability: Number(landabilityScore(chosen.g, headOf).toFixed(4)),
         human_reported: String(chosen.g.source ?? "") === "human_reported",
         impact: Number(impactOf(chosen.g).toFixed(4)),
         pool: selectionPool.length,
@@ -1475,14 +1476,14 @@ export const ADMISSION_PASS_MAX_ENTRIES = 1000;
 const PARKED_EXCLUSION = /^(needs_information|disposition)\b/;
 let admissionPassLast: { id: string; digest: string } | null = null;
 export function __resetAdmissionPassForTests(): void { admissionPassLast = null; }
-export function admissionPassBody(p: { node: string; candidates: number; admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; floored: string[]; groundedBy?: Record<string, string> }): Record<string, unknown> {
+export function admissionPassBody(p: { node: string; candidates: number; admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; floored: string[]; groundedBy?: Record<string, string>; headOf?: (vessel: string) => string | null }): Record<string, unknown> {
   let room = ADMISSION_PASS_MAX_ENTRIES;
   let truncated = 0;
   const take = <T>(xs: T[]): T[] => { const kept = xs.slice(0, Math.max(0, room)); room -= kept.length; truncated += xs.length - kept.length; return kept; };
   const byReason: Record<string, number> = {};
   for (const e of p.excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
   // grounded_by: what grounded the admitted row (admitActionableGaps groundedBy), only when admission named one.
-  const admitted = take(p.admitted.map((g) => ({ id: String(g.id ?? ""), landability: Number(landabilityScore(g).toFixed(4)), ...(p.groundedBy?.[String(g.id ?? "")] ? { grounded_by: p.groundedBy[String(g.id ?? "")] } : {}) })));
+  const admitted = take(p.admitted.map((g) => ({ id: String(g.id ?? ""), landability: Number(landabilityScore(g, p.headOf).toFixed(4)), ...(p.groundedBy?.[String(g.id ?? "")] ? { grounded_by: p.groundedBy[String(g.id ?? "")] } : {}) })));
   const floored = take([...p.floored].sort());
   const notParked = p.excluded.filter((e) => !PARKED_EXCLUSION.test(e.reason)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const excluded = Object.fromEntries(take(notParked).map((e) => [e.id, e.reason]));
@@ -2369,14 +2370,16 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
       pickLineageIndex = gapsById;
       // Admission returns its rows in orderByLandability's order; the pick keeps it (it only breaks score ties there).
-      const pool = pickPoolForCapacity(orderByLandability(admitted, gapsById), armedOnlyPick);
+      // One read of each vessel's origin/dev for the order, the pick and its record (a fresh red reading's lift).
+      const headOf = originDevShaOnce();
+      const pool = pickPoolForCapacity(orderByLandability(admitted, gapsById, headOf), armedOnlyPick);
       if (pool.skipped) {
         console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
         return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };
       }
       let floored: string[] = [];
-      gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows, (ids) => { floored = ids; })) : null;
-      recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored, groundedBy });
+      gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows, (ids) => { floored = ids; }, headOf)) : null;
+      recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored, groundedBy, headOf });
     }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

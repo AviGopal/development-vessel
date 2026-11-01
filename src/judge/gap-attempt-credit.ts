@@ -19,7 +19,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, inheritableParentCheck } from "../resolvers/substrate-gap.js";
-import { inheritedOperatorHold, isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
+import { inheritedOperatorHold, isNonAttemptComposeResult, isTerminalRefusalResult, ownCheckBaselineFor, ownCheckVesselOf, type OwnCheckBaselineKey } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { creditLearning, isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
@@ -59,7 +59,28 @@ const SURGICAL_CATEGORIES = new Set([
 // into the candidate window (belt-and-suspenders to the read-side exclusion) the
 // picker can never select it over a real gap.
 const NONACTIONABLE_LOG_CATEGORIES = new Set<string>(DECISION_LOG_GAP_CATEGORIES);
-export function landabilityScore(gap: Record<string, unknown>): number {
+/** The vessel's origin/dev in its clone: the only sha an own-check baseline decides at. */
+export const vesselOriginDevSha = (vessel: string): string | null => sweepGitOut(join(vesselsCloneRoot(), vessel), ["rev-parse", "origin/dev"]);
+/** vesselOriginDevSha read once per vessel: one pass's view of every vessel's origin/dev (a pass scores thousands of
+ *  rows, and git runs only for a row that carries a red reading). */
+export function originDevShaOnce(baseShaOf: (vessel: string) => string | null = vesselOriginDevSha): (vessel: string) => string | null {
+  const heads = new Map<string, string | null>();
+  return (vessel) => {
+    if (!heads.has(vessel)) heads.set(vessel, baseShaOf(vessel));
+    return heads.get(vessel) ?? null;
+  };
+}
+/** A FRESH red own-check reading: red_code_reachable, read as admission reads it (ownCheckBaselineFor: measured at the
+ *  check's vessel's current origin/dev, for the check the row names now). With no `headOf`, nothing is fresh. */
+function freshRedOwnCheck(meta: Record<string, unknown>, headOf?: (vessel: string) => string | null): boolean {
+  const b = meta.own_check_baseline as { verdict?: unknown } | undefined;
+  if (!headOf || !b || typeof b !== "object" || b.verdict !== "red_code_reachable") return false;
+  const vessel = ownCheckVesselOf(meta);
+  return !!vessel && ownCheckBaselineFor<OwnCheckBaselineKey & { verdict?: unknown }>(meta, headOf(vessel))?.verdict === "red_code_reachable";
+}
+/** `headOf` is the vessel's current origin/dev (vesselOriginDevSha; a pass hands in originDevShaOnce): it decides
+ *  whether an own-check reading is fresh. With none, no reading is fresh and the score is as before. */
+export function landabilityScore(gap: Record<string, unknown>, headOf?: (vessel: string) => string | null): number {
   const cat0 = String(gap.category ?? "");
   if (NONACTIONABLE_LOG_CATEGORIES.has(cat0)) return 0;
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
@@ -97,7 +118,12 @@ export function landabilityScore(gap: Record<string, unknown>): number {
   // Per-gap failure lessons capture the exact mistake so the next LLM draft
   // avoids it — a gap with lessons is MORE landable on re-pick, not less.
   const hasLessons = Boolean((meta as Record<string, unknown>).per_gap_failure_lessons);
-  const penalty = Math.min(fa * (hasConcreteSite ? 0.1 : 0.2), 0.4) - (hasLessons ? 0.05 : 0);
+  // A FRESH RED CHECK OFFSETS THE FAILED ATTEMPTS (user ruling: a new red check lifts the score). The attempts were
+  // drafts with no check to certify them; a red_code_reachable reading at the vessel's current origin/dev is that check,
+  // so it now says where the defect is and whether a draft fixed it. Only the attempts term goes: a stale, green,
+  // environmental or unrunnable reading (or none) leaves it, and every other term is unchanged.
+  const attemptsPenalty = freshRedOwnCheck(meta, headOf) ? 0 : Math.min(fa * (hasConcreteSite ? 0.1 : 0.2), 0.4);
+  const penalty = attemptsPenalty - (hasLessons ? 0.05 : 0);
   s -= penalty;
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1
@@ -364,8 +390,9 @@ export async function persistGapMetaPatch(gap: Record<string, unknown>, patch: R
   } as never);
 }
 
-export function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number; baseline: number } {
-  const p = landabilityScore(gap);
+/** One gap per call, so the score reads the vessel's origin/dev itself (git only for a row with a red reading). */
+export function predictLand(gap: Record<string, unknown>, headOf: (vessel: string) => string | null = vesselOriginDevSha): { predicted: boolean; p: number; baseline: number } {
+  const p = landabilityScore(gap, headOf);
   // Counterfactual baseline = empirical land-rate for this gap's category (>=5 samples),
   // else the 0.5 no-signal prior. Predict land only if the gap's signal beats its class.
   const c = readCalibration();

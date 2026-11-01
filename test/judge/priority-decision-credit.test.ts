@@ -89,10 +89,11 @@ describe("the priority decision is stamped and credited when its outcome joins",
     expect(src).toContain('const prio = (heldLearningTable("priority_weights") ?? {})');
     expect(src).toContain("const variant = choosePriorityVariant(prio, priorityRng);");
     expect(src).toContain('return sampleClassTheta("variant:terms", prio, rng) > sampleClassTheta("variant:baseline", prio, rng) ? "terms" : "baseline";');
-    expect(src).toContain('score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g) * impactOf(g) * humanWeight(g),');
+    expect(src).toContain('score: (g) => variant === "terms" ? (termsScore.get(g) ?? 0) : landabilityScore(g, headOf) * impactOf(g) * humanWeight(g),');
     expect(src).toContain("setPendingPriorityDecision(String(chosen.g.id");
-    // the baseline variant's score is byte-identical to today's
-    expect(src).toContain("landabilityScore(g) * impactOf(g) * humanWeight(g)");
+    // the baseline variant's score is today's, with the pass's origin/dev handed to landabilityScore (user ruling: a
+    // fresh red own-check reading offsets the failed-attempts term; no other term changes)
+    expect(src).toContain("landabilityScore(g, headOf) * impactOf(g) * humanWeight(g)");
   });
 });
 

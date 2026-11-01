@@ -176,7 +176,8 @@ describe("[item 3] LINK 5: filing to close + 24 h, and what counts in it", () =>
     expect((await judged("g-dl")).failing_link).toBe("operator_act:operator-field");
   });
   it("[item 3] an operator write on an ANCESTOR row counts", async () => {
-    reset(); STORE.push({ id: "g-par", status: "open", classification_metadata: {} }); counting("recommit-g-par");
+    // The ancestor is system-born (link 1 passes on it), so the act is what fails the closure.
+    reset(); STORE.push({ id: "g-par", status: "open", source: "substrate_detected", classification_metadata: {} }); counting("recommit-g-par");
     EVENTS["g-par"] = [opWrite("g-par", h(60))];
     expect((await judged("recommit-g-par")).failing_link).toBe("operator_act:ancestor-gap-write");
   });

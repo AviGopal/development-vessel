@@ -249,7 +249,8 @@ describe("repair_autonomy: per closure, expected from the landing ledger", () =>
   it("addendum 2a: a hold on a lineage ancestor whose id the child PREPENDS recommit- to is an operator act", async () => {
     reset();
     STORE = [
-      { id: "g-parent", status: "open", classification_metadata: { operator_hold: false, operator_hold_released_by: "operator:x", operator_hold_released_at: h(70) } },
+      // A system-born ancestor (link 1 passes on it), so the hold release is what fails the closure.
+      { id: "g-parent", status: "open", source: "substrate_detected", classification_metadata: { operator_hold: false, operator_hold_released_by: "operator:x", operator_hold_released_at: h(70) } },
       gap("recommit-g-parent", {}, { landed_sha: sha("a") }),
     ];
     land("recommit-g-parent", sha("a"), h(50), "att-p");

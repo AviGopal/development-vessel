@@ -44,7 +44,7 @@ import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveGapWriteEvent, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { appendRecord, ledgerDir, readRecords } from "./attempt-ledger.js";
-import { intentIsAutonomous, isoMs, lineageAncestors, operatorActsOf, provenanceTraceIds, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit, type DispatchStoreEntry, type ResolverDispatchLike, type ResolverRequestLike, type ResolverAnswerLike } from "./operator-acts.js";
+import { intentIsAutonomous, isoMs, lineageAncestors, lineageOrigin, operatorActsOf, provenanceTraceIds, type GapRow, type GapWriteEventLike, type KeyMapEntry, type LabelClassContext, type OperatorActsContext, type OperatorActsResult, type OracleLabelLike, type ScopeAct, type SiteCommit, type DispatchStoreEntry, type ResolverDispatchLike, type ResolverRequestLike, type ResolverAnswerLike } from "./operator-acts.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
@@ -654,24 +654,22 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   if (closed && closedMs === null) unknown.push("the close time (closed with no closed_at)");
   const armWriter = acts.arm_writes.length > 0 ? acts.arm_writes.map((a) => `${a.writer} @ ${a.at ?? "?"}`).join("; ") : (inp.acts.events === null ? "unread (gap-write events unreadable)" : "no arm write in the events read");
   // link 1: origin. FOLLOWED TO THE ROOT (USER RULING 2026-10-22, "Follow lineage to the root"): a recommit or narrowed
-  // child is written by the lane as substrate_detected, so an operator-filed or human_reported lineage ancestor (the
-  // explicit links, transitively, and the id rule) is the closure's origin, and link 1 fails on it.
+  // child is written by the lane as substrate_detected, so a lineage ancestor that is not system-born (the explicit
+  // links, transitively, and the id rule) is the closure's origin, and link 1 fails on it. One predicate, shared with
+  // admission and the own-check baseline order (operator-acts.ts lineageOrigin): an operator-filed or human_reported
+  // row fails as before, and so does a row whose source is missing, a bare "operator" or free text. The row's OWN filer
+  // is read by the same rule as an ancestor's (qa eval5 B2), and its own source must still be substrate_detected
+  // (addendum 1). An unseen ancestor is not decided here: it is link 5's unread (operatorActsOf), so the verdict is
+  // unjudged.
   const src = String(row["source"] ?? "");
-  const filerOf = (r: GapRow | undefined): string | null => {
-    const s0 = String(r?.["source"] ?? "");
-    const fb = String(metaRec(r ?? null)["filed_by"] ?? "");
-    return s0.startsWith("operator:") || s0 === "human_reported" ? `source ${s0}` : fb.startsWith("operator:") ? `filed_by ${fb}` : null;
-  };
-  // The row's OWN filer is read by the same rule as an ancestor's (qa eval5 B2): `source` alone missed a row the lane
-  // wrote as substrate_detected whose filed_by names an operator.
-  const ownFiler = filerOf(row);
-  const rootFiler = [...lineageAncestors(landing.gap_id, inp.byId)].sort().map((k) => ({ k, by: filerOf(inp.byId.get(k)) })).find((a) => a.by !== null);
+  const origin = lineageOrigin(landing.gap_id, row, inp.byId).fault;
+  const at = (f: { id: string; text: string }): string => f.id === landing.gap_id ? f.text : `lineage ancestor ${f.id.slice(-60)} is ${f.text}`;
   // The row's own operator filing fails link 1 in the same form (qa ruling 2026-10-22); its filing is still also the
   // operator act link 5 names.
-  const l1: LinkState = ownFiler ? { state: "fail", why: `origin: operator-filed (${ownFiler})` }
-    : rootFiler ? { state: "fail", why: `origin: operator-filed (lineage ancestor ${rootFiler.k.slice(-60)} is ${rootFiler.by})` }
-    : src === "substrate_detected" ? { state: "pass", why: "source substrate_detected, and no operator-filed lineage ancestor" }
-    : { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` };
+  const l1: LinkState = origin?.operator ? { state: "fail", why: `origin: operator-filed (${at(origin)})` }
+    : src !== "substrate_detected" ? { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` }
+    : origin ? { state: "fail", why: `origin: not system-born (${at(origin)})` }
+    : { state: "pass", why: "source substrate_detected, and every lineage ancestor system-born" };
   // link 2
   const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource, inp.checkSupplyFileAbsent === true);
   // link 3: the attempt is autonomous, and the fix is the lane's commit on the edit site, on origin/dev

@@ -218,7 +218,8 @@ describe("[D] ancestors and the filing time", () => {
     expect((await judged("recommit-g-hcp")).failing_links).toContain("operator_act:hand-close");
   });
   it("[D] an operator-only field on an ANCESTOR counts", async () => {
-    reset(); STORE.push({ id: "g-dlp", status: "open", classification_metadata: { latest_by: "2026-10-22T20:00:00Z" } }); counting("recommit-g-dlp");
+    // A system-born ancestor (link 1 passes on it), so the field is what fails the closure.
+    reset(); STORE.push({ id: "g-dlp", status: "open", source: "substrate_detected", classification_metadata: { latest_by: "2026-10-22T20:00:00Z" } }); counting("recommit-g-dlp");
     expect((await judged("recommit-g-dlp")).failing_link).toBe("operator_act:operator-field");
   });
   it("[D] a row filed only by detected_at reads its commits from that filing, not from the window", async () => {

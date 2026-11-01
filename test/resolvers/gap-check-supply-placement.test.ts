@@ -41,8 +41,13 @@ const ROOT = join(tmpdir(), `gcs-placement-${Date.now()}-${Math.random().toStrin
 const CLONES = join(ROOT, "clones");
 const RUNTIME = join(ROOT, "runtime");
 const SLOTS = join(ROOT, "compose-slots");
-const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "METABOB_API_KEY"] as const;
+const ENV_KEYS = ["WORKSPACE_ROOT", "VESSELS_CLONE_ROOT", "MITOSIS_RUNTIME_DIR", "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER", "GAP_STORE_ENDPOINT", "COMPOSE_SLOT_DIR", "METABOB_API_KEY", "SUPER_REPO_DIR"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+// THE SHAPED POLICIES DIRECTORY (signal-window.ts shapedPolicyPath): <SUPER_REPO_DIR>/policies when that names a git
+// checkout, else the LIVE super clone's. The tick reads ownCheckEnvironmentPolicy there (dispatchOwnCheckBaselines), so a
+// live policy with a non-zero own_check_baseline_per_tick would dispatch baselines from this file: it uses its own.
+process.env["SUPER_REPO_DIR"] = join(ROOT, "policy-super");
+mkdirSync(join(ROOT, "policy-super", ".git"), { recursive: true });
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 isolateLearnedStateInProcess(ROOT);
 process.env["VESSELS_CLONE_ROOT"] = CLONES;
@@ -579,5 +584,15 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
     expect((placed as { why?: string }).why).toBe("owning_node_never_settled");
     // a dispatch another sender made keeps the foreign bound, as today
     expect(supply.dispatchVerdict(base as never, null, Date.now(), bounds, LOCAL).kind).toBe("wait");
+  });
+});
+
+describe("shaped policies are read from this file's own temp checkout", () => {
+  it("ownCheckEnvironmentPolicy resolves under ROOT/policy-super, never the live super clone", async () => {
+    const { readOwnCheckEnvPolicy } = await import("../../src/resolvers/own-check-baseline.js");
+    const pol = await readOwnCheckEnvPolicy();
+    const { realpathSync } = await import("node:fs");
+    expect(pol.path).toBe(join(realpathSync(join(ROOT, "policy-super")), "policies", "ownCheckEnvironmentPolicy.json"));
+    expect(pol.ok && pol.source).toBe("default");
   });
 });

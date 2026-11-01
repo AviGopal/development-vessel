@@ -235,6 +235,11 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
     if (typeof v !== "string" || !v.trim()) continue;
     let cand = v.trim().replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
     if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
+    // A note after the first repos/<vessel>/….(ts|tsx) token is not part of the path: a trailing parenthetical or prose
+    // ("repos/llm-resolver-vessel/src/index.ts (policy handler outcome recording)") failed the extension test below, so
+    // a row naming a real file read as naming none. The token keeps its :symbol / :line suffix for the strip after it.
+    const lead = cand.match(/^repos\/[^/\s]+\/[^\s(]+?\.tsx?(?::[A-Za-z0-9_$]+|:\d+(?::\d+)?)?(?=[\s(:]|$)/);
+    if (lead) cand = lead[0];
     cand = cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
     if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand)) return cand;
   }

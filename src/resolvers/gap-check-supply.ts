@@ -1702,6 +1702,67 @@ async function localizeForSupply(row: Row, vessel: string, site: string | null):
 let passInFlight = false;
 let lastBookkeepingAt: number | null = null;
 
+/**
+ * One own-check-baseline goal per row whose test_suite own check has no baseline (and no baseline goal) at its vessel's
+ * current origin/dev, in landability order, at most the shaped per-tick bound. Each goal is its own goal-host execution
+ * (selectable and traced); its dispatch is appended to the row's own_check_baseline_dispatches (the last 5), so the
+ * same (gap, sha) is never sent twice, and each earlier dispatch's execution id is read back from goal-host's record
+ * (own-check-baseline-credit.ts dispatchExecutionId) and kept there: the baseline's content grade joins on it. An
+ * unreadable policy measures nothing. A failed send stops the loop (the next due pass retries) and records nothing.
+ */
+export async function dispatchOwnCheckBaselines(
+  open: Row[],
+  deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined> },
+): Promise<Array<{ id: string; base_sha: string; dispatch_id: string }>> {
+  const { readOwnCheckEnvPolicy } = await import("./own-check-baseline.js");
+  const { ownCheckVesselOf } = await import("../judge/gap-eligibility.js");
+  const { dispatchExecutionId } = await import("./own-check-baseline-credit.js");
+  const pol = await readOwnCheckEnvPolicy(deps.env);
+  if (!pol.ok) { console.warn(`[gap-check-supply] ${pol.why}: no own-check baseline is measured this pass`); return []; }
+  const max = pol.policy.own_check_baseline_per_tick;
+  const sent: Array<{ id: string; base_sha: string; dispatch_id: string }> = [];
+  if (max <= 0) return sent;
+  const { orderByLandability } = await import("../judge/gap-admission.js");
+  const heads = new Map<string, string | null>();
+  const headOf = deps.headOf ?? ((v: string): string | null => sweepGitOut(join(clonesRoot(), v), ["rev-parse", "origin/dev"]));
+  let probes = 2 * max + 2;
+  type Disp = { base_sha: string; dispatch_id: string; execution_id?: string; at?: string; node?: string };
+  for (const row of orderByLandability(open)) {
+    if (sent.length >= max) break;
+    const id = String(row["id"] ?? "");
+    const meta = metaOf(row);
+    const vessel = ownCheckVesselOf(meta);
+    if (!id || !vessel || !/^[A-Za-z0-9_.-]+$/.test(vessel)) continue;
+    let list = (Array.isArray(meta["own_check_baseline_dispatches"]) ? meta["own_check_baseline_dispatches"] : []) as Disp[];
+    // Each earlier dispatch's execution id, once goal-host's record carries it (bounded reads per pass).
+    let filled = false;
+    list = await Promise.all(list.map(async (d) => {
+      if (!d || typeof d.dispatch_id !== "string" || d.execution_id || probes <= 0) return d;
+      probes -= 1;
+      const e = await (deps.executionIdOf ?? dispatchExecutionId)(d.dispatch_id);
+      if (!e) return d;
+      filled = true;
+      return { ...d, execution_id: e };
+    }));
+    if (!heads.has(vessel)) heads.set(vessel, headOf(vessel));
+    const head = heads.get(vessel) ?? null;
+    const measured = !head || !/^[0-9a-f]{40}$/.test(head) || list.some((d) => d?.base_sha === head) || (meta["own_check_baseline"] as { base_sha?: unknown } | undefined)?.base_sha === head;
+    if (measured) { if (filled) await deps.write(row, { own_check_baseline_dispatches: list }); continue; }
+    const testFile = String(((meta["evidence_resolve"] as { input?: Row } | undefined)?.input ?? {})["test_file"] ?? "");
+    const goal = `measure gap ${id}'s own check ${vessel}/${testFile} at base ${head!.slice(0, 12)} (ownCheckBaseline)`;
+    const r = await (deps.send ?? resolveDispatchGoal)({ type: "dispatch_goal", goal, target_template_id: "development-vessel:own-check-baseline", expected_output_shapes: ["ownCheckBaseline"], variables: { gap_id: id, base_ref: head! }, timeout_ms: 15_000 });
+    const dispatchId = r.shape === "goalDispatchResult" ? ((r.body ?? {}) as { dispatch_id?: unknown }).dispatch_id : null;
+    if (typeof dispatchId !== "string" || !nonEmpty(dispatchId)) {
+      if (filled) await deps.write(row, { own_check_baseline_dispatches: list });
+      console.warn(`[gap-check-supply] ${id}: own-check baseline goal not sent (${JSON.stringify(r.body ?? null).slice(0, 160)}); the next due pass retries`);
+      break;
+    }
+    await deps.write(row, { own_check_baseline_dispatches: [...list, { base_sha: head!, dispatch_id: dispatchId, at: deps.nowIso, node: deps.node }].slice(-5) });
+    sent.push({ id, base_sha: head!, dispatch_id: dispatchId });
+  }
+  return sent;
+}
+
 export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPointer): Promise<ResolverResult> {
   if (passInFlight) return { shape: "gapCheckSupplyReport", body: { fired: false, reason: "in_progress", family: CHECK_SUPPLY_FAMILY } };
   passInFlight = true;
@@ -2162,6 +2223,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       await writeMeta(row, { check_supply: { ...ledger, mutation_gate } });
     }
   }
+
+  // 2o. THE OWN-CHECK BASELINE (own-check-baseline.ts): on a due pass, at most `own_check_baseline_per_tick` (the shaped
+  // ownCheckEnvironmentPolicy) open rows with a test_suite own check not yet measured at their vessel's current
+  // origin/dev get one development-vessel:own-check-baseline goal each, the rows admission would pick next first.
+  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m) }) : [];
+  if (baselinesSent.length > 0) console.log(`[gap-check-supply] own-check baselines dispatched: ${baselinesSent.map((b) => `${b.id}@${b.base_sha.slice(0, 12)}=${b.dispatch_id}`).join(", ")}`);
 
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
   let outcomeReads = 0;

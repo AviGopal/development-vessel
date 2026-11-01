@@ -241,6 +241,8 @@ export const config = {
       // shape so change fitness is observable to the learning loop instead of living in an
       // external CI webhook or a host-side log.
       "test_suite",
+      // own_check_baseline_classify: one gap's own check run at its vessel's origin/dev and classified (own-check-baseline.ts).
+      "own_check_baseline_classify",
       "boredom_enqueue",
       "rhythm_conductor_tick",
       "change_series_tick",

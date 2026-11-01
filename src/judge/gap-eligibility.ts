@@ -416,3 +416,26 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
   if (cb.non_attempt === true) return true;
   return false;
 }
+
+// ── the own-check baseline, read back (resolvers/own-check-baseline.ts writes it) ────────────────────────────────────────────────────────────────────────────────────────────────
+/** The check's vessel (bare) from a gap row's evidence_resolve, or "" when it has no test_suite check. */
+export function ownCheckVesselOf(meta: Record<string, unknown>): string {
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | undefined;
+  if (!er || er.shape !== "test_suite" || typeof er.input?.test_file !== "string" || !er.input.test_file) return "";
+  return typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+}
+
+/**
+ * The baseline on a gap row, only when it was measured at `currentSha` (the vessel's origin/dev now) and for the check
+ * the row names now (same file and titles). A baseline on another sha is stale: it decides nothing.
+ */
+/** The fields a reader keys a reading on (the whole record is resolvers/own-check-baseline.ts OwnCheckBaseline). */
+export type OwnCheckBaselineKey = { base_sha: string; test_file: string; only_tests?: string[] };
+export function ownCheckBaselineFor<T extends OwnCheckBaselineKey>(meta: Record<string, unknown>, currentSha: string | null): T | null {
+  const b = meta["own_check_baseline"] as T | undefined;
+  if (!b || typeof b !== "object" || !currentSha || typeof b.base_sha !== "string" || b.base_sha !== currentSha) return null;
+  const er = meta["evidence_resolve"] as { input?: { test_file?: unknown; only_tests?: unknown } } | undefined;
+  const only = Array.isArray(er?.input?.only_tests) ? (er!.input!.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  if (er?.input?.test_file !== b.test_file || JSON.stringify(only) !== JSON.stringify(b.only_tests ?? [])) return null;
+  return b;
+}

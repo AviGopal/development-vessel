@@ -3896,25 +3896,37 @@ let gapOutcomeSink: ((trace: Record<string, unknown>) => Promise<void> | void) |
 /** Tests only: capture the consumer trace instead of posting it (a scratch store posts nothing otherwise). */
 export function __setGapOutcomeSinkForTests(fn: ((trace: Record<string, unknown>) => Promise<void> | void) | null): void { gapOutcomeSink = fn; }
 
+/**
+ * POST one CONSUMER TRACE (the chain-credit shape gapOutcomeTrace builds: one deterministic task, the producer as the
+ * only composition_chain ancestor) through activity-api's trace insert. Shared by the gap-outcome credit and the
+ * own-check-baseline credit (own-check-baseline-credit.ts). The HTTP status, or null when nothing was posted (a scratch
+ * store, no key). Throws on a transport failure: each caller logs its own line.
+ */
+export async function postConsumerTrace(trace: Record<string, unknown>, label: string): Promise<number | null> {
+  if (isScratchGapStoreRoot(workspaceRoot())) return null;
+  const key = process.env["SUBSTRATE_API_KEY"] || process.env["METABOB_API_KEY"] || process.env["API_KEY"] || "";
+  if (!key) { console.warn(`[${label}] no key; consumer trace not posted`); return null; }
+  const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
+  const r = await fetch(`${activityApiUrl}/v2/activities/execution-traces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+    body: JSON.stringify(trace),
+    signal: AbortSignal.timeout(5_000),
+  });
+  try { await r.body?.cancel(); } catch { /* swallow */ }
+  return r.status;
+}
+
 /** Post a settled gap's outcome to activity-api as a consumer of its producer. Best effort: never throws, never blocks. */
 async function creditGapOutcome(gap: SubstrateGap): Promise<void> {
   try {
     const trace = gapOutcomeTrace(gap, new Date().toISOString());
     if (!trace) return;
     if (gapOutcomeSink) { await gapOutcomeSink(trace); return; }
-    if (isScratchGapStoreRoot(workspaceRoot())) return;
-    const key = process.env["SUBSTRATE_API_KEY"] || process.env["METABOB_API_KEY"] || process.env["API_KEY"] || "";
-    if (!key) { console.warn(`[gap-outcome-credit] ${gap.id}: no key; outcome not posted`); return; }
-    const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
-    const r = await fetch(`${activityApiUrl}/v2/activities/execution-traces`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
-      body: JSON.stringify(trace),
-      signal: AbortSignal.timeout(5_000),
-    });
-    try { await r.body?.cancel(); } catch { /* swallow */ }
+    const status = await postConsumerTrace(trace, `gap-outcome-credit] [${gap.id}`);
+    if (status === null) return;
     const md = trace["metadata"] as Record<string, unknown>;
-    console.log(`[gap-outcome-credit] ${gap.id}: ${String(md["gap_outcome"])} -> producer ${String(md["producer_execution_id"])} (${String(md["producer_template_id"])}) http=${r.status}`);
+    console.log(`[gap-outcome-credit] ${gap.id}: ${String(md["gap_outcome"])} -> producer ${String(md["producer_execution_id"])} (${String(md["producer_template_id"])}) http=${status}`);
   } catch (err) {
     console.warn(`[gap-outcome-credit] ${gap.id}: outcome not posted (non-fatal): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
   }

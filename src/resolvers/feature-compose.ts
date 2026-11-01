@@ -54,10 +54,13 @@ import { seedDeliveryLesson, seedDeliveryReason, seedDeliveryRefusals, touchesSe
 import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
-import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold } from "../judge/gap-eligibility.js";
+import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold, ownCheckBaselineFor, ownCheckVesselOf } from "../judge/gap-eligibility.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
-import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
-import { addCallPathEntry, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
+import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, ownCheckStillRed, testExpectCount, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
+import { addCallPathEntry, callPathLine, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
+import type { OwnCheckBaseline } from "./own-check-baseline.js";
+import { codeReachableAgreement, creditOwnCheckBaseline } from "./own-check-baseline-credit.js";
+import { checkRunVerdict, classifyCheckRun } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
 /**
@@ -4600,20 +4603,9 @@ export function gapOwnTestSuite(meta: Record<string, unknown>, v: string): { tes
   return { test_file: file, only_tests: only };
 }
 
-/**
- * Which of the gap's requested tests are still not green in `raw` (a run of the gap's test file alone).
- * A requested test that neither passed nor failed (renamed or deleted) counts as not green. Returns null
- * when the run printed no result at all, so the caller fails closed instead of reading silence as a pass.
- */
-export function ownCheckStillRed(raw: string, only: string[]): string[] | null {
-  const fails = [...testFailureSet(raw)];
-  const passLines = raw.split("\n").filter((l) => /^\s*\(pass\)/.test(l));
-  if (fails.length === 0 && passLines.length === 0) return null;
-  if (only.length === 0) return fails;
-  const red = only.filter((n) => fails.some((f) => f.includes(n)));
-  const notRun = only.filter((n) => !red.includes(n) && !passLines.some((l) => l.includes(n)));
-  return [...red, ...notRun.map((n) => `${n} (not run)`)];
-}
+// ownCheckStillRed lives in retry-evidence.ts beside parseOwnCheckFailures, so test_suite can report it for a check's
+// run (the own-check baseline) by the same rule the compose's own-check gate uses.
+export { ownCheckStillRed } from "./retry-evidence.js";
 
 const TEST_FILE_RE = /(^|\/)(tests?|__tests__)\/|\.test\.[cm]?[jt]sx?$/;
 
@@ -4663,11 +4655,8 @@ function testPassCount(raw: string): number | null {
   return last;
 }
 
-/** bun's "N expect() calls" summary: how many assertions the run executed. Null when absent. */
-export function testExpectCount(raw: string): number | null {
-  const m = String(raw ?? "").match(/^\s*(\d+) expect\(\) calls?\s*$/m);
-  return m ? Number(m[1]) : null;
-}
+// testExpectCount lives in retry-evidence.ts (shared with test_suite's own-check fields).
+export { testExpectCount } from "./retry-evidence.js";
 
 /**
  * `expect(` call sites in a test file's source, comments stripped. A red test aborts at its first failing
@@ -5395,6 +5384,23 @@ export function staticCheckCallPath(input: { vessel_root: string; test_file: str
 export function ownCheckCallPath(input: { raw: string; test_file: string; only: string[]; failing: ReadonlyArray<{ name?: unknown }>; vessel_root: string; prefix: string; read: (rel: string) => string | null }): CallPathEntry[] {
   const frames = checkCallPathFromRun(input.raw, input.test_file, { roots: [input.vessel_root], prefix: input.prefix, read: input.read, only: input.only });
   return frames.length > 0 ? frames : staticCheckCallPath({ vessel_root: input.vessel_root, test_file: input.test_file, failing: input.failing, prefix: input.prefix, read: input.read });
+}
+/** The own check's parent run as ownParentRun returns it: a run's raw output, or a measured baseline's fields. */
+export type ParentRun = { sha: string; raw: string | null; cached: "hit" | "miss" | "baseline"; red?: string[] | null; failing?: OwnCheckFailure[]; expects?: number | null; call_path?: CallPathEntry[] };
+/** The gap's own-check baseline standing in for the parent run at `sha`: same gap, vessel, check and titles, a reading
+ *  that measured something (not unrunnable), measured at exactly this sha. Null otherwise (the run happens). */
+export function baselineParentRun(meta: Record<string, unknown>, sha: string, gapId: string, v: string, own: { test_file: string; only_tests: string[] }): { run: ParentRun; baseline: OwnCheckBaseline } | null {
+  const b = ownCheckBaselineFor<OwnCheckBaseline>(meta, sha || null);
+  if (!b || b.verdict === "unrunnable" || b.gap_id !== gapId || b.vessel !== v.replace(/^repos\//, "") || b.test_file !== own.test_file || JSON.stringify(b.only_tests ?? []) !== JSON.stringify(own.only_tests)) return null;
+  return { baseline: b, run: { sha, raw: null, cached: "baseline", red: b.red ?? null, failing: b.failing ?? [], expects: b.expect_count ?? null, call_path: b.call_path ?? [] } };
+}
+/** What a code-reachable baseline adds to the drafter's grounding: its call path, the src files on it (vessel src/
+ *  only, the target path charset), and the function names that centre the windows. Empty for any other verdict. */
+export function baselineGrounding(b: OwnCheckBaseline | null): { callPath: CallPathEntry[]; files: string[]; probes: string[] } {
+  const callPath: CallPathEntry[] = b?.verdict === "red_code_reachable" && Array.isArray(b.call_path) ? b.call_path : [];
+  const files = [...new Set(callPath.map((e) => String(e?.path ?? "")))].filter((p) => p.startsWith(`repos/${b?.vessel ?? ""}/src/`) && /^repos\/[\w.-]+\/[\w./-]+\.\w+$/.test(p) && !p.split("/").includes("..") && !TEST_FILE_RE.test(p));
+  const probes = [...new Set(callPath.map((e) => e?.fn ?? "").filter((f) => /^[A-Za-z_$][\w$]*$/.test(f)))];
+  return { callPath, files, probes };
 }
 // THE OWN CHECK IN THE DRAFTER'S GROUNDING (gap the-drafter-never-sees-the-check-it-must-pass). A gap's class-2 own
 // check was resolved only at verify, to run it; the drafter never saw the API it calls, the options it passes or the
@@ -6332,7 +6338,9 @@ const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss"; call_path?: CallPathEntry[] }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
+/** The compose used the gap's own-check baseline (own-check-baseline.ts): which reading, and for what. The grading join. */
+export type OwnCheckBaselineConsumed = { dispatch_id: string | null; verdict: OwnCheckBaseline["verdict"]; base_sha: string; used: Array<"call_path" | "parent_run"> };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
 /**
  * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
@@ -6510,7 +6518,7 @@ export function composeAttemptEvidence(
   const record: AttemptRecord = {
     stage,
     edited_spans: [...applied.filter((a) => a.ok && a.base_span).map((a) => a.base_span!), ...repairSpans],
-    ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing, ...(ownV.own.call_path?.length ? { call_path: ownV.own.call_path } : {}) }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
+    ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing, ...(ownV.own.call_path?.length ? { call_path: ownV.own.call_path } : {}), ...(ownV.own.own_check_baseline_consumed ? { own_check_baseline_consumed: ownV.own.own_check_baseline_consumed } : {}) }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
   };
   // C-window-1: what the composer showed and ran, from its own reads and runs (never from the draft). Written only when the
   // caller passes it (composeGroundingPolicy on), so with the policy off the record is unchanged.
@@ -7957,6 +7965,22 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   // The gap's own check, read before planning (shown to the drafter after the blind-window refusals below), from the
   // vessel root verify runs it in (vesselRoot), else the clone's work tree.
   const ownCheckRead = readOwnCheckGrounding(gapMeta, vesselRoot);
+  // THE OWN-CHECK BASELINE (own-check-baseline.ts): the check's reading at its vessel's origin/dev, accepted only when
+  // it was measured at the tree this compose drafts on (its HEAD). A code-reachable red's call path then grounds the
+  // draft: its files become targets beside the check's imports, its functions centre the windows, and its line is shown.
+  let composeBaseline: OwnCheckBaseline | null = null;
+  const baselineUsed = new Set<"call_path" | "parent_run">();
+  {
+    const bv = ownCheckVesselOf(gapMeta);
+    if (bv && gapMeta.own_check_baseline) {
+      // The compose worktree is pinned to the vessel clone's origin/dev: the reading must be at that sha (the parent-run
+      // fold below compares the worktree's own HEAD).
+      const head = sweepGitOut(`${vesselCloneRootForChecks()}/${bv}`, ["rev-parse", "origin/dev"]) ?? "";
+      composeBaseline = ownCheckBaselineFor<OwnCheckBaseline>(gapMeta, head || null);
+      console.log(`[fc-own-check-baseline] ${pointer.gap?.id ?? "none"}: ${composeBaseline ? `${composeBaseline.verdict} at ${composeBaseline.base_sha.slice(0, 12)} (call_path ${composeBaseline.call_path?.length ?? 0})` : `not at origin/dev ${head.slice(0, 12) || "unknown"}: not used`}`);
+    }
+  }
+  const { callPath: baselineCallPath, files: baselineCallPathFiles, probes: baselineProbes } = baselineGrounding(composeBaseline);
   // NO BLIND DRAFT. A gap whose own check is in neither tree cannot be drafted against its check, and verify could
   // not judge the draft either (the file run alone prints no result: unjudged, not landed), so the planning call
   // would be paid for nothing. Refused here, by name. A test-writing compose is exempt: the check is what it writes.
@@ -7976,7 +8000,9 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   if (ownCheckCtx && !ownCheckVesselGrounded) console.log(`[fc-own-check-grounding] check vessel ${ownCheckCtx.vessel} is not in verify_vessels [${verifyVessels.join(", ")}]; its imports are not added as targets`);
   if (ownCheckCtx && ownCheckVesselGrounded) {
     // Resolved in the tree the check was read from: its relative imports name files beside it.
-    const imports = ownCheckImportedModules(ownCheckCtx, () => ownCheckCtx.root);
+    // The baseline's call-path files follow the check's imports, under the same scope partition (targetFiles[0] stays the edit_site).
+    const imports = [...new Set([...ownCheckImportedModules(ownCheckCtx, () => ownCheckCtx.root), ...(ownCheckCtx.vessel === composeBaseline?.vessel ? baselineCallPathFiles : [])])];
+    if (baselineCallPathFiles.length > 0) baselineUsed.add("call_path");
     if (imports.length > 0) {
       let excludes: ((path: string) => string | null) | null = null;
       if ((pointer as { directed?: boolean }).directed !== true) {
@@ -8106,7 +8132,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     // candidates every grounding is unwindowed and the drafter hunts anchors across
     // ~51KB of whole files — which is what anchor_not_found, the largest failure class,
     // actually is. Each candidate is inert unless it occurs in the file.
-    const regionProbes = [regionHint, ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`)].filter(Boolean);
+    const regionProbes = [regionHint, ...baselineProbes, ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`)].filter(Boolean);
     // LOG INSIDE THE CATCH (2026-09-15). This was a BARE catch — no error variable, no output —
     // so any throw inside groundVesselFiles silently became an empty window, which the
     // blind-decompose gate ~60 lines below then correctly refused. MEASURED: 48 of 48 grounding
@@ -8250,7 +8276,9 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   const groundingOwnCheckAt = grounding.length;
   if (ownCheckCtx) {
     const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonlyRead, focusHints });
-    grounding += `\n\n${ownCheckCtx.block}${importsBlock ? `\n\n${importsBlock}` : ""}`;
+    const baselinePathLine = callPathLine(baselineCallPath);
+    if (baselinePathLine) baselineUsed.add("call_path");
+    grounding += `\n\n${ownCheckCtx.block}${baselinePathLine ? `\n${baselinePathLine}` : ""}${importsBlock ? `\n\n${importsBlock}` : ""}`;
     console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }
   // THE TESTS THAT PIN THE EDIT SITE, READ-ONLY (pinningTests), after the blind-window refusals for the same reason;
@@ -10040,9 +10068,18 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // The gap's own check on the untouched parent (a detached worktree at HEAD; the draft is uncommitted).
   // One run per (gap, vessel, base sha, check): the green-draft contract and the red-draft no-effect
   // comparison share it. An unjudgeable run is not cached.
-  const ownParentRun = async (v: string, vAbs: string, own: { test_file: string; only_tests: string[] }, gapId: string): Promise<{ sha: string; raw: string | null; cached: "hit" | "miss" }> => {
+  // A MEASURED BASELINE STANDS IN FOR THE RUN (own-check-baseline.ts): the gap's own check read at this same sha, for
+  // this vessel and check, gives the same four facts the callers parse from a run (still-red names, failures, expect()
+  // count, call path), so nothing runs. Otherwise the run below, as before.
+  const ownParentRun = async (v: string, vAbs: string, own: { test_file: string; only_tests: string[] }, gapId: string): Promise<ParentRun> => {
     const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vAbs)} rev-parse HEAD 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 30 });
     const sha = String((shS.body as { stdout?: unknown })?.stdout ?? "").trim();
+    const fold = gateGapMeta ? baselineParentRun(gateGapMeta, sha, gapId, v, own) : null;
+    if (fold) {
+      baselineUsed.add("parent_run");
+      if (!composeBaseline) composeBaseline = fold.baseline;
+      return fold.run;
+    }
     const key = `${gapId}|${v}|${sha}|${own.test_file}|${own.only_tests.join(",")}`;
     const hit = sha ? OWN_PARENT_RUNS.get(key) : undefined;
     if (hit !== undefined) return { sha, raw: hit, cached: "hit" };
@@ -10377,7 +10414,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let ownNoEffect: boolean | undefined;
     let ownCallPath: CallPathEntry[] = [];
     let ownBaseSha: string | undefined;
-    let ownParentCached: "hit" | "miss" | undefined;
+    let ownParentCached: "hit" | "miss" | "baseline" | undefined;
     if (gateGapMeta) {
       const gapMeta = gateGapMeta;
       const editedRel = edited.filter((p) => p.startsWith(vAbs + "/")).map((p) => p.slice(vAbs.length + 1));
@@ -10413,14 +10450,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           const parent = await ownParentRun(v, vAbs, own, String(pointer.gap?.id ?? ""));
           ownBaseSha = parent.sha || undefined;
           ownParentCached = parent.cached;
-          if (parent.raw !== null && ownCheckStillRed(parent.raw, own.only_tests) !== null) ownNoEffect = sameOwnCheckFailures(ownFailing, parseOwnCheckFailures(parent.raw, own.only_tests));
+          const fromBaseline = parent.cached === "baseline";
+          const parentStillRed = fromBaseline ? (parent.red ?? null) : parent.raw !== null ? ownCheckStillRed(parent.raw, own.only_tests) : null;
+          if (parentStillRed !== null) ownNoEffect = sameOwnCheckFailures(ownFailing, fromBaseline ? (parent.failing ?? []) : parseOwnCheckFailures(parent.raw ?? "", own.only_tests));
           // THE CHECK'S CALL PATH (positive localization, retry-evidence checkCallPathFromRun): where the red check goes,
           // read on the PARENT (the base the next attempt edits) when it is red there, else on the draft. Sources are read
           // as of the parent: an edited file's pre-edit text.
-          const parentRed = parent.raw !== null && (ownCheckStillRed(parent.raw, own.only_tests) ?? []).length > 0;
+          const parentRed = (parentStillRed ?? []).length > 0;
           const readBase = (rel: string): string | null => { const abs = `${vAbs}/${rel}`; const pre = preEditContent.get(abs); if (pre !== undefined) return pre; try { return readFileSync(abs, "utf8"); } catch { return null; } };
           const prefix = `repos/${v.replace(/^repos\//, "")}/`;
-          ownCallPath = ownCheckCallPath({ raw: parentRed ? parent.raw! : draftRaw, test_file: own.test_file, only: own.only_tests, failing: ownFailing, vessel_root: vAbs, prefix, read: readBase });
+          ownCallPath = parentRed && fromBaseline && (parent.call_path ?? []).length > 0 ? parent.call_path! : ownCheckCallPath({ raw: parentRed && parent.raw !== null ? parent.raw : draftRaw, test_file: own.test_file, only: own.only_tests, failing: ownFailing, vessel_root: vAbs, prefix, read: readBase });
         }
         // THE CHECK CONTRACT (09-30): a green own check certifies the draft only against the parent. Run the
         // same file on the untouched parent (a detached worktree at HEAD; the draft is uncommitted) and refuse
@@ -10430,9 +10469,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           const parentRun = await ownParentRun(v, vAbs, own, String(pointer.gap?.id ?? ""));
           ownParentCached = parentRun.cached;
           const baseRaw = parentRun.raw ?? "";
-          ownBaseRed = ownCheckStillRed(baseRaw, own.only_tests);
-          contractBreach = checkContractBreach(ownBaseRed, testExpectCount(baseRaw), testExpectCount(draftRaw));
-          ownExpects = { base: testExpectCount(baseRaw), draft: testExpectCount(draftRaw) };
+          const baseFromBaseline = parentRun.cached === "baseline";
+          ownBaseRed = baseFromBaseline ? (parentRun.red ?? null) : ownCheckStillRed(baseRaw, own.only_tests);
+          const baseExpects = baseFromBaseline ? (parentRun.expects ?? null) : testExpectCount(baseRaw);
+          contractBreach = checkContractBreach(ownBaseRed, baseExpects, testExpectCount(draftRaw));
+          ownExpects = { base: baseExpects, draft: testExpectCount(draftRaw) };
           // The draft edited the check file itself: compare its assertion sites in source, not only at runtime.
           if (!contractBreach && editedRel.includes(own.test_file)) {
             const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vAbs)} show ${shq("HEAD:" + own.test_file)} 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 60 });
@@ -10451,6 +10492,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             if (ws?.isolated(v)) contractBreach = contractBreach ?? "the parent-tree run of the gap's own check produced no result, so the check cannot be shown to certify this draft";
             else console.warn(`[fc-own-check] parent-tree run of ${own.test_file} could not be judged for ${v} (non-isolated); contract not applied`);
           }
+        }
+        // THE BASELINE'S CONTENT GRADE (own-check-baseline-credit.ts): a code-reachable reading this compose used, judged
+        // by this draft's run of the check. Once per baseline execution; a broken or no-effect draft posts nothing.
+        if (composeBaseline?.verdict === "red_code_reachable" && baselineUsed.size > 0 && gateGapMeta && composeBaseline.vessel === v.replace(/^repos\//, "")) {
+          const draftVerdict = checkRunVerdict(classifyCheckRun(draftRaw));
+          const agree = codeReachableAgreement(composeBaseline, draftVerdict, ownNoEffect);
+          void creditOwnCheckBaseline({ gap_id: String(pointer.gap?.id ?? ""), meta: gateGapMeta, baseline: composeBaseline, consumer: "compose", reached: agree, reason: `draft ${draftVerdict.verdict}${draftVerdict.cause ? `(${draftVerdict.cause})` : ""} red=${draftVerdict.red.length}${ownNoEffect ? " no_effect_vs_parent" : ""}` })
+            .then((g) => console.log(`[fc-own-check-baseline] ${pointer.gap?.id ?? "none"}: content grade ${g.posted ? "posted" : "not posted"} (${g.why})`));
         }
       }
       if (gateSource === "store_unreadable") ownUnjudged = true;
@@ -10482,7 +10531,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}), ...(composeBaseline && baselineUsed.size > 0 ? { own_check_baseline_consumed: { dispatch_id: composeBaseline.dispatch_id ?? null, verdict: composeBaseline.verdict, base_sha: composeBaseline.base_sha, used: [...baselineUsed] } } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }

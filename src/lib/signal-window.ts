@@ -113,7 +113,10 @@ export function hoursSince(iso: unknown, now: number = Date.now()): number | nul
 
 export type PolicyField =
   | { kind: "int"; min: number; max: number }
-  | { kind: "globs"; max_items: number };
+  | { kind: "globs"; max_items: number }
+  // Plain substrings an operator lists (e.g. an import path "/db/surreal"): matched with includes/equality, never
+  // compiled as a pattern. Each is a non-empty string of at most max_len characters.
+  | { kind: "literals"; max_items: number; max_len: number };
 
 export type PolicySpec<T> = { [K in keyof T]: PolicyField };
 
@@ -122,6 +125,7 @@ const GLOB = /^[a-z0-9_*-]{1,64}$/;
 
 function fieldOk(v: unknown, f: PolicyField): boolean {
   if (f.kind === "int") return typeof v === "number" && Number.isInteger(v) && v >= f.min && v <= f.max;
+  if (f.kind === "literals") return Array.isArray(v) && v.length <= f.max_items && v.every((g) => typeof g === "string" && g.length > 0 && g.length <= f.max_len);
   return Array.isArray(v) && v.length <= f.max_items && v.every((g) => typeof g === "string" && GLOB.test(g));
 }
 

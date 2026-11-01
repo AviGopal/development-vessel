@@ -63,12 +63,12 @@ export type DrafterAttribution = { variant: string | null; version: string | nul
 export interface AttemptRecord {
   stage: FailStage | null;
   edited_spans: EditedSpan[];
-  own_check?: { test_file: string; failing: OwnCheckFailure[]; call_path?: CallPathEntry[] };
+  own_check?: { test_file: string; failing: OwnCheckFailure[]; call_path?: CallPathEntry[]; own_check_baseline_consumed?: { dispatch_id: string | null; verdict: string; base_sha: string; used: string[] } };
   /** true: the check failed identically on the parent. false: it differed. absent: not measured. */
   no_effect_vs_parent?: boolean;
   base_sha?: string;
   /** Whether the parent-tree run of the own check came from the per-(gap, vessel, sha, check) cache. */
-  parent_cached?: "hit" | "miss";
+  parent_cached?: "hit" | "miss" | "baseline";
   /** Every op this attempt had refused by the no-effect constraint. */
   refusals?: RefusalRecord[];
   /** Set when a refusal repeated on a region already refused on this gap: what the escalation did. */
@@ -181,6 +181,27 @@ export function parseOwnCheckFailures(raw: string, only: string[] = []): OwnChec
     block = [];
   }
   return out;
+}
+
+/**
+ * Which of the gap's requested tests are still not green in `raw` (a run of the gap's test file alone).
+ * A requested test that neither passed nor failed (renamed or deleted) counts as not green. Returns null
+ * when the run printed no result at all, so the caller fails closed instead of reading silence as a pass.
+ */
+export function ownCheckStillRed(raw: string, only: string[]): string[] | null {
+  const fails = [...new Set(raw.split("\n").filter((l) => /^\s*\(fail\)/.test(l)).map((l) => l.replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim()))];
+  const passLines = raw.split("\n").filter((l) => /^\s*\(pass\)/.test(l));
+  if (fails.length === 0 && passLines.length === 0) return null;
+  if (only.length === 0) return fails;
+  const red = only.filter((n) => fails.some((f) => f.includes(n)));
+  const notRun = only.filter((n) => !red.includes(n) && !passLines.some((l) => l.includes(n)));
+  return [...red, ...notRun.map((n) => `${n} (not run)`)];
+}
+
+/** bun's "N expect() calls" summary: how many assertions the run executed. Null when absent. */
+export function testExpectCount(raw: string): number | null {
+  const m = String(raw ?? "").match(/^\s*(\d+) expect\(\) calls?\s*$/m);
+  return m ? Number(m[1]) : null;
 }
 
 // ─── red for the right reason: the shared classifier of one check file's run ─────────────────────────────────

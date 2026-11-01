@@ -22,9 +22,10 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
-import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
+import { verifyGapCondition, testSuiteWholeFileDefault, sweepGitOut, type GapCheckVerdict } from "./gap-check-judge.js";
+import type { OwnCheckBaseline } from "../resolvers/own-check-baseline.js";
 import { readCalibration, landabilityScore, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
@@ -411,7 +412,7 @@ export interface AdmissionResult {
  */
 export async function admitActionableGaps(
   gaps: Record<string, unknown>[],
-  opts?: { typecheckRunner?: TypecheckRunner; lineageIndex?: Map<string, Record<string, unknown>> },
+  opts?: { typecheckRunner?: TypecheckRunner; lineageIndex?: Map<string, Record<string, unknown>>; baseShaOf?: (vessel: string) => string | null },
 ): Promise<AdmissionResult> {
   // LANDINGS STOPPED → ADMIT NOTHING. MITOSIS_DIRECT_PUSH=0 is the emergency stop the cutover
   // refuses every landing on (vessel-mitosis-cutover.ts, push-policy.ts landingsStopped). An
@@ -453,6 +454,13 @@ export async function admitActionableGaps(
   const childGapsByEditSite = new Map<string, number>();
   let tscRuns = 0;
   const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
+  // The vessel's origin/dev in its clone, read once per vessel per pass: an own-check baseline decides only at this sha.
+  const headCache = new Map<string, string | null>();
+  const headOf = (vessel: string): string | null => {
+    if (!vessel) return null;
+    if (!headCache.has(vessel)) headCache.set(vessel, (opts?.baseShaOf ?? ((v: string) => sweepGitOut(join(vesselsCloneRoot(), v), ["rev-parse", "origin/dev"])))(vessel));
+    return headCache.get(vessel) ?? null;
+  };
   const vesselTypecheckClean = async (vessel: string): Promise<boolean | null> => {
     if (passCache.has(vessel)) return passCache.get(vessel) ?? null;
     const now = Date.now();
@@ -634,6 +642,28 @@ export async function admitActionableGaps(
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
+    // THE OWN-CHECK BASELINE (own-check-baseline.ts), measured at the vessel's CURRENT origin/dev: green there, a draft
+    // cannot be certified by the check; red for its environment (a live client answering nothing, a refused connection),
+    // no src draft can turn it green. A baseline on another sha is stale and decides nothing.
+    {
+      const ocb = ownCheckBaselineFor<OwnCheckBaseline>(meta, headOf(ownCheckVesselOf(meta)));
+      const sha12 = ocb ? ocb.base_sha.slice(0, 12) : "";
+      const why = ocb?.verdict === "green_at_parent" ? `own_check_baseline_green_at_parent(${sha12})`
+        : ocb?.verdict === "red_environmental" ? `own_check_baseline_red_environmental(${sha12}; ${(ocb.env_signals ?? []).join("+")})` : null;
+      if (why) {
+        console.log(`[gap-admission] ${id}: ${why} own_check_baseline_consumed=${ocb!.dispatch_id ?? "unknown"}`);
+        excluded.push({ id, reason: why });
+        // CONSUMED, stamped once (a MERGE of the one key): the re-measure and the close grade only a reading that decided.
+        if (!ocb!.consumed) {
+          try {
+            await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: g.status ?? "open", classification_metadata: { own_check_baseline: { ...ocb!, consumed: { by: "admission", at: new Date().toISOString() } } } } } as never);
+          } catch (err) {
+            console.warn(`[gap-admission] ${id}: own-check baseline consumption not stamped (${(err as Error)?.message ?? String(err)})`);
+          }
+        }
+        continue;
+      }
+    }
     // A RECOMMIT INHERITS IT. recommit-<id>-<cls> is the same defect at the same site and carries its source's own check
     // (inheritableParentCheck), so a fresh green on an ancestor is the child's own check green too. Read only on its own
     // row, the exclusion let the root's recommit and recommit-recommit children through inside the root's window, and

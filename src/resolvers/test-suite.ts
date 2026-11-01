@@ -1,4 +1,4 @@
-import { classifyCheckRun } from "./retry-evidence.js";
+import { checkCallPathFromRun, classifyCheckRun, ownCheckStillRed, parseOwnCheckFailures, testExpectCount } from "./retry-evidence.js";
 import type { ResolverResult } from "./types.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -207,6 +207,8 @@ export function mutationRevertScript(sha: string, file: string): string {
 export const TEST_SUITE_RESPONSE_FIELDS = [
   "vessel", "verified_root", "verified_head", "landed_sha", "gap_id", "proposal_id", "ran", "gate_refused", "total", "pass", "fail",
   "test_file", "base_ref", "requested_not_passing", "filter_matched_none", "mutation", "skip", "failingTests", "red_reason", "timestamp",
+  // a one-file run's own-check reading (own-check baseline)
+  "own_red", "own_failing", "expect_count", "call_path",
   // a shell check's answer (A SHELL CHECK, below)
   "measured", "why", "check_exit",
 ] as const;
@@ -562,6 +564,17 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       // so the arm step judges a check's red by the same rule feature_compose's test_writing verify uses. Only for a
       // run of one test_file: a whole-suite run is not a check's measurement.
       ...(testFile ? { red_reason: classifyCheckRun(raw) } : {}),
+      // THE CHECK'S OWN READING (own-check baseline, resolvers/own-check-baseline.ts): the same four facts the compose's
+      // own-check gate parses from its parent run (feature-compose ownParentRun), so a measured baseline can stand in
+      // for that run: still-red names (ownCheckStillRed), the failures with Expected/Received, bun's expect() count, and
+      // the call path its stack frames show under the measured tree's src/ (frames only: the base worktree is gone by
+      // now, so no source is read here; the classify step adds the static path when the frames name none).
+      ...(testFile ? {
+        own_red: ownCheckStillRed(raw, onlyTests),
+        own_failing: parseOwnCheckFailures(raw, onlyTests),
+        expect_count: testExpectCount(raw),
+        call_path: checkCallPathFromRun(raw, testFile, { roots: [raw.match(/^VERIFIED_ROOT=(.+)$/m)?.[1]?.trim() ?? ""].filter(Boolean), prefix: `${rel}/`, only: onlyTests }),
+      } : {}),
       timestamp: new Date().toISOString(),
     },
   };

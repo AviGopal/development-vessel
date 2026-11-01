@@ -351,6 +351,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFailureModeMatrixScore(p as Parameters<typeof resolveFailureModeMatrixScore>[0]);
     case "test_suite":
       return resolveTestSuite(p as Parameters<typeof resolveTestSuite>[0]);
+    case "own_check_baseline_classify": {
+      const { resolveOwnCheckBaselineClassify } = await import("../resolvers/own-check-baseline.js");
+      return resolveOwnCheckBaselineClassify(p as import("../resolvers/own-check-baseline.js").OwnCheckBaselinePointer);
+    }
     case "boredom_enqueue":
       return resolveBoredomEnqueue(p as Parameters<typeof resolveBoredomEnqueue>[0]);
     case "rhythm_conductor_tick":

@@ -2348,7 +2348,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
       pickLineageIndex = gapsById;
       // Admission returns its rows in orderByLandability's order; the pick keeps it (it only breaks score ties there).
-      const pool = pickPoolForCapacity(orderByLandability(admitted), armedOnlyPick);
+      const pool = pickPoolForCapacity(orderByLandability(admitted, gapsById), armedOnlyPick);
       if (pool.skipped) {
         console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
         return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };

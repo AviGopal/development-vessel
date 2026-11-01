@@ -22,6 +22,7 @@ import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
+import { lineageIndex, lineageOrigin } from "../resolvers/operator-acts.js";
 import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, sweepGitOut, type GapCheckVerdict } from "./gap-check-judge.js";
@@ -365,14 +366,14 @@ function greenOnParentAncestor(row: Record<string, unknown>, lookup: (id: string
   return null;
 }
 
-/** A row an operator or a person filed, by the autonomy judge's own origin test (operatorActsOf's "operator-filed"
- *  act, src/resolvers/operator-acts.ts): source operator:* or human_reported, or classification_metadata.filed_by
- *  operator:*. Every other row is system-born. */
-export function operatorFiled(row: Record<string, unknown>): boolean {
-  const src = String(row.source ?? "");
-  const m = row.classification_metadata;
-  const filedBy = String((m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>).filed_by : undefined) ?? "");
-  return src.startsWith("operator:") || src === "human_reported" || filedBy.startsWith("operator:");
+/** A row that is not system-born, by the autonomy judge's own origin predicate (operator-acts.ts lineageOrigin, which
+ *  link 1 reads): the row or a lineage ancestor in `byId` has a source that is not substrate_detected or a known system
+ *  writer (missing, a bare "operator", operator:*, human_reported, free text), or a filed_by operator:*. Decided on the
+ *  rows read: an ancestor `byId` does not hold is not decided here (the auto-pick's index is the open read, so a closed
+ *  parent is absent from it). With no `byId`, the row's own fields decide. Every other row is system-born. */
+export function operatorFiled(row: Record<string, unknown>, byId?: ReadonlyMap<string, Record<string, unknown>>): boolean {
+  const id = String(row.id ?? "");
+  return lineageOrigin(id, row, byId ?? new Map([[id, row]]), false).fault !== null;
 }
 
 /** What "similar landability" means for the system-born-first order: rows whose landabilityScore falls in the same
@@ -386,11 +387,14 @@ const landabilityBand = (s: number): number => Math.floor(s / LANDABILITY_SIMILA
  *  (operatorFiled), then landabilityScore, highest first; ties keep their input order (Array.prototype.sort is
  *  stable). A sorted copy, each score computed once. Admission walks its candidates in this order and the auto-pick
  *  keeps it. Ordering only: an operator-filed row is still walked, and still picked when nothing else is. With one
- *  origin throughout this is landabilityScore order exactly (the band is monotone in the score). */
-export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+ *  origin throughout this is landabilityScore order exactly (the band is monotone in the score). `byId` is the lineage
+ *  index operatorFiled reads (the caller's store read, already in memory; indexed once per call, lineageIndex); with
+ *  none, the rows themselves. */
+export function orderByLandability<T extends Record<string, unknown>>(rows: readonly T[], byId?: ReadonlyMap<string, Record<string, unknown>>): T[] {
+  const index = lineageIndex(byId ?? new Map<string, Record<string, unknown>>(rows.map((r) => [String(r.id ?? ""), r])));
   const key = new Map<T, { band: number; op: number; s: number }>(rows.map((r) => {
     const s = landabilityScore(r);
-    return [r, { band: landabilityBand(s), op: operatorFiled(r) ? 1 : 0, s }] as [T, { band: number; op: number; s: number }];
+    return [r, { band: landabilityBand(s), op: operatorFiled(r, index) ? 1 : 0, s }] as [T, { band: number; op: number; s: number }];
   }));
   return [...rows].sort((a, b) => {
     const ka = key.get(a)!, kb = key.get(b)!;
@@ -490,7 +494,7 @@ export async function admitActionableGaps(
   // the caller's array is untouched). No predicate, threshold or cap changes: the order only decides WHICH rows win a
   // budgeted resource (the edit-site slots, the child-monopoly count, the drain and typecheck budgets). Inside a
   // landability band, system-born rows reach those budgets before operator-filed ones (orderByLandability).
-  for (const g of orderByLandability(gaps)) {
+  for (const g of orderByLandability(gaps, opts?.lineageIndex)) {
     const id = String(g.id ?? "");
     const cat = String(g.category ?? "");
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;

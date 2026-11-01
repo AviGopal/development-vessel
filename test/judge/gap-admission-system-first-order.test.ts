@@ -145,8 +145,8 @@ describe("inside a landability band, system-born rows rank before operator-filed
     expect(pick([s, o])).toBe("sf-g-op");
   });
 
-  it("origin follows the autonomy judge's operator-filed test (source operator:* or human_reported, or filed_by operator:*)", async () => {
-    const { operatorActsOf } = await import("../../src/resolvers/operator-acts.js");
+  it("origin follows the autonomy judge's origin predicate (operator-acts.ts lineageOrigin, which link 1 reads)", async () => {
+    const { lineageOrigin } = await import("../../src/resolvers/operator-acts.js");
     const operatorFiled = modAdmission.operatorFiled as (r: Row) => boolean;
     const rows: Row[] = [
       sys90("sf-h-sys"), op90("sf-h-op"), gap("sf-h-human", { source: "human_reported" }), gap("sf-h-filedby", { filedBy: OP }),
@@ -154,9 +154,10 @@ describe("inside a landability band, system-born rows rank before operator-filed
       { id: "sf-h-metaonly", source: "substrate_detected", metadata: { filed_by: OP } }, { id: "sf-h-nosource" },
     ];
     for (const r of rows) {
-      const judge = operatorActsOf(r as never, { byId: new Map(), filedAt: null, untilAt: null }).acts.some((a: { addendum: string }) => a.addendum === "operator-filed");
+      const judge = lineageOrigin(String(r.id), r as never, new Map([[String(r.id), r as never]])).fault !== null;
       expect({ id: r.id, operatorFiled: operatorFiled(r) }).toEqual({ id: r.id, operatorFiled: judge });
     }
-    expect(rows.filter((r) => operatorFiled(r)).map((r) => r.id)).toEqual(["sf-h-op", "sf-h-human", "sf-h-filedby"]);
+    // Free text and a missing source are not system-born either (the shared predicate's tightening).
+    expect(rows.filter((r) => operatorFiled(r)).map((r) => r.id)).toEqual(["sf-h-op", "sf-h-human", "sf-h-filedby", "sf-h-route", "recommit-route-edit-sf-h", "sf-h-nosource"]);
   });
 });

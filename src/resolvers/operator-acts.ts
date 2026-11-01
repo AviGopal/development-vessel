@@ -250,8 +250,9 @@ export function indexedLineageUnknown(gid: string, idx: LineageIndex): string[] 
  * once, bounded by the store read). `unseen` is lineageUnknown's: an ancestor the store read does not hold is unknown,
  * never clean, so a caller that needs a yes reads "system-born" only when there is no fault AND nothing is unseen.
  * A caller that reads many rows passes a LineageIndex (lineageIndex(byId), built once): same result, one key scan.
+ * `readUnseen` false skips that read (unseen is then empty): for a caller that decides on the fault alone.
  */
-export function lineageOrigin(gid: string, row: GapRow | undefined, byId: ReadonlyMap<string, GapRow>): { fault: { id: string; operator: boolean; text: string } | null; unseen: string[] } {
+export function lineageOrigin(gid: string, row: GapRow | undefined, byId: ReadonlyMap<string, GapRow>, readUnseen = true): { fault: { id: string; operator: boolean; text: string } | null; unseen: string[] } {
   const own = rowOriginFault(row);
   let fault = own ? { id: gid, ...own } : null;
   if (!fault) {
@@ -260,7 +261,7 @@ export function lineageOrigin(gid: string, row: GapRow | undefined, byId: Readon
       if (f) { fault = { id: k, ...f }; break; }
     }
   }
-  return { fault, unseen: byId instanceof LineageIndex ? indexedLineageUnknown(gid, byId) : lineageUnknown(gid, byId) };
+  return { fault, unseen: !readUnseen ? [] : byId instanceof LineageIndex ? indexedLineageUnknown(gid, byId) : lineageUnknown(gid, byId) };
 }
 
 /** A row is system-born when it and every lineage ancestor are (lineageOrigin: no fault), and no ancestor is unseen. */

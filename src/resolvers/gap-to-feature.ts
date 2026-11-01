@@ -1455,13 +1455,14 @@ export const ADMISSION_PASS_MAX_ENTRIES = 1000;
 const PARKED_EXCLUSION = /^(needs_information|disposition)\b/;
 let admissionPassLast: { id: string; digest: string } | null = null;
 export function __resetAdmissionPassForTests(): void { admissionPassLast = null; }
-export function admissionPassBody(p: { node: string; candidates: number; admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; floored: string[] }): Record<string, unknown> {
+export function admissionPassBody(p: { node: string; candidates: number; admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; floored: string[]; groundedBy?: Record<string, string> }): Record<string, unknown> {
   let room = ADMISSION_PASS_MAX_ENTRIES;
   let truncated = 0;
   const take = <T>(xs: T[]): T[] => { const kept = xs.slice(0, Math.max(0, room)); room -= kept.length; truncated += xs.length - kept.length; return kept; };
   const byReason: Record<string, number> = {};
   for (const e of p.excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
-  const admitted = take(p.admitted.map((g) => ({ id: String(g.id ?? ""), landability: Number(landabilityScore(g).toFixed(4)) })));
+  // grounded_by: what grounded the admitted row (admitActionableGaps groundedBy), only when admission named one.
+  const admitted = take(p.admitted.map((g) => ({ id: String(g.id ?? ""), landability: Number(landabilityScore(g).toFixed(4)), ...(p.groundedBy?.[String(g.id ?? "")] ? { grounded_by: p.groundedBy[String(g.id ?? "")] } : {}) })));
   const floored = take([...p.floored].sort());
   const notParked = p.excluded.filter((e) => !PARKED_EXCLUSION.test(e.reason)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const excluded = Object.fromEntries(take(notParked).map((e) => [e.id, e.reason]));
@@ -2342,7 +2343,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // (no-producer orphans; phantom typecheck gaps whose error is already fixed) OUT of the
       // auto-pick set so they stop hollowing dispatches and starving the proven-landable path.
       // The whole open read is the lineage index: a recommit's fresh-green ancestor may be filtered out of `eligible`.
-      const { admitted, excluded } = await duringActivity("gap_to_feature:eligibility_pass", () => admitActionableGaps(eligible, { lineageIndex: gapsById }));
+      const { admitted, excluded, groundedBy } = await duringActivity("gap_to_feature:eligibility_pass", () => admitActionableGaps(eligible, { lineageIndex: gapsById }));
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await duringActivity("gap_to_feature:calibration", () => refreshHeldCalibration());
@@ -2355,7 +2356,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       }
       let floored: string[] = [];
       gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows, (ids) => { floored = ids; })) : null;
-      recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored });
+      recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored, groundedBy });
     }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

@@ -107,3 +107,78 @@ describe("CONTROLS: the cut grounds nothing that is not an existing file", () =>
     expect(citedExistingFile(gap("ground-bak", { edit_site: "repos/llm-resolver-vessel/src/index.ts.bak (old copy)" }))).toBeNull();
   });
 });
+
+// A gap whose edit_site names no file (a directory with function names) but whose own check's baseline, measured at the
+// vessel's current origin/dev, is a code-reachable red: its call_path names the files the failing tests run through.
+// One of them existing grounds the gap, and the pass record says so (grounded_by). Only a red_code_reachable reading
+// counts, only an existing file on it, and only when the edit_site does not ground the gap by itself.
+const g2f = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;
+const admitWithSource = modAdmission.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }>; groundedBy?: Record<string, string> }>;
+const CF_TF = "src/lib/caller-fault-abstains.test.ts";
+const CF_TITLES = ["MUST-FAIL — the caller fault is classified and attributed to the calling step > failureClassOf names malformed_request, at the task that sent the request"];
+const CALL_PATH = [{ path: "repos/activity-api/src/lib/posterior-update.ts", fn: "computeDeltas", line: 743 }, { path: "repos/activity-api/src/lib/failure-class.ts", fn: "failureClassOf", line: 151 }];
+const reading = (verdict: string, call_path: unknown[] = CALL_PATH, base_sha = HEAD) => ({
+  gap_id: "credit-writers", vessel: "activity-api", test_file: CF_TF, only_tests: CF_TITLES, base_sha, verdict, red: [], failing: [], expect_count: 2,
+  call_path, call_path_source: "static", env_signals: [], env_policy: "policy", dispatch_id: "disp-cw", measured_at: "2026-01-01T00:00:00Z",
+});
+function creditRow(id: string, meta: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id, category: "systematic_failure", source: "substrate_detected", summary: "credit writers grade caller-fault outcomes at leaf and ancestors", status: "open", detected_at: "2026-01-01T00:00:00Z",
+    classification_metadata: { edit_site: DIR, falsifier: "class2", evidence_resolve: { shape: "test_suite", input: { vessel: "activity-api", test_file: CF_TF, only_tests: CF_TITLES }, zero_field: "requested_not_passing" }, ...meta },
+  };
+}
+async function admitSourced(gs: Record<string, unknown>[], head: string = HEAD) {
+  const r = await admitWithSource([...gs, SIBLING()], { typecheckRunner: runner, baseShaOf: () => head });
+  return { r, admittedIds: r.admitted.map((g) => String(g.id)), reasonOf: (id: string) => r.excluded.find((e) => e.id === id)?.reason, by: (id: string) => r.groundedBy?.[id] };
+}
+
+describe("a code-reachable own-check baseline's call path grounds a gap its edit_site does not", () => {
+  it("MUST-FAIL the credit-writers row shape is admitted, not deferred as no_groundable_target", async () => {
+    const { admittedIds, reasonOf } = await admitSourced([creditRow("ground-cw", { own_check_baseline: reading("red_code_reachable") })]);
+    expect(reasonOf("ground-cw")).toBeUndefined();
+    expect(admittedIds).toContain("ground-cw");
+  });
+
+  it("MUST-FAIL the admission result and the pass record name own_check_baseline_call_path; a sited sibling names edit_site", async () => {
+    const { r, by } = await admitSourced([creditRow("ground-cw-rec", { own_check_baseline: reading("red_code_reachable") })]);
+    expect(by("ground-cw-rec")).toBe("own_check_baseline_call_path");
+    expect(by("ground-sibling")).toBe("edit_site");
+    const body = (g2f.admissionPassBody as (p: unknown) => Record<string, any>)({ node: "n", candidates: 2, admitted: r.admitted, excluded: r.excluded, floored: [], groundedBy: r.groundedBy });
+    const entry = (id: string) => (body.admitted as Array<{ id: string; grounded_by?: string }>).find((a) => a.id === id);
+    expect(entry("ground-cw-rec")?.grounded_by).toBe("own_check_baseline_call_path");
+    expect(entry("ground-sibling")?.grounded_by).toBe("edit_site");
+  });
+
+  it("an edit_site that grounds by itself is grounded by it, whatever the reading", async () => {
+    const { by } = await admitSourced([creditRow("ground-cw-site", { edit_site: "repos/activity-api/src/lib/failure-class.ts", own_check_baseline: reading("red_code_reachable") })]);
+    expect(by("ground-cw-site")).toBe("edit_site");
+  });
+});
+
+describe("CONTROLS: nothing else on a reading grounds a gap", () => {
+  it("CONTROL a call_path naming only a nonexistent file does not ground", async () => {
+    const { admittedIds, reasonOf } = await admitSourced([creditRow("ground-cw-missing", { own_check_baseline: reading("red_code_reachable", [{ path: "repos/activity-api/src/lib/missing.ts", fn: "computeDeltas", line: 1 }]) })]);
+    expect(admittedIds).not.toContain("ground-cw-missing");
+    expect(reasonOf("ground-cw-missing")).toBe("no_groundable_target");
+  });
+
+  it("CONTROL a green_at_parent reading with a call_path does not ground (admission excludes it on the reading)", async () => {
+    const { admittedIds, reasonOf, by } = await admitSourced([creditRow("ground-cw-green", { own_check_baseline: reading("green_at_parent") })]);
+    expect(admittedIds).not.toContain("ground-cw-green");
+    expect(reasonOf("ground-cw-green")).toBe(`own_check_baseline_green_at_parent(${HEAD.slice(0, 12)})`);
+    expect(by("ground-cw-green")).toBeUndefined();
+  });
+
+  it("CONTROL an unrunnable reading with a call_path, and a code-reachable one at another sha, do not ground", async () => {
+    const un = await admitSourced([creditRow("ground-cw-unrun", { own_check_baseline: reading("unrunnable") })]);
+    expect(un.reasonOf("ground-cw-unrun")).toBe("no_groundable_target");
+    const moved = await admitSourced([creditRow("ground-cw-moved", { own_check_baseline: reading("red_code_reachable") })], "d".repeat(40));
+    expect(moved.reasonOf("ground-cw-moved")).toBe("no_groundable_target");
+  });
+
+  it("CONTROL a row with no reading is unchanged: deferred as no_groundable_target, grounded by nothing", async () => {
+    const { reasonOf, by } = await admitSourced([creditRow("ground-cw-none", {})]);
+    expect(reasonOf("ground-cw-none")).toBe("no_groundable_target");
+    expect(by("ground-cw-none")).toBeUndefined();
+  });
+});

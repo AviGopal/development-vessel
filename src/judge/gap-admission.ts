@@ -246,6 +246,21 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
   return null;
 }
 
+/**
+ * (a'): the first EXISTING repos/<vessel>/….(ts|tsx) file on an own-check baseline's call_path (entries as
+ * own-check-baseline.ts stores them: {path: "repos/<vessel>/src/…", fn, line}), only for a red_code_reachable reading.
+ * A green, environmental or unrunnable reading names no target. The caller passes the reading admission already
+ * accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names now).
+ */
+export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined): string | null {
+  if (!b || b.verdict !== "red_code_reachable" || !Array.isArray(b.call_path)) return null;
+  for (const e of b.call_path as Array<{ path?: unknown }>) {
+    const p = typeof e?.path === "string" ? e.path.trim() : "";
+    if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) && repoPathExists(p)) return p;
+  }
+  return null;
+}
+
 /** (b): the gap carries a proposal report naming required_code_modifications[].file that EXISTS. */
 export function hasProposalReport(gapId: string): boolean {
   return existingEditTargets(gapId).length > 0;
@@ -407,9 +422,14 @@ export function orderByLandability<T extends Record<string, unknown>>(rows: read
   });
 }
 
+/** What grounded an admitted gap: a metadata-cited existing file (citedExistingFile), or, when that names none, an existing
+ *  file on its own check's code-reachable call path (ownCheckCallPathFile). Rows admitted another way carry none. */
+export type GroundingSource = "edit_site" | "own_check_baseline_call_path";
 export interface AdmissionResult {
   admitted: Record<string, unknown>[];
   excluded: Array<{ id: string; reason: string }>;
+  /** Per admitted gap id, the source that grounded it (see GroundingSource). */
+  groundedBy?: Record<string, GroundingSource>;
 }
 
 /**
@@ -458,6 +478,7 @@ export async function admitActionableGaps(
   // below can see whether there is any groundable work to prefer over them.
   const ungroundable: Record<string, unknown>[] = [];
   const excluded: Array<{ id: string; reason: string }> = [];
+  const groundedBy: Record<string, GroundingSource> = {};
   const candidatesById = new Map(gaps.map((x) => [String(x.id ?? ""), x] as [string, Record<string, unknown>]));
   const CHILD_GAP_MONOPOLY_THRESHOLD = 3; // Arbitrary, but a concrete limit. This may be tuned in the future.
   const childGapsByEditSite = new Map<string, number>();
@@ -654,8 +675,9 @@ export async function admitActionableGaps(
     // THE OWN-CHECK BASELINE (own-check-baseline.ts), measured at the vessel's CURRENT origin/dev: green there, a draft
     // cannot be certified by the check; red for its environment (a live client answering nothing, a refused connection),
     // no src draft can turn it green. A baseline on another sha is stale and decides nothing.
+    // The same reading grounds the gap below when its edit_site does not (ownCheckCallPathFile).
+    const ocb = ownCheckBaselineFor<OwnCheckBaseline>(meta, headOf(ownCheckVesselOf(meta)));
     {
-      const ocb = ownCheckBaselineFor<OwnCheckBaseline>(meta, headOf(ownCheckVesselOf(meta)));
       const sha12 = ocb ? ocb.base_sha.slice(0, 12) : "";
       const why = ocb?.verdict === "green_at_parent" ? `own_check_baseline_green_at_parent(${sha12})`
         : ocb?.verdict === "red_environmental" ? `own_check_baseline_red_environmental(${sha12}; ${(ocb.env_signals ?? []).join("+")})` : null;
@@ -800,7 +822,10 @@ export async function admitActionableGaps(
     // (b) PROPOSAL-BACKED — the proven-landable path. ALWAYS admit (route unchanged).
     if (hasProposalReport(id)) { admitted.push(g); continue; }
     // (a) metadata cites a real EXISTING repos/<vessel>/src file.
-    if (citedExistingFile(g)) { admitted.push(g); continue; }
+    if (citedExistingFile(g)) { groundedBy[id] = "edit_site"; admitted.push(g); continue; }
+    // (a') its own check's code-reachable red at the current base names the files the failing tests run through, and
+    // one of them exists: the target the edit_site did not name (the reading feature-compose's baselineGrounding uses).
+    if (ownCheckCallPathFile(ocb)) { groundedBy[id] = "own_check_baseline_call_path"; admitted.push(g); continue; }
 
     // (E1) ORPHAN / UNREACHABLE PRODUCER — no editable target; closes via author_producer /
     // reachability_gap_repair, not feature_compose. Admit a FRESH one for its single mint attempt,
@@ -905,7 +930,7 @@ export async function admitActionableGaps(
     for (const e of excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
     console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → ${admitted.length} admitted, ${excluded.length} excluded ${JSON.stringify(byReason)}`);
   }
-  return { admitted, excluded };
+  return { admitted, excluded, groundedBy };
 }
 
 /** A row the predicate admits whose test_suite check runs a file ANOTHER open row's check supply refused to arm

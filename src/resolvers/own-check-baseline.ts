@@ -20,7 +20,7 @@
 import type { ResolverResult } from "./types.js";
 import { readShapedPolicy, type PolicySpec, type ShapedPolicy } from "../lib/signal-window.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
-import { resolveTestSuite } from "./test-suite.js";
+import { resolveTestSuite, testSuiteFileProblem } from "./test-suite.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
 import type { CallPathEntry, CheckRunClass, OwnCheckFailure } from "./retry-evidence.js";
 import * as credit from "./own-check-baseline-credit.js";
@@ -80,15 +80,23 @@ const envPolicyState = (p: ShapedPolicy<OwnCheckEnvPolicy>): EnvPolicyState => (
  * The verdict of one test_suite body of the check's file at base. `importSpecs` are the check file's import
  * specifiers (read at base). Environmental only under a policy READ FROM ITS FILE: the defaults decide nothing.
  */
-export function classifyOwnCheckRun(run: Row | null, onlyTests: string[], importSpecs: string[], policy: ShapedPolicy<OwnCheckEnvPolicy>): { verdict: OwnCheckBaselineVerdict; why?: string; env_signals: EnvSignal[]; env_policy: EnvPolicyState } {
+export function classifyOwnCheckRun(run: Row | null, onlyTests: string[], importSpecs: string[], policy: ShapedPolicy<OwnCheckEnvPolicy>, testFile?: string): { verdict: OwnCheckBaselineVerdict; why?: string; env_signals: EnvSignal[]; env_policy: EnvPolicyState } {
   const env_policy = envPolicyState(policy);
   const none = { env_signals: [] as EnvSignal[], env_policy };
+  // A CHECK THAT IS NOT A TEST MODULE MEASURES NOTHING (test-suite.ts testSuiteFileProblem, the arming rule): a gap whose
+  // evidence_resolve names a source file was read red_code_reachable, which says code the check runs is the target.
+  if (testFile !== undefined) { const why = testSuiteFileProblem(testFile); if (why) return { verdict: "unrunnable", why, ...none }; }
   if (!run) return { verdict: "unrunnable", why: "the check's run returned no test_suite report", ...none };
   if (run["filter_matched_none"] === true) return { verdict: "unrunnable", why: "none of the named tests is in the check file at base", ...none };
   if (run["ran"] !== true) return { verdict: "unrunnable", why: "the check's run printed no bun summary", ...none };
   const rnp = typeof run["requested_not_passing"] === "number" ? (run["requested_not_passing"] as number) : null;
   const green = onlyTests.length > 0 ? rnp === 0 : Number(run["fail"] ?? 1) === 0 && Number(run["pass"] ?? 0) > 0;
   if (green) return { verdict: "green_at_parent", ...none };
+  // A RED WITH NO FAILING TEST AND NO expect() LINE MEASURED NOTHING the classes below can read: a file that failed to load,
+  // or a run with no test in it. Not code-reachable (there is no failing assertion, and so no call path, to ground on).
+  if ((Array.isArray(run["own_failing"]) ? (run["own_failing"] as unknown[]).length : 0) === 0 && typeof run["expect_count"] !== "number") {
+    return { verdict: "unrunnable", why: "the check's run is red with no failing test and no expect() line: nothing was measured", ...none };
+  }
   if (!policy.ok || policy.source !== "policy") return { verdict: "red_code_reachable", ...none };
   const pol = policy.policy;
   const rr = (run["red_reason"] ?? null) as CheckRunClass | null;
@@ -151,14 +159,15 @@ export async function resolveOwnCheckBaselineClassify(pointer: OwnCheckBaselineP
   if (!SHA40.test(base)) return err(`no base sha for ${vessel} (origin/dev unreadable in its clone)`);
   const policy = await readOwnCheckEnvPolicy(deps.env);
 
-  const run = await (deps.runTestSuite ?? ((i: Row) => resolveTestSuite(i as never)))({ type: "test_suite", vessel: `repos/${vessel}`, test_file: testFile, only_tests: onlyTests, base_ref: base, gap_id: id });
+  // A check file test_suite cannot run as a test module is not run (classifyOwnCheckRun reads it unrunnable).
+  const run = testSuiteFileProblem(testFile) ? null : await (deps.runTestSuite ?? ((i: Row) => resolveTestSuite(i as never)))({ type: "test_suite", vessel: `repos/${vessel}`, test_file: testFile, only_tests: onlyTests, base_ref: base, gap_id: id });
   const body = run?.shape === "test_suite" ? ((run.body ?? {}) as Row) : null;
   // The check file and its imports AS OF THE BASE (the run's worktree is gone): git show base:<path> in the clone.
   const readAtBase = (rel: string): string | null => git(clone, ["show", `${base}:${rel}`]);
   const checkSrc = readAtBase(testFile);
   const fc = await import("./feature-compose.js");
   const importSpecs = checkSrc ? [...fc.relativeImportBindings(checkSrc, true).values()] : [];
-  const c = classifyOwnCheckRun(body, onlyTests, importSpecs, policy);
+  const c = classifyOwnCheckRun(body, onlyTests, importSpecs, policy, testFile);
   const failing = (Array.isArray(body?.["own_failing"]) ? body!["own_failing"] : []) as OwnCheckFailure[];
   // THE CALL PATH: the run's frames; when they name none (an expect() on a returned value), the static path of the
   // failing tests' calls through the check's imports (feature-compose staticCheckCallPath), read at base.

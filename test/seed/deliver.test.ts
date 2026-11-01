@@ -103,6 +103,23 @@ describe("upsertVersionBumpedSeeds", () => {
   });
 });
 
+describe("a seed's declared input shapes travel as activity-api reads them", () => {
+  it("MUST-FAIL the own-check-baseline seed is posted with input_shapes [] (no prose inference, no \"goal\")", async () => {
+    const { OWN_CHECK_BASELINE_TEMPLATE } = await import("../../src/seed/own-check-baseline.js");
+    const calls = mockRegistry({});
+    await upsertVersionBumpedSeeds([OWN_CHECK_BASELINE_TEMPLATE], EP, "k");
+    const post = calls.find((c) => c.method === "POST");
+    expect(post?.body?.["input_shapes"]).toEqual([]);
+    expect(JSON.stringify(post?.body?.["input_shapes"] ?? null)).not.toContain("goal");
+    expect(OWN_CHECK_BASELINE_TEMPLATE.inputShapes ?? []).not.toContain("goal");
+  });
+  it("CONTROL a seed that declares no inputShapes at all sends no input_shapes (activity-api's inference is unchanged for it)", async () => {
+    const calls = mockRegistry({});
+    await upsertVersionBumpedSeeds([tpl("dv:noshapes", 1)], EP, "k");
+    expect(calls.find((c) => c.method === "POST")?.body).not.toHaveProperty("input_shapes");
+  });
+});
+
 describe("deliverSeedsToPopulatedCatalogue", () => {
   it("leaves an EMPTY catalogue to the cold-start seeder (uploads nothing)", async () => {
     // A version-bumped seed landing first would make the catalogue non-empty, and the cold

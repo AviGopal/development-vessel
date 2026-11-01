@@ -76,10 +76,12 @@ async function seedTemplates(): Promise<void> {
       const seedTemplate = typeof template === "object" && template !== null
         ? { ...(template as Record<string, unknown>), proposed: false, org_id: "organizations:substrate" }
         : template;
+      // bootstrapSeed: the cold-start bulk runs before the fleet registers its resolvers (activity-create-variant.ts
+      // EVERY STEP RESOLVER MUST BE SERVED); seeds are the bootstrap tier.
       const result = await resolveActivityCreateVariant({
         type: "activity_create_variant",
         template: seedTemplate,
-      });
+      }, { bootstrapSeed: true });
       // Surface resolver-side failures rather than silently logging ✓ with undefined.
       // The resolver returns shape="structuredError" on non-2xx from activity-api
       // (auth failure, validation reject, schema error). Treat that as a failure.

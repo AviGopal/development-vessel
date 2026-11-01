@@ -243,3 +243,23 @@ describe("the re-measure grades its predecessor only when admission consumed it"
     expect(await run(meta(prev(false)), C1_RAW)).toEqual([]);
   });
 });
+
+describe("a reading that measured nothing is unrunnable, never code-reachable", () => {
+  // The shape of the reading for a gap whose evidence_resolve names a SOURCE file (test-suite.ts): only_tests [],
+  // failing [], red null, expect_count null. It was classed red_code_reachable.
+  const heldRun = { ran: true, pass: 0, fail: 0, total: 0, requested_not_passing: null, own_red: null, own_failing: [], expect_count: null, call_path: [],
+    red_reason: { ran: true, pass: 0, unhandled: false, unhandled_cause: null, unhandled_error: null, failures: [], compared: [] } };
+  const absentPolicy = { ok: true, policy: mod.DEFAULT_OWN_CHECK_ENV_POLICY, source: "default", path: null } as never;
+  it("MUST-FAIL a check file that is not a test module (src/resolvers/test-suite.ts) reads unrunnable", () => {
+    const c = mod.classifyOwnCheckRun(heldRun, [], [], absentPolicy, "src/resolvers/test-suite.ts");
+    expect(c.verdict).toBe("unrunnable");
+  });
+  it("MUST-FAIL a red with no failing test and no expect() line reads unrunnable, even for a test module", () => {
+    const c = mod.classifyOwnCheckRun(heldRun, [], [], absentPolicy, "test/checks/x.check.ts");
+    expect(c.verdict).toBe("unrunnable");
+  });
+  it("CONTROL a red with a failing test is still code-reachable", () => {
+    const run = { ...heldRun, fail: 1, own_failing: [{ name: "a > b" }], expect_count: 1 };
+    expect(mod.classifyOwnCheckRun(run, [], [], absentPolicy, "test/a.test.ts").verdict).toBe("red_code_reachable");
+  });
+});

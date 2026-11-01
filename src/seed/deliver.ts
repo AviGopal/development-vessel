@@ -80,7 +80,14 @@ export async function upsertVersionBumpedSeeds(
       const tags = Array.isArray(rawTags)
         ? rawTags.map((tag) => (typeof tag === "string" ? tag.toLowerCase().replace(/-/g, ".").replace(/[^a-z0-9.]/g, "") : tag))
         : rawTags;
-      const body = { ...(t as Record<string, unknown>), tags, proposed: false, org_id: "organizations:substrate" };
+      // THE DECLARED INPUT SHAPES TRAVEL AS activity-api READS THEM (snake_case input_shapes). A seed's camelCase
+      // `inputShapes` was not read, so an explicitly empty list was taken as "not provided" and activity-api inferred
+      // input shapes from the description prose ("goal" for the own-check baseline). That made the stored row match
+      // unrelated goal traces and a variant's shape signature, which then upserted over the seed. The same mapping
+      // activity_create_variant applies before it posts.
+      const declaredIn = (t as { inputShapes?: unknown; input_shapes?: unknown });
+      const inputShapes = Array.isArray(declaredIn.input_shapes) ? declaredIn.input_shapes : Array.isArray(declaredIn.inputShapes) ? declaredIn.inputShapes : undefined;
+      const body = { ...(t as Record<string, unknown>), tags, proposed: false, org_id: "organizations:substrate", ...(inputShapes ? { input_shapes: inputShapes } : {}) };
       const w = await fetch(`${endpoint}/v2/activities/templates`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
       if (w.ok) {
         counts.upserted++;

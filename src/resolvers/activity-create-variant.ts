@@ -1,5 +1,5 @@
 import { readdir } from "node:fs/promises";
-import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, lookupShape } from "../config.js";
 import { readTuningNumber } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 
@@ -548,7 +548,53 @@ async function defaultRegistryLookup(): Promise<RegisteredTemplate[]> {
   return data.templates ?? [];
 }
 
-export async function resolveActivityCreateVariant(pointer: ActivityCreateVariantPointer): Promise<ResolverResult> {
+// ─── EVERY STEP RESOLVER MUST BE SERVED (all id prefixes) ───────────────────────────────────────────────────────────
+// A registered template whose step names a resolver nothing serves fails every run with "Resolver '<x>' is not
+// registered" (ias-executor-ts engine.ts), and is graded beta for it. Measured: a template-mitosis variant added a step
+// resolver an LLM invented (own_check_baseline_validate) to a seed that ran; every later run of it failed. The executor
+// runs a step resolver it holds in-process, or else looks the resolver up in discovery as a shape and proxies to a
+// producer (engine.ts, the pre-registration of discovery-routed resolvers), or runs it as a composed child when it names
+// a template. So a step is served when:
+//   - it is one of the executor host's in-process resolvers (below: code that runs inside goal-host, never advertised);
+//   - discovery has at least one producer of it (lookupShape, the same typed lookup every reader here uses); or
+//   - it names a template the catalogue holds (activities as resolvers).
+// A registry that cannot be read REFUSES the mint, with the reason: registering an unverifiable step would be fail-open.
+/** The resolvers the executor host runs in-process (ias-executor-ts hosts/goal-host.ts registrations, engine.ts compose /
+ *  compose_parallel, and goal-host-vessel's own local registrations). They are code inside goal-host, not registry rows. */
+export const EXECUTOR_LOCAL_RESOLVERS: ReadonlySet<string> = new Set([
+  "compose", "compose_parallel", "activity", "iteration", "llm-prompt", "impulse-resolve", "impulse_preparation",
+  "impulse_pool_selection", "producer_selection", "validation", "learning_signal_writer", "file-read", "bash", "llm",
+  "noop", "activity_recommendation", "impulse_cooccurrence",
+]);
+export type StepResolverServed = (resolver: string) => Promise<"served" | "absent" | "unreadable">;
+async function defaultStepResolverServed(resolver: string): Promise<"served" | "absent" | "unreadable"> {
+  if (EXECUTOR_LOCAL_RESOLVERS.has(resolver)) return "served";
+  const look = await lookupShape(resolver);
+  if (look.ok && look.producers.length > 0) return "served";
+  // Not a shape anything serves: it may name a template (a composed child).
+  try {
+    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates/${encodeURIComponent(resolver)}`, { headers: { Authorization: `ApiKey ${METABOB_API_KEY}` }, signal: AbortSignal.timeout(10_000) });
+    try { await r.body?.cancel(); } catch { /* swallow */ }
+    if (r.ok) return "served";
+    if (r.status === 404) return look.ok ? "absent" : "unreadable";
+    return "unreadable";
+  } catch {
+    return "unreadable";
+  }
+}
+/** The first task whose resolver is not served, or whose service could not be read; null when every step is served. */
+export async function unservedStepResolver(template: unknown, served: StepResolverServed): Promise<{ task: string; resolver: string; state: "absent" | "unreadable" } | null> {
+  const tasks = Array.isArray((template as { tasks?: unknown } | null)?.tasks) ? ((template as { tasks: unknown[] }).tasks) : [];
+  for (const [i, task] of tasks.entries()) {
+    const resolver = typeof (task as { resolver?: unknown } | null)?.resolver === "string" ? String((task as { resolver: string }).resolver) : "";
+    if (!resolver) continue;
+    const state = await served(resolver);
+    if (state !== "served") return { task: String((task as { id?: unknown }).id ?? `#${i}`), resolver, state };
+  }
+  return null;
+}
+
+export async function resolveActivityCreateVariant(pointer: ActivityCreateVariantPointer, opts: { stepResolverServed?: StepResolverServed; bootstrapSeed?: boolean } = {}): Promise<ResolverResult> {
   const url = `${METABOB_ENDPOINT}/v2/activities/templates`;
   // Template may arrive as a JSON string (from LLM output via interpolation); parse if needed.
   let templateObj: unknown = pointer.template;
@@ -1060,6 +1106,30 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
           `[reuse-before-mint] discover-by-shapes probe failed; proceeding to mint: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+  }
+
+  // EVERY STEP RESOLVER MUST BE SERVED (above), for every id prefix. The cold-start bulk seed (cli.ts seed-templates)
+  // runs before the fleet has registered, so it is the one caller that passes bootstrapSeed (an in-process option,
+  // never a pointer field a route could set).
+  if (!opts.bootstrapSeed && templateObj && typeof templateObj === "object") {
+    const unserved = await unservedStepResolver(templateObj, opts.stepResolverServed ?? defaultStepResolverServed);
+    if (unserved) {
+      const tid = String((templateObj as Record<string, unknown>)["id"] ?? "");
+      const detail = unserved.state === "absent"
+        ? `task "${unserved.task}" names resolver "${unserved.resolver}", which nothing serves (no in-process resolver, no discovery producer, no template of that id): every run would fail "Resolver '${unserved.resolver}' is not registered"`
+        : `task "${unserved.task}" names resolver "${unserved.resolver}", and the registry could not be read to show it is served: refused rather than registered unverified`;
+      console.warn(`[activity-create-variant] REFUSED ${tid || "(no id)"}${pointer.parentTemplateId ? ` (variant of ${pointer.parentTemplateId})` : ""}: ${detail}`);
+      return {
+        shape: "structuredError",
+        body: {
+          resolver: "activity_create_variant",
+          failure_mode: unserved.state === "absent" ? "unregistered_step_resolver" : "resolver_registry_unreadable",
+          task_id: unserved.task,
+          step_resolver: unserved.resolver,
+          detail,
+        },
+      };
     }
   }
 

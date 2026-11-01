@@ -17,10 +17,13 @@ export const OWN_CHECK_BASELINE_TEMPLATE: ActivityTemplate = {
     "red or green there: green_at_parent | red_code_reachable | red_environmental | unrunnable. The environmental " +
     "signals come from the shaped ownCheckEnvironmentPolicy, read at use time. Graded by its consumers' outcome " +
     "(admission exclusion, compose parent comparison), never at exit.",
+  // Its one task consumes no pool impulse (it reads the gap row by the gap_id variable), so the declared input shapes
+  // are none. Delivered as input_shapes [] (seed/deliver.ts), so activity-api infers nothing from the prose: an
+  // inferred "goal" made every goal trace a replay match and gave a variant the same shape signature.
   inputShapes: [],
   outputShapes: ["ownCheckBaseline", "substrateGap"],
   tags: ["lift.autonomous.loop", "phase:supply", "reach_decided_by:consumer"],
-  metadata: { seed_version: 1, reach_decided_by: "consumer" },
+  metadata: { seed_version: 2, reach_decided_by: "consumer" },
   variables: [{ name: "gap_id" }, { name: "base_ref" }],
   tasks: [
     {

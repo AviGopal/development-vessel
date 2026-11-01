@@ -155,7 +155,7 @@ async function landAndArm(prefix: string, check: string, e: ReturnType<typeof ev
   if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
   await sg.__settleBirthEvaluationsForTests();
   await tick();
-  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id) });
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id) });
   writeFileSync(join(CLONES, at.vessel, checkPathOf(id)), check);
   git(at.vessel, "add", "-A");
   git(at.vessel, "commit", "-q", "-m", `check ${id}`);

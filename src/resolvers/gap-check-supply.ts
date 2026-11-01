@@ -113,7 +113,11 @@ type Ledger = {
   state?: string;
   attempts?: number;
   last_dispatch_at?: string;
+  /** The check file, set only once it is read at origin/dev (the arm step). Rows written before that rule may carry the
+   *  name from the send. */
   test_file?: string;
+  /** The check file the test-writing goal was told to write, set at send: a name, not a file that exists. */
+  intended_test_file?: string;
   vessel?: string;
   dispatch_id?: string | null;
   goal?: string;
@@ -1808,7 +1812,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (armBudget <= 0 && gapStoreIsLocal()) break;
     const id = String(row["id"]);
     const meta = metaOf(row);
-    const ledger = ledgerOf(meta);
+    const sent = ledgerOf(meta);
+    // THE FILE THE GOAL WAS TOLD TO WRITE: intended_test_file, else test_file on a record written before the send kept
+    // the two apart. It becomes test_file below only once it is read at origin/dev.
+    const checkFile = sent.intended_test_file ?? sent.test_file;
     // A failed or lost goal's test may still land late: its titles arm the gap all the same.
     // A SETTLED JUDGEMENT (green_at_head, arm_refused, existence_only) IS TAKEN AGAIN WHEN WHAT IT READ HAS CHANGED: a
     // landed title it never judged (a reader since fixed: an escaped title was once dropped), or a different row region
@@ -1816,16 +1823,19 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // attempt backoff and was then sent a new goal whose baseline subtracted the landed check for good (a region
     // corrected or cleared after an arm refusal changed nothing). It is judged again now, on this path, against its own
     // baseline. A judgement written before judged_inputs existed reads as changed, once.
-    const settled = JUDGED_NOT_ARMED.has(String(ledger.state ?? ""));
-    if (!(settled || ledger.state === "goal_dispatched" || ledger.state === SEND_PENDING || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
+    const settled = JUDGED_NOT_ARMED.has(String(sent.state ?? ""));
+    if (!(settled || sent.state === "goal_dispatched" || sent.state === SEND_PENDING || sent.state === "dispatch_failed" || sent.state === "dispatch_lost" || sent.state === "non_attempt" || sent.state === "send_refused") || !checkFile || !sent.vessel) continue;
     // LANDED, NOT PRESENT: the check is read from the clone's origin/dev (landedCheckSource). A file only in the work
     // tree (a refused cutover's leftover, or a landing still on its way) arms nothing and writes nothing: if it lands,
     // a later tick arms it.
-    const landed = landedCheckSource(ledger.vessel, ledger.test_file, landedRefs);
+    const landed = landedCheckSource(sent.vessel, checkFile, landedRefs);
     if (landed.state !== "landed") {
-      if (!settled && existsSync(join(clonesRoot(), ledger.vessel, ledger.test_file))) notArmed.push({ id, reason: `${CHECK_NOT_LANDED}: ${ledger.test_file} is in the clone's work tree but not at origin/dev${landed.state === "unreadable" ? " (origin/dev unreadable)" : ""}` });
+      if (!settled && existsSync(join(clonesRoot(), sent.vessel, checkFile))) notArmed.push({ id, reason: `${CHECK_NOT_LANDED}: ${checkFile} is in the clone's work tree but not at origin/dev${landed.state === "unreadable" ? " (origin/dev unreadable)" : ""}` });
       continue;
     }
+    // THE CHECK IS AT origin/dev: from here every write of this row's ledger names it as test_file, the field readers
+    // take as "this gap has a check file". Set at send, it named a file that may never land.
+    const ledger = { ...sent, vessel: sent.vessel, test_file: checkFile };
     const src = landed.src;
     const baseline = Array.isArray(ledger.baseline_titles) ? ledger.baseline_titles : [];
     const titles = declaredTestTitles(src).filter((t) => !baseline.includes(t)).slice(0, 20);
@@ -2514,9 +2524,12 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const placement = await placeCompose({ gap_id: id, vessel, targets, armed: false }, localNode, placedThisTick, { arm: placementArmKnobs(rhythm.body) });
     const placed = placement.where === "peer" ? placement : null;
     if (placed) console.log(`[gap-check-supply] ${id}: placed on ${placed.node}: ${placed.why}`);
-    const { goal: _priorGoal, not_before: _priorNotBefore, placed_by: _priorPlacedBy, placement: _priorPlacement, ...ledgerRest } = ledger;
-    void _priorGoal; void _priorNotBefore; void _priorPlacedBy; void _priorPlacement;
-    const intent: Ledger = { ...ledgerRest, state: SEND_PENDING, attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
+    // THE SEND NAMES THE CHECK FILE, IT DOES NOT HAVE ONE: intended_test_file. test_file is written by the arm step once
+    // the file is at origin/dev; a prior attempt's is dropped here, so the record never claims a check this send has
+    // not produced.
+    const { goal: _priorGoal, not_before: _priorNotBefore, placed_by: _priorPlacedBy, placement: _priorPlacement, test_file: _priorTestFile, ...ledgerRest } = ledger;
+    void _priorGoal; void _priorNotBefore; void _priorPlacedBy; void _priorPlacement; void _priorTestFile;
+    const intent: Ledger = { ...ledgerRest, state: SEND_PENDING, attempts: attempts + 1, last_dispatch_at: nowIso, intended_test_file: testFile, vessel, mode,
       baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: placed ? placed.node : localNode, dispatch_host: placed ? placed.via : GOAL_HOST_ENDPOINT,
       ...(placed ? { placed_by: localNode, placement: placed.why } : {}), reason: "", outcome: {}, history: settledHistory(ledger) };
     const arm = { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "treatment" };

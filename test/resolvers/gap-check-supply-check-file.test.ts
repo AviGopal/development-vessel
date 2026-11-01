@@ -165,7 +165,7 @@ describe("B′ P3: the supply's goal names one out-of-suite check", () => {
     expect(goal).toMatch(/no network/i);
     expect(goal).toContain("Do not change src/");
     const led = ledgerOf(await storeRow(id));
-    expect(led).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), vessel: VESSEL, edit_site: SITE });
+    expect(led).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id), vessel: VESSEL, edit_site: SITE });
   });
 
   it("[MUST-FAIL] NO APPEND: a gap whose edit site already has an importing *.test.ts still gets its own check file", async () => {
@@ -176,7 +176,7 @@ describe("B′ P3: the supply's goal names one out-of-suite check", () => {
     expect(goal).not.toMatch(/^Append/);
     expect(goal).not.toContain("test/widget.test.ts");
     const led = ledgerOf(await storeRow(id));
-    expect(led["test_file"]).toBe(checkPathOf(id));
+    expect(led["intended_test_file"]).toBe(checkPathOf(id));
     expect(led["mode"]).not.toBe("append");
   });
 
@@ -185,7 +185,21 @@ describe("B′ P3: the supply's goal names one out-of-suite check", () => {
     await seed(id, { check_supply: { state: "arm_refused", attempts: 1, last_dispatch_at: new Date(clock - 100 * 3600_000).toISOString(), test_file: "test/gap-old.test.ts", vessel: VESSEL, mode: "new_file" } });
     await tick(later());
     expect(goalFor(id).length).toBe(1);
-    expect(ledgerOf(await storeRow(id))["test_file"]).toBe(checkPathOf(id));
+    expect(ledgerOf(await storeRow(id))["intended_test_file"]).toBe(checkPathOf(id));
+    expect(ledgerOf(await storeRow(id))["test_file"]).toBeUndefined();
+  });
+
+  // THE SEND NAMES A FILE IT HAS NOT PRODUCED: test_file was written at send, so readers took the name of a check that
+  // never landed for "this gap has a check". The send records intended_test_file; test_file only once the check lands.
+  it("[MUST-FAIL] the send records the check file as intended_test_file and writes no test_file", async () => {
+    const id = T("p3-intended");
+    await seed(id);
+    await tick(later());
+    expect(goalFor(id).length).toBe(1);
+    const led = ledgerOf(await storeRow(id));
+    expect(led["state"]).toBe("goal_dispatched");
+    expect(led["intended_test_file"]).toBe(checkPathOf(id));
+    expect("test_file" in led).toBe(false);
   });
 });
 
@@ -197,9 +211,11 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     const title = `p3 widget is two ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(2); });\n`);
     landCheck(join(CLONES, VESSEL), checkPathOf(id));
+    expect(ledgerOf(await storeRow(id))["test_file"]).toBeUndefined(); // sent, not landed: no check file yet
     await tick(later());
     const m = metaOf(await storeRow(id));
     expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
+    expect(ledgerOf(await storeRow(id))["test_file"]).toBe(checkPathOf(id)); // the arm read it at origin/dev
     expect(m["evidence_resolve"]).toEqual({ shape: "test_suite", input: { vessel: `repos/${VESSEL}`, test_file: checkPathOf(id), only_tests: [title] }, zero_field: "requested_not_passing" });
     expect(m["edit_site"]).toBe(SITE);
     expect(m["predicate_birth_verdict"]).toBe("present");

@@ -191,7 +191,7 @@ describe("a narrowed child's copied armed ledger is cleared", () => {
     rhythms = [liveRhythm(now + 11 * MIN, 40)];
     await tick(now + 11 * MIN);
     expect(goals.filter((g) => g.variables?.["gap_id"] === id).length).toBe(1);
-    expect(ledgerOf(await storeRow(id))["test_file"]).toBe(supply.checkSupplyTestFile(id));
+    expect(ledgerOf(await storeRow(id))["intended_test_file"]).toBe(supply.checkSupplyTestFile(id));
   });
 
   it("[CONTROL] a child armed after its narrowing keeps its ledger, and nothing is sent", async () => {

@@ -572,6 +572,9 @@ export interface RepairInputs {
   /** Set by the live reader when the lane landing's authoring execution is known nowhere (its attemptIntent nor
    *  attemptAuthoring): the labels on it cannot be read, so the closure is unattributable. Absent: not asked. */
   authoringUnknown?: boolean;
+  /** The row's check_supply.test_file is known never added at origin/dev in its vessel's clone (checkSupplyFileAbsent):
+   *  a name from a send, not a check. Absent or false: the name counts as before. */
+  checkSupplyFileAbsent?: boolean;
   nowMs: number;
 }
 const EXCLUDED_CLOSE_RE = /expired|not_redetected|producer_now_exists|duplicate|superseded|stale_low_value|persistent_compose_failure/;
@@ -579,19 +582,34 @@ const DURABLE_MS = 24 * 3600_000;
 const LANE_AUTHOR = "Substrate Autonomous";
 const splitSite = (site: string): { vessel: string; path: string } | null => { const m = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim()); return m ? { vessel: m[1]!, path: m[2]! } : null; };
 const metaRec = (r: GapRow | null): Record<string, unknown> => { const m = r?.["classification_metadata"]; return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : {}; };
-/** The row's own check file: check_supply.test_file, or (recommit rows) evidence_resolve.input.test_file. */
-export function ownCheckFile(row: GapRow | null): string | null {
+/** The row's own check file: check_supply.test_file, or (recommit rows) evidence_resolve.input.test_file. A
+ *  check_supply.test_file known absent (`checkSupplyFileAbsent`) is not a check: an older send wrote the name before
+ *  any file existed, so the row falls back to its evidence_resolve check, else has none. */
+export function ownCheckFile(row: GapRow | null, checkSupplyFileAbsent = false): string | null {
   const m = metaRec(row);
   const cs = m["check_supply"] as { test_file?: unknown } | undefined;
-  if (cs && typeof cs.test_file === "string" && cs.test_file) return cs.test_file;
+  if (cs && typeof cs.test_file === "string" && cs.test_file && !checkSupplyFileAbsent) return cs.test_file;
   const er = m["evidence_resolve"] as { input?: { test_file?: unknown } } | undefined;
   return er && er.input && typeof er.input.test_file === "string" && er.input.test_file ? er.input.test_file : null;
 }
+/** Is the row's check_supply.test_file a sent name that never landed? Only a ledger the arm step has not judged can carry
+ *  one (armed and the judged-not-armed states are written after the arm step read the file at origin/dev). Read in the
+ *  LEDGER's vessel (check_supply.vessel, else the edit site's), through the judge's own clone and history reads
+ *  (cloneOf, firstCommit): true only when that history is read and has no add of the file; no clone or an unreadable
+ *  history decides nothing (false). */
+const ARM_JUDGED_STATES: ReadonlySet<string> = new Set(["armed", "arm_refused", "green_at_head", "existence_only"]);
+export function checkSupplyFileAbsentIn(row: GapRow | null, siteRaw: string, deps: Pick<JudgementDeps, "cloneOf" | "firstCommit">): boolean {
+  const cs = metaRec(row)["check_supply"] as { state?: unknown; test_file?: unknown; vessel?: unknown } | undefined;
+  if (!cs || typeof cs.test_file !== "string" || !cs.test_file || ARM_JUDGED_STATES.has(String(cs.state ?? ""))) return false;
+  const vessel = (typeof cs.vessel === "string" && cs.vessel ? cs.vessel : splitSite(siteRaw)?.vessel ?? "").replace(/^repos\//, "").replace(/\/+$/, "");
+  const dir = vessel ? deps.cloneOf(vessel) : null;
+  return dir !== null && deps.firstCommit(dir, cs.test_file.replace(/^\/+/, "")) === undefined;
+}
 /** Link 2: is the own check honest? false on a recorded defect, unjudged when a proxy says review or a source is unread. */
-export function judgeCheckHonest(row: GapRow, checkSource: string | null, siteSource: string | null): CheckHonest {
+export function judgeCheckHonest(row: GapRow, checkSource: string | null, siteSource: string | null, checkSupplyFileAbsent = false): CheckHonest {
   const m = metaRec(row);
   const cs = (m["check_supply"] ?? {}) as { state?: unknown; reason?: unknown };
-  const check = ownCheckFile(row);
+  const check = ownCheckFile(row, checkSupplyFileAbsent);
   const site = splitSite(String(m["edit_site"] ?? ""));
   if (!check) return { value: false, reason: "no own check on the row (check_supply.test_file / evidence_resolve.input.test_file)" };
   if (site && site.path.split("/").pop() === check.split("/").pop()) return { value: false, reason: "the edit_site is the check file itself" };
@@ -620,7 +638,7 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   }
   const m = metaRec(row);
   const site = splitSite(String(m["edit_site"] ?? ""));
-  const check = ownCheckFile(row);
+  const check = ownCheckFile(row, inp.checkSupplyFileAbsent === true);
   const closed = String(row["status"] ?? "") === "closed";
   // Never updated_at: a later write would move the durability clock.
   const closedAt = String(row["closed_at"] ?? m["closed_at"] ?? "") || null;
@@ -655,7 +673,7 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
     : src === "substrate_detected" ? { state: "pass", why: "source substrate_detected, and no operator-filed lineage ancestor" }
     : { state: "fail", why: `source ${src ? JSON.stringify(src) : "unset"}: autonomous only when substrate_detected (addendum 1: unset fails)` };
   // link 2
-  const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource);
+  const honest = judgeCheckHonest(row, inp.checkSource, inp.siteSource, inp.checkSupplyFileAbsent === true);
   // link 3: the attempt is autonomous, and the fix is the lane's commit on the edit site, on origin/dev
   let l3: LinkState;
   if (landing.directed !== true && !intentIsAutonomous(landing.directed)) l3 = { state: "fail", why: `the attempt's directed is ${landing.directed === undefined ? "absent" : JSON.stringify(landing.directed)}: autonomous only when directed === false exactly (absent or unknown is not)` };
@@ -1908,7 +1926,8 @@ const FACTS: Record<string, FactFn> = {
       const m = metaRec(g);
       const siteRaw = String(m["edit_site"] ?? "");
       const site = splitSite(siteRaw);
-      const check = ownCheckFile(g);
+      const checkSupplyFileAbsent = checkSupplyFileAbsentIn(g, siteRaw, deps);
+      const check = ownCheckFile(g, checkSupplyFileAbsent);
       const siteDir = site ? deps.cloneOf(site.vessel) : null;
       // The fix is read in the EDIT SITE's clone only (link 3): a sha found elsewhere is not this fix.
       const fullSha = siteDir ? deps.revParse(siteDir, l.sha) ?? "" : "";
@@ -1935,7 +1954,7 @@ const FACTS: Record<string, FactFn> = {
       let labelRead: Awaited<ReturnType<JudgementDeps["labels"]>> = null;
       try { labelRead = await deps.labels(traceIds); } catch { labelRead = null; }
       const j = judgeRepairClosure({
-        landing: l, row: g, byId,
+        landing: l, row: g, byId, checkSupplyFileAbsent,
         regressed: reg ? { key: reg.key, source: String(reg.record["source"] ?? "settle_regressed"), at: String(reg.record["at"] ?? reg.at) } : null,
         reverts: fixDir ? deps.revertsOf(fixDir, fullSha) : null,
         fix: fixDir ? deps.fixCommit(fixDir, fullSha) : null,

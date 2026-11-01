@@ -224,7 +224,7 @@ async function landAndArm(prefix: string, check: string, forwarding = false): Pr
   const id = T(prefix);
   await seed(id);
   await tick(later(), forwarding);
-  expect(ledgerOf(await stored(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: SITE });
+  expect(ledgerOf(await stored(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id), edit_site: SITE });
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
   git("add", "-A");
   git("commit", "-q", "-m", `check ${id}`);

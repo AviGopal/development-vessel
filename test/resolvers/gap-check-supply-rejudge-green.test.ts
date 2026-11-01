@@ -136,7 +136,7 @@ async function landAndArm(prefix: string, check: string): Promise<Row> {
   const id = T(prefix);
   await seed(id);
   await tick(later());
-  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: SITE });
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id), edit_site: SITE });
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
   landCheck(join(CLONES, VESSEL), checkPathOf(id));
   await tick(later());
@@ -162,7 +162,7 @@ async function dispatchAndLand(prefix: string, check: string): Promise<string> {
   const id = T(prefix);
   await seed(id);
   await tick(later());
-  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id) });
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id) });
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
   landCheck(join(CLONES, VESSEL), checkPathOf(id));
   return id;

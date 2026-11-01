@@ -170,7 +170,7 @@ describe("echo-satisfiable checks are refused at arm", () => {
     if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
     await sg.__settleBirthEvaluationsForTests();
     await tick();
-    expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id) });
+    expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id) });
     writeFileSync(join(CLONES, CDB.vessel, checkPathOf(id)), CHECK_ECHO);
     git(CDB.vessel, "add", "-A");
     git(CDB.vessel, "commit", "-q", "-m", `check ${id}`);

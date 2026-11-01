@@ -159,7 +159,7 @@ async function landAndArm(prefix: string, at: { vessel: string; siteRel: string 
   const site = `repos/${at.vessel}/${at.siteRel}`;
   await seed(id, site, summary, region);
   await tick(later());
-  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: site });
+  expect(ledgerOf(await storeRow(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id), edit_site: site });
   writeFileSync(join(CLONES, at.vessel, checkPathOf(id)), check);
   git(at.vessel, "add", "-A");
   git(at.vessel, "commit", "-q", "-m", `check ${id}`);

@@ -190,7 +190,7 @@ async function landOnForwardingNode(prefix: string, check: string): Promise<{ id
   const id = T(prefix);
   await seed(id);
   await forwardingTick(later());
-  expect(ledgerOf(await stored(id))).toMatchObject({ state: "goal_dispatched", test_file: checkPathOf(id), edit_site: SITE });
+  expect(ledgerOf(await stored(id))).toMatchObject({ state: "goal_dispatched", intended_test_file: checkPathOf(id), edit_site: SITE });
   writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), check);
   landCheck(join(CLONES, VESSEL), checkPathOf(id));
   await forwardingTick(later()); // the hand-off: the holder measures the check in its own turn

@@ -239,7 +239,7 @@ describe("system-authored gap checks: (b) the rhythm tick dispatches one test-wr
     expect(m["gap_check_supply_arm"]).toBe("treatment");
     const ledger = ledgerOf(m);
     expect(ledger["state"]).toBe("goal_dispatched");
-    expect(ledger["test_file"]).toMatch(CHECK_RE);
+    expect(ledger["intended_test_file"]).toMatch(CHECK_RE);
     expect(ledger["edit_site"]).toBe(SITE);
     expect(ledger["baseline_titles"]).toEqual([]);
     expect(ledger["vessel"]).toBe(VESSEL);
@@ -279,7 +279,7 @@ async function landTest(prefix: string, content: (title: string) => string, at: 
   await seed(id, `${prefix} fixture ${RUN}: local-tools-vessel containShell lets a GIT_DIR form through`, {});
   rhythms = [dueRhythm({ max_per_tick: 50 })];
   await tick({ now_ms: at });
-  const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
+  const testFile = String(ledgerOf(metaOf(await storeRow(id)))["intended_test_file"] ?? "");
   expect(testFile).toMatch(CHECK_RE);
   const title = `${prefix} reproduces ${RUN}`;
   writeFileSync(join(CLONES, VESSEL, testFile), content(title));
@@ -324,8 +324,8 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     await tick({ now_ms: Date.now() + 1200 * 3600_000 });
     expect(goals.filter((g) => g.variables?.["gap_id"] === first).length).toBe(1);
     expect(goals.filter((g) => g.variables?.["gap_id"] === second).length).toBe(1);
-    const f1 = String(ledgerOf(metaOf(await storeRow(first)))["test_file"]);
-    const f2 = String(ledgerOf(metaOf(await storeRow(second)))["test_file"]);
+    const f1 = String(ledgerOf(metaOf(await storeRow(first)))["intended_test_file"]);
+    const f2 = String(ledgerOf(metaOf(await storeRow(second)))["intended_test_file"]);
     expect(f1).toMatch(CHECK_RE);
     expect(f2).toMatch(CHECK_RE);
     expect(f1).not.toBe(f2);
@@ -347,7 +347,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     await tick({ now_ms: t0 + 30 * 3600_000 });
     const led = ledgerOf(metaOf(await storeRow(id)));
     expect(led["state"]).toBe("goal_dispatched");
-    expect(led["test_file"]).toBe(testFile);
+    expect(led["intended_test_file"]).toBe(testFile);
     expect(led["baseline_titles"]).toEqual([oldTitle]);
     const newTitle = `sgc-baseline new red ${RUN}`;
     writeFileSync(join(CLONES, VESSEL, testFile), readFileSync(join(CLONES, VESSEL, testFile), "utf-8") + `test("${newTitle}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`);
@@ -390,7 +390,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     await seed(id, `sgc-noimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2600 * 3600_000 });
-    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
+    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["intended_test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\ntest("noimport red ${RUN}", () => { expect(1).toBe(2); });\n`);
     landCheck(join(CLONES, VESSEL), testFile);
@@ -408,7 +408,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     await seed(id, `sgc-otherimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2800 * 3600_000 });
-    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
+    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["intended_test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_y_ts } from "../../src/site-y.js";\ntest("otherimport red ${RUN}", () => { expect(site_y_ts).toBe(2); });\n`);
     landCheck(join(CLONES, VESSEL), testFile);
@@ -426,7 +426,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     await seed(id, `sgc-siteimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 3000 * 3600_000 });
-    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
+    const testFile = String(ledgerOf(metaOf(await storeRow(id)))["intended_test_file"] ?? "");
     expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_x_ts } from "../../src/site-x.js";\ntest("siteimport red ${RUN}", () => { expect(site_x_ts).toBe(2); });\n`);
     landCheck(join(CLONES, VESSEL), testFile);

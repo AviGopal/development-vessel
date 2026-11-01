@@ -185,7 +185,7 @@ export function vesselFileOf(path: unknown, vesselHint?: unknown): { vessel: str
 }
 /**
  * A GAP WHOSE EDIT SITE IS ITS OWN CHECK CAN ONLY BE CLOSED BY SELF-CERTIFICATION. When the file the lane edits is the
- * test file its check runs (evidence_resolve test_suite's input.test_file, or the supply's check_supply.test_file),
+ * test file its check runs (evidence_resolve test_suite's input.test_file, or the supply's check file by name),
  * the only edit that greens the check is editing the check. The semantic gate vetoes that edit every time, so the row
  * loops until its lineage cap (recommit-route-edit-7ffa6330-step-2-*: edit_site == test_file ==
  * src/resolvers/substrate-gap.test.ts, about 5 composes in 2 h on two nodes). Paths are compared repo-relative after
@@ -200,8 +200,10 @@ export function editSiteIsOwnCheck(row: Record<string, unknown>): { site: string
   const checks: Array<{ path: unknown; vessel: unknown }> = [];
   const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
   if (er && typeof er === "object" && er.shape === "test_suite" && er.input && typeof er.input === "object") checks.push({ path: er.input.test_file, vessel: er.input.vessel });
-  const ledger = meta["check_supply"] as { test_file?: unknown; vessel?: unknown } | null | undefined;
-  if (ledger && typeof ledger === "object") checks.push({ path: ledger.test_file, vessel: ledger.vessel });
+  // The supply's check file by NAME (the file its goal writes), landed or not: an edit site that is that file is the
+  // same loop before the check lands. intended_test_file at send; test_file on older records and once landed.
+  const ledger = meta["check_supply"] as { test_file?: unknown; intended_test_file?: unknown; vessel?: unknown } | null | undefined;
+  if (ledger && typeof ledger === "object") for (const path of [ledger.intended_test_file, ledger.test_file]) if (path !== undefined) checks.push({ path, vessel: ledger.vessel });
   for (const c of checks) {
     const f = vesselFileOf(c.path, c.vessel);
     if (f && f.rel === site.rel && (!f.vessel || !site.vessel || f.vessel === site.vessel)) return { site: rawSite, check: String(c.path) };

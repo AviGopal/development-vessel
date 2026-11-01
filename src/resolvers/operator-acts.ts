@@ -148,6 +148,127 @@ export function lineageUnknown(gid: string, byId: ReadonlyMap<string, GapRow>): 
   return out;
 }
 
+/**
+ * The gap sources a code writer stamps: `substrate_detected` (the shared detector source) and the system writers that
+ * stamp their own name: goal-deficiency.ts DEFICIENCY_SOURCE, substrate-gap.ts coerceFlatGapPointer's default for a
+ * flat pointer, the super repo's joint-liveness tick, goal-host's auto-draft decision rows. A hard-coded list: a writer
+ * that starts stamping a new name reads as free text until it is added here.
+ */
+export const SYSTEM_GAP_SOURCES: readonly string[] = ["substrate_detected", "goal_deficiency_recognition", "walk_flat_pointer", "joint_liveness_detector", "goal_host_auto_draft"];
+
+/** Why one row's own fields do not mark it system-born, or null when they do: its source is not a SYSTEM_GAP_SOURCES
+ *  entry (unset, a bare "operator", operator:*, human_reported, or any other free text), or its filed_by names an
+ *  operator. `operator` is true when the row names an operator or a person (source operator:* or human_reported, or
+ *  filed_by operator:*): the autonomy judge's operator-filed test. */
+export function rowOriginFault(r: GapRow | undefined): { operator: boolean; text: string } | null {
+  const s = typeof r?.["source"] === "string" ? (r["source"] as string) : "";
+  const fb = String(metaOf(r)["filed_by"] ?? "");
+  if (s.startsWith("operator:") || s === "human_reported") return { operator: true, text: `source ${s}` };
+  if (fb.startsWith("operator:")) return { operator: true, text: `filed_by ${fb}` };
+  if (SYSTEM_GAP_SOURCES.includes(s)) return null;
+  if (!s) return { operator: false, text: "source unset" };
+  if (s === "operator") return { operator: false, text: `source "operator" (bare, no operator id)` };
+  return { operator: false, text: `source ${JSON.stringify(s.slice(0, 60))} (free text, no system writer)` };
+}
+
+/**
+ * A gap store read indexed for lineage reads (lineageIndex): the same rows as the map it was built from, plus the
+ * id rule's lookup built once from its keys (core -> the keys of that core, with their recommit depth), so a pass
+ * that reads the origin of many rows scans the keys once instead of once per row. lineageOrigin given one returns
+ * exactly what it returns given the plain map (indexedLineageAncestors / indexedLineageUnknown are lineageAncestors /
+ * lineageUnknown over the lookup; test/self-fact-evaluator/lineage-index-parity.test.ts pins it). A write through
+ * set / delete / clear drops the lookup, which is rebuilt at the next read.
+ */
+export class LineageIndex extends Map<string, GapRow> {
+  private coresMemo: Map<string, Array<{ k: string; depth: number }>> | null = null;
+  override set(k: string, v: GapRow): this { this.coresMemo = null; return super.set(k, v); }
+  override delete(k: string): boolean { this.coresMemo = null; return super.delete(k); }
+  override clear(): void { this.coresMemo = null; super.clear(); }
+  /** core -> the keys of that core and their recommit depth, in key order. */
+  cores(): ReadonlyMap<string, ReadonlyArray<{ k: string; depth: number }>> {
+    if (!this.coresMemo) {
+      const m = new Map<string, Array<{ k: string; depth: number }>>();
+      for (const k of this.keys()) { const c = coreId(k); const a = m.get(c.core); if (a) a.push({ k, depth: c.depth }); else m.set(c.core, [{ k, depth: c.depth }]); }
+      this.coresMemo = m;
+    }
+    return this.coresMemo;
+  }
+}
+/** One lineage index over a store read, built once per pass (LineageIndex). */
+export function lineageIndex(byId: ReadonlyMap<string, GapRow>): LineageIndex {
+  return byId instanceof LineageIndex ? byId : new LineageIndex(byId);
+}
+/** lineageAncestors over a LineageIndex: the same explicit-link walk, and the id rule read from the lookup (a key k is
+ *  an ancestor when core(k) is the part of core(gid) before one of its "-", or core(gid) itself at a lower depth). */
+export function indexedLineageAncestors(gid: string, idx: LineageIndex): Set<string> {
+  const out = new Set<string>();
+  const todo = [gid];
+  while (todo.length > 0) {
+    const cur = idx.get(todo.pop()!);
+    if (!cur) continue;
+    const m = metaOf(cur);
+    for (const k of LINK_FIELDS) {
+      const v = m[k] || cur[k];
+      if (typeof v === "string" && idx.has(v) && v !== gid && !out.has(v)) { out.add(v); todo.push(v); }
+    }
+  }
+  const g = coreId(gid);
+  const cores = idx.cores();
+  for (let i = g.core.indexOf("-"); i >= 0; i = g.core.indexOf("-", i + 1)) {
+    for (const e of cores.get(g.core.slice(0, i)) ?? []) if (e.k !== gid) out.add(e.k);
+  }
+  for (const e of cores.get(g.core) ?? []) if (e.k !== gid && e.depth < g.depth) out.add(e.k);
+  return out;
+}
+/** lineageUnknown over a LineageIndex: the same link walk, and the recommit parent read from the lookup. */
+export function indexedLineageUnknown(gid: string, idx: LineageIndex): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>([gid]);
+  const todo = [gid];
+  while (todo.length > 0) {
+    const id = todo.pop()!;
+    const cur = idx.get(id);
+    if (!cur) continue;
+    const m = metaOf(cur);
+    for (const k of LINK_FIELDS) {
+      const v = m[k] || cur[k];
+      if (typeof v !== "string" || v.length === 0 || v === gid) continue;
+      if (!idx.has(v)) { out.push(`lineage: ${id === gid ? "the row" : `ancestor ${id.slice(-60)}`} links ${k}=${v.slice(-60)}, which is not in the gap store read`); continue; }
+      if (!seen.has(v)) { seen.add(v); todo.push(v); }
+    }
+  }
+  const g = coreId(gid);
+  if (g.depth > 0 && !(idx.cores().get(g.core) ?? []).some((e) => e.k !== gid && e.depth < g.depth)) {
+    out.push(`lineage: ${gid.slice(-60)} is a recommit (depth ${g.depth}) and no row of core ${g.core.slice(-60)} at a lower depth is in the gap store read`);
+  }
+  return out;
+}
+
+/**
+ * The origin of a row's lineage: the first of [the row, then its lineageAncestors sorted] whose own fields are not
+ * system-born (rowOriginFault), or null when every one is. The walk is lineageAncestors' (cycle-safe, each id visited
+ * once, bounded by the store read). `unseen` is lineageUnknown's: an ancestor the store read does not hold is unknown,
+ * never clean, so a caller that needs a yes reads "system-born" only when there is no fault AND nothing is unseen.
+ * A caller that reads many rows passes a LineageIndex (lineageIndex(byId), built once): same result, one key scan.
+ */
+export function lineageOrigin(gid: string, row: GapRow | undefined, byId: ReadonlyMap<string, GapRow>): { fault: { id: string; operator: boolean; text: string } | null; unseen: string[] } {
+  const own = rowOriginFault(row);
+  let fault = own ? { id: gid, ...own } : null;
+  if (!fault) {
+    for (const k of [...(byId instanceof LineageIndex ? indexedLineageAncestors(gid, byId) : lineageAncestors(gid, byId))].sort()) {
+      const f = rowOriginFault(byId.get(k));
+      if (f) { fault = { id: k, ...f }; break; }
+    }
+  }
+  return { fault, unseen: byId instanceof LineageIndex ? indexedLineageUnknown(gid, byId) : lineageUnknown(gid, byId) };
+}
+
+/** A row is system-born when it and every lineage ancestor are (lineageOrigin: no fault), and no ancestor is unseen. */
+export function isSystemBornLineage(row: GapRow, byId: ReadonlyMap<string, GapRow>): boolean {
+  const o = lineageOrigin(String(row["id"] ?? ""), row, byId);
+  return o.fault === null && o.unseen.length === 0;
+}
+
 /** An instant from an ISO time; fractional seconds past milliseconds are dropped (the parser reads three digits). */
 export function isoMs(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;

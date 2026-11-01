@@ -247,7 +247,9 @@ export function citedExistingFile(gap: Record<string, unknown>): string | null {
  * as own-check-baseline.ts stores them: {path: "repos/<vessel>/src/…", fn, line}, each read through editSitePath), only
  * for a red_code_reachable reading. A green, environmental or unrunnable reading names no target. The caller passes a
  * reading it accepted (ownCheckBaselineFor: measured at the vessel's current origin/dev, for the check the row names
- * now) and, for autonomous work, the autonomy-scope match: an excluded file is skipped, and `scopeHit` names the first.
+ * now) and, for autonomous work, the autonomy-scope match. The call path is the files the red tests run through, so ONE
+ * excluded existing file on it (first or later) makes the whole path no autonomous target: `files` is empty and
+ * `scopeHit` names the first excluded file. A later in-scope file does not ground or localize a fix the lane cannot land.
  * ONE reader for every consumer of the call path as a target: admission's grounding and gap-to-feature's localizer.
  */
 export function ownCheckCallPathFiles(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: ((path: string) => string | null) | null): { files: string[]; scopeHit: string | null } {
@@ -257,12 +259,12 @@ export function ownCheckCallPathFiles(b: { verdict?: unknown; call_path?: unknow
   for (const e of b.call_path as Array<{ path?: unknown }>) {
     const p = typeof e?.path === "string" ? editSitePath(e.path) : "";
     if (!/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(p) || !repoPathExists(p) || files.includes(p)) continue;
-    // An existing file the autonomy scope excludes is lane core: it is no autonomous target (the first hit is kept).
+    // An existing file the autonomy scope excludes is lane core: the red tests run through it (the first hit is kept).
     const hit = excludes ? excludes(p) : null;
     if (hit) { scopeHit ??= hit; continue; }
     files.push(p);
   }
-  return { files, scopeHit };
+  return scopeHit ? { files: [], scopeHit } : { files, scopeHit };
 }
 /** The first file ownCheckCallPathFiles returns: what grounds a gap at admission. */
 export function ownCheckCallPathFile(b: { verdict?: unknown; call_path?: unknown } | null | undefined, excludes?: ((path: string) => string | null) | null): { file: string | null; scopeHit: string | null } {
@@ -854,7 +856,7 @@ export async function admitActionableGaps(
     {
       const onPath = ownCheckCallPathFile(ocb, (p) => autonomyScopeExcludes(scope, p));
       if (onPath.file) { groundedBy[id] = "own_check_baseline_call_path"; admitted.push(g); continue; }
-      // Every existing file on the path is lane core: out of autonomous reach, refused by scope (not ungroundable).
+      // An existing file on the path is lane core: out of autonomous reach, refused by scope (not ungroundable).
       if (onPath.scopeHit) { excluded.push({ id, reason: `autonomy_scope(own_check_baseline call_path ${onPath.scopeHit})` }); continue; }
     }
 

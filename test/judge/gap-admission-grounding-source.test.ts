@@ -187,8 +187,8 @@ describe("CONTROLS: nothing else on a reading grounds a gap", () => {
 // the excluded entry, so it passed the autonomy-scope check; once the grounding read the file through the note, such a
 // row was admitted as lane work. The scope match now also reads the file the site names (gap-policy editSitePath, the
 // one rule citedExistingFile uses). Tightening only: what the match refused before it still refuses, by the same entry.
-// A code-reachable call path grounds only on a file the scope admits; one whose existing files are all excluded is
-// refused by scope.
+// A code-reachable call path grounds only when the scope admits every existing file on it: the red tests run through
+// each one, so one excluded file (first or later) refuses the row by scope, whatever in-scope file follows.
 const autonomyScopeExcludes = modPolicy.autonomyScopeExcludes as (s: unknown, p: string) => string | null;
 const editSitePath = modPolicy.editSitePath as ((s: string) => string) | undefined;
 const EXCLUDED = ["repos/llm-resolver-vessel/src/index.ts", "repos/activity-api/src/lib/posterior-update.ts", "repos/goal-host-vessel/test/ratchet/"];
@@ -211,14 +211,41 @@ describe("the autonomy-scope match reads the file a free-text site names", () =>
     expect(reasonOf("scope-paren-adm")).toBe("autonomy_scope(repos/llm-resolver-vessel/src/index.ts)");
   });
 
-  it("MUST-FAIL a call path whose only existing files are excluded is refused by scope; with an in-scope file it grounds on that file", async () => {
+  it("CONTROL a call path whose only existing files are excluded is refused by scope, as before", async () => {
     const lane = await admitUnderScope([creditRow("scope-cw-lane", { own_check_baseline: reading("red_code_reachable", [CALL_PATH[0]!]) })]);
     expect(lane.admittedIds).not.toContain("scope-cw-lane");
     expect(lane.reasonOf("scope-cw-lane")).toBe("autonomy_scope(own_check_baseline call_path repos/activity-api/src/lib/posterior-update.ts)");
+  });
+
+  // The live credit-writers shape: its edit_site names a directory, and its red check runs through posterior-update.ts
+  // (excluded) and then failure-class.ts (in scope). Grounding it on failure-class.ts admitted a fix the lane cannot land.
+  it("MUST-FAIL the credit-writers shape (first call-path file excluded, a later one in scope) is refused by scope, not admitted", async () => {
     const mixed = await admitUnderScope([creditRow("scope-cw-mixed", { own_check_baseline: reading("red_code_reachable") })]);
-    expect(mixed.by("scope-cw-mixed")).toBe("own_check_baseline_call_path");
+    expect(mixed.admittedIds).not.toContain("scope-cw-mixed");
+    expect(mixed.by("scope-cw-mixed")).toBeUndefined();
+    expect(mixed.reasonOf("scope-cw-mixed")).toBe("autonomy_scope(own_check_baseline call_path repos/activity-api/src/lib/posterior-update.ts)");
     const pick = (modAdmission.ownCheckCallPathFile as (b: unknown, x?: (p: string) => string | null) => { file: string | null } | string | null)(reading("red_code_reachable"), (p) => autonomyScopeExcludes(SCOPE, p));
-    expect(typeof pick === "object" && pick !== null ? pick.file : pick).toBe("repos/activity-api/src/lib/failure-class.ts");
+    expect(typeof pick === "object" && pick !== null ? pick.file : pick).toBeNull();
+  });
+
+  it("MUST-FAIL an excluded file LATER on the call path refuses it too: the red tests run through it", async () => {
+    const later = await admitUnderScope([creditRow("scope-cw-later", { own_check_baseline: reading("red_code_reachable", [CALL_PATH[1]!, CALL_PATH[0]!]) })]);
+    expect(later.admittedIds).not.toContain("scope-cw-later");
+    expect(later.reasonOf("scope-cw-later")).toBe("autonomy_scope(own_check_baseline call_path repos/activity-api/src/lib/posterior-update.ts)");
+  });
+
+  it("CONTROL a call path whose existing files are all in scope still grounds, on its first file", async () => {
+    const open = await admitUnderScope([creditRow("scope-cw-open", { own_check_baseline: reading("red_code_reachable", [CALL_PATH[1]!, { path: "repos/activity-api/src/lib/missing.ts", fn: "f", line: 1 }]) })]);
+    expect(open.admittedIds).toContain("scope-cw-open");
+    expect(open.by("scope-cw-open")).toBe("own_check_baseline_call_path");
+    const pick = (modAdmission.ownCheckCallPathFile as (b: unknown, x?: (p: string) => string | null) => { file: string | null })(reading("red_code_reachable", [CALL_PATH[1]!]), (p) => autonomyScopeExcludes(SCOPE, p));
+    expect(pick.file).toBe("repos/activity-api/src/lib/failure-class.ts");
+  });
+
+  it("CONTROL a row grounded by its own in-scope bare edit_site is unchanged, whatever its call path names", async () => {
+    const site = await admitUnderScope([creditRow("scope-cw-site", { edit_site: "repos/activity-api/src/lib/failure-class.ts", own_check_baseline: reading("red_code_reachable") })]);
+    expect(site.admittedIds).toContain("scope-cw-site");
+    expect(site.by("scope-cw-site")).toBe("edit_site");
   });
 
   it("one exported normaliser: the scope match and citedExistingFile read the same file from a site", () => {

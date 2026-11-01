@@ -2,8 +2,9 @@
 // function names) is admitted when its own check's code-reachable baseline names an existing in-scope file on its call
 // path (gap-admission ownCheckCallPathFiles). gap_to_feature then localized it from its text alone: the grep found no
 // confident file, and the pick was marked localization_failed, filed a "needs a change-site" question and fired an
-// escalation, every time. localizeGap now takes the same reader's first in-scope file before any search, and a search
-// pick the autonomy scope excludes is no confident file.
+// escalation, every time. localizeGap now takes the same reader's first file before any search, and a search pick the
+// autonomy scope excludes is no confident file. The reader names no file for a call path that runs through an excluded
+// file (first or later): the red tests run through lane core, so no in-scope file on it is a landable target.
 // Driven through an auto-pick tick of resolveGapToFeature (judge-split harness: in-memory store, routed fetch with
 // unrouted calls recorded, stand-in compose and question writer), plus localizeGap directly for the controls.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -54,24 +55,32 @@ afterEach(() => { setScopeDeps(null); });
 afterAll(() => restoreHarness());
 
 describe("a gap admitted on its own check's call path is localized to that file", () => {
-  // The live row's scope: posterior-update.ts, first on its call path, is excluded (as on the live pin); failure-class.ts is not.
-  it("MUST-FAIL the credit-writers row shape: failure-class.ts is the confident target; no localization_failed, no question, no escalation", async () => {
+  // The live row's scope: posterior-update.ts, first on its call path, is excluded; failure-class.ts is not. The red
+  // tests run through the excluded file, so neither admission nor the localizer takes failure-class.ts from the path.
+  it("MUST-FAIL the credit-writers row shape is not picked: admission refuses it by scope, no compose, no escalation", async () => {
     scopeExcluding([PU]);
     const g = seed(row("lcp-cw", { own_check_baseline: reading("red_code_reachable") }));
     const { picked } = await autoPick();
     const guards = endPin([PICK_LOG]);
-    expect(picked).toBe(g.id);
-    expect(calls.compose.length).toBe(1);
-    expect(calls.compose[0]!.verify_vessels).toEqual([`repos/${VESSEL}`]);
-    expect(String(calls.compose[0]!.spec)).toContain(FC);
+    expect(picked).not.toBe(g.id);
+    expect(calls.compose.length).toBe(0);
     expect(writesFor(g.id).some((w) => w.meta?.localization_failed === true)).toBe(false);
-    expect(calls.uiWrite.filter((c) => String(c.id ?? "").startsWith("needs-localization-"))).toEqual([]);
-    expect(guards.fetch).toEqual([]); // the escalation fetch (and any LLM rank) would be an unrouted call
+    expect(guards.fetch).toEqual([]);
   });
 
-  it("MUST-FAIL localizeGap names the first in-scope call-path file before any search, with no fetch", async () => {
+  it("MUST-FAIL localizeGap takes no call-path target from a path through an excluded file (first or later), with no fetch", async () => {
     scopeExcluding([PU]);
-    const r = await g2f.localizeGap(row("lcp-direct", { own_check_baseline: reading("red_code_reachable") }), { useLlm: true });
+    for (const [stem, cp] of [["lcp-direct", undefined], ["lcp-later", [{ path: FC, fn: "failureClassOf", line: 1 }, { path: PU, fn: "computeDeltas", line: 1 }]]] as const) {
+      const r = await g2f.localizeGap(row(stem, { own_check_baseline: reading("red_code_reachable", cp as Row[] | undefined) }), { useLlm: false });
+      expect(r?.method).not.toBe("own_check_call_path");
+      expect(r?.file ?? null).not.toBe(FC);
+    }
+    expect(endPin([PICK_LOG]).fetch).toEqual([]);
+  });
+
+  it("CONTROL a call path whose existing files are all in scope: its first file is the target, before any search", async () => {
+    scopeExcluding([`repos/${VESSEL}/src/unrelated.ts`]);
+    const r = await g2f.localizeGap(row("lcp-inscope", { own_check_baseline: reading("red_code_reachable", [{ path: FC, fn: "failureClassOf", line: 1 }]) }), { useLlm: true });
     expect(r?.file).toBe(FC);
     expect(r?.method).toBe("own_check_call_path");
     expect(endPin([PICK_LOG]).fetch).toEqual([]);

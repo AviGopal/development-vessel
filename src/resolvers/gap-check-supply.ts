@@ -89,6 +89,7 @@ import {
 import { autonomyScopeExcludes, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { codeContract, type CodeContract } from "./code-introspect.js";
+import { isSystemBornLineage, lineageIndex } from "./operator-acts.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { coverageKnobs, RAN_PACING, redForTheRightReason, regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
@@ -1704,15 +1705,16 @@ let lastBookkeepingAt: number | null = null;
 
 /**
  * One own-check-baseline goal per row whose test_suite own check has no baseline (and no baseline goal) at its vessel's
- * current origin/dev, in landability order, at most the shaped per-tick bound. Each goal is its own goal-host execution
- * (selectable and traced); its dispatch is appended to the row's own_check_baseline_dispatches (the last 5), so the
- * same (gap, sha) is never sent twice, and each earlier dispatch's execution id is read back from goal-host's record
- * (own-check-baseline-credit.ts dispatchExecutionId) and kept there: the baseline's content grade joins on it. An
- * unreadable policy measures nothing. A failed send stops the loop (the next due pass retries) and records nothing.
+ * current origin/dev, system-born rows first (isSystemBornLineage), each group in landability order, at most the shaped
+ * per-tick bound. Each goal is its own goal-host execution (selectable and traced); its dispatch is appended to the
+ * row's own_check_baseline_dispatches (the last 5), so the same (gap, sha) is never sent twice, and each earlier
+ * dispatch's execution id is read back from goal-host's record (own-check-baseline-credit.ts dispatchExecutionId) and
+ * kept there: the baseline's content grade joins on it. An unreadable policy measures nothing. A failed send stops the
+ * loop (the next due pass retries) and records nothing.
  */
 export async function dispatchOwnCheckBaselines(
   open: Row[],
-  deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined> },
+  deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined>; byId?: ReadonlyMap<string, Row> },
 ): Promise<Array<{ id: string; base_sha: string; dispatch_id: string }>> {
   const { readOwnCheckEnvPolicy } = await import("./own-check-baseline.js");
   const { ownCheckVesselOf } = await import("../judge/gap-eligibility.js");
@@ -1727,7 +1729,15 @@ export async function dispatchOwnCheckBaselines(
   const headOf = deps.headOf ?? ((v: string): string | null => sweepGitOut(join(clonesRoot(), v), ["rev-parse", "origin/dev"]));
   let probes = 2 * max + 2;
   type Disp = { base_sha: string; dispatch_id: string; execution_id?: string; at?: string; node?: string };
-  for (const row of orderByLandability(open)) {
+  // HONEST ORIGIN FIRST: a row that is system-born by the autonomy judge's origin predicate (operator-acts.ts
+  // isSystemBornLineage, over `byId`, the store read the pass already holds, indexed once) is measured before one that
+  // is not; each group keeps landability order. The candidates are the rows the loop below would not skip for their
+  // vessel, filtered first (a filter commutes with the stable sort, so the order is unchanged), so the predicate reads
+  // only them.
+  const byId = lineageIndex(deps.byId ?? new Map<string, Row>(open.map((r) => [String(r["id"] ?? ""), r])));
+  const candidates = orderByLandability(open.filter((r) => { const v = ownCheckVesselOf(metaOf(r)); return !!String(r["id"] ?? "") && !!v && /^[A-Za-z0-9_.-]+$/.test(v); }), byId);
+  const honest = new Set(candidates.filter((r) => isSystemBornLineage(r, byId)));
+  for (const row of [...candidates.filter((r) => honest.has(r)), ...candidates.filter((r) => !honest.has(r))]) {
     if (sent.length >= max) break;
     const id = String(row["id"] ?? "");
     const meta = metaOf(row);
@@ -2227,7 +2237,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // 2o. THE OWN-CHECK BASELINE (own-check-baseline.ts): on a due pass, at most `own_check_baseline_per_tick` (the shaped
   // ownCheckEnvironmentPolicy) open rows with a test_suite own check not yet measured at their vessel's current
   // origin/dev get one development-vessel:own-check-baseline goal each, the rows admission would pick next first.
-  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m) }) : [];
+  const baselinesSent = dispatchDue && !pointer.dry_run ? await dispatchOwnCheckBaselines(open, { node: localNode, nowIso, write: (row, m) => writeMeta(row, m), byId: new Map(rows.map((r) => [String(r["id"]), r])) }) : [];
   if (baselinesSent.length > 0) console.log(`[gap-check-supply] own-check baselines dispatched: ${baselinesSent.map((b) => `${b.id}@${b.base_sha.slice(0, 12)}=${b.dispatch_id}`).join(", ")}`);
 
   // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.

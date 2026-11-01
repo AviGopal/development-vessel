@@ -1749,7 +1749,7 @@ export async function dispatchOwnCheckBaselines(
     const measured = !head || !/^[0-9a-f]{40}$/.test(head) || list.some((d) => d?.base_sha === head) || (meta["own_check_baseline"] as { base_sha?: unknown } | undefined)?.base_sha === head;
     if (measured) { if (filled) await deps.write(row, { own_check_baseline_dispatches: list }); continue; }
     const testFile = String(((meta["evidence_resolve"] as { input?: Row } | undefined)?.input ?? {})["test_file"] ?? "");
-    const goal = `measure gap ${id}'s own check ${vessel}/${testFile} at base ${head!.slice(0, 12)} (ownCheckBaseline)`;
+    const goal = `classify gap ${id}'s own check ${vessel}/${testFile} at base ${head!.slice(0, 12)} as green_at_parent | red_code_reachable | red_environmental | unrunnable (ownCheckBaseline)`;
     const r = await (deps.send ?? resolveDispatchGoal)({ type: "dispatch_goal", goal, target_template_id: "development-vessel:own-check-baseline", expected_output_shapes: ["ownCheckBaseline"], variables: { gap_id: id, base_ref: head! }, timeout_ms: 15_000 });
     const dispatchId = r.shape === "goalDispatchResult" ? ((r.body ?? {}) as { dispatch_id?: unknown }).dispatch_id : null;
     if (typeof dispatchId !== "string" || !nonEmpty(dispatchId)) {

@@ -378,9 +378,32 @@ export function selfRestartAlreadyOwed(vesselName: string): string | null {
  * 81–94 band: a test that already failed at baseline is not held against a new commit.
  */
 const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-/** The change-window lease TTL every cutover takes (runGitAwareCutover). Exported so the auto-revert reader
- *  judges a pending revert stale on the same number, not on a copy of it. */
+/** The change-window lease TTL every cutover takes (runGitAwareCutover), and the headroom every renew keeps past a
+ *  long step (renewChangeWindow). Exported so the auto-revert reader judges a pending revert stale on the same number,
+ *  not on a copy of it. */
 export const CUTOVER_LEASE_TTL_MS = 600_000;
+/**
+ * THE CHANGE WINDOW IS RENEWED THROUGH THE SUITES. The "cutover" hold was taken once for CUTOVER_LEASE_TTL_MS and never
+ * renewed, and an expired hold blocks nothing (maintenance-lease.ts listHolds and acquire skip it). A development-vessel
+ * or activity-api landing runs a pre-cutover whole suite and a post-land whole suite of up to
+ * precutoverSuiteTimeoutMs() each, so the window reopened mid-cutover: another cutover, pull-sync's convergence and the
+ * SIGTERM drain all read it as free. So the hold is renewed (maintenanceLease_write renew, by its token) right before
+ * each suite run for that run's budget plus CUTOVER_LEASE_TTL_MS: the step cannot outlive it, and the cutover keeps the
+ * headroom it was acquired with for what follows. Expiry stays: a holder that dies mid-step frees the window at most
+ * one step's budget plus the TTL later, and maintenance-lease's total-hold bound still caps any hold. A renew that is
+ * refused or throws is logged and the cutover goes on, as the acquire fails open.
+ */
+async function renewChangeWindow(changeWindow: { token: string } | undefined, stepMs: number, step: string): Promise<void> {
+  if (!changeWindow?.token) return;
+  try {
+    const r = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "renew", name: "cutover", token: changeWindow.token, ttl_ms: stepMs + CUTOVER_LEASE_TTL_MS });
+    const b = (r.body ?? {}) as { renewed?: boolean; expires_at?: string; error?: string };
+    if (b.renewed === true) console.error(`[mitosis-cutover] change window renewed for the ${step} until ${b.expires_at ?? "?"}`);
+    else console.warn(`[mitosis-cutover] change window renew for the ${step} REFUSED (${b.error ?? r.shape}); the cutover goes on, the window may reopen before it ends`);
+  } catch (err) {
+    console.warn(`[mitosis-cutover] change window renew for the ${step} failed: ${String(err).slice(0, 200)}; the cutover goes on`);
+  }
+}
 /**
  * THE PRE-CUTOVER SUITE'S BUDGET IS A SHAPED ROW. With no timeout_ms the suite ran under test_suite's 240 s default,
  * which development-vessel's whole suite (the cutover measures the whole suite, not the gate's fast set) exceeds, so
@@ -2205,6 +2228,8 @@ interface GitCutoverArgs {
   landingLease?: { gapId: string; holder: string; held: boolean };
   /** Set by a revert_of cutover to the temp tree it materialized from the reverted clone; removed on exit. */
   revertStaging?: { root: string };
+  /** The change-window hold this cutover took (runGitAwareCutover), renewed before each suite (renewChangeWindow). */
+  changeWindow?: { token: string };
 }
 
 /**
@@ -2494,8 +2519,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   let preservePending = false;
   const landingLease = { gapId: "", holder: "", held: false };
   const revertStaging = { root: "" };
+  const changeWindow = { token: leaseToken ?? proposalLeaseToken ?? "" };
   try {
-    const inner = await runGitAwareCutoverInner({ ...args, landingLease, revertStaging });
+    const inner = await runGitAwareCutoverInner({ ...args, landingLease, revertStaging, changeWindow });
     preservePending = (inner.body as Record<string, unknown> | undefined)?.["preserve_pending"] === true;
     return inner;
   } finally {
@@ -3378,6 +3404,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       const suiteTimeoutMs = await precutoverSuiteTimeoutMs();
       operations.push({ op: "precutover_suite_budget", status: "ok", detail: `timeout_ms=${suiteTimeoutMs} (${PRECUTOVER_SUITE_TIMEOUT_ROW})` });
       const runSuiteWith = async (extra: Record<string, unknown>): Promise<{ failing: string[] | null; ran: boolean; pass: number; fail: number }> => {
+        await renewChangeWindow(args.changeWindow, suiteTimeoutMs, "pre-cutover suite");
         const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, timeout_ms: suiteTimeoutMs, ...extra });
         const sb = (res as { body?: Record<string, unknown> }).body ?? {};
         const ran = sb.ran === true;
@@ -4156,6 +4183,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     // The same shaped budget as the pre-cutover suite (precutoverSuiteTimeoutMs): under test_suite's 240 s default the
     // development-vessel and activity-api whole suites were killed before their summary on every landing.
     const postLandTimeoutMs = await precutoverSuiteTimeoutMs();
+    await renewChangeWindow(args.changeWindow, postLandTimeoutMs, "post-land suite");
     const suite = await resolveTestSuite({
       vessel: vessel_name,
       landed_sha: newSha,

@@ -47,14 +47,17 @@ export function installCutoverFetchGuard(): FetchGuard {
   // (cutover-gate-default.ts), so every file's fixtures are decided by their own subject.
   installGateVersionDefault();
   const original = globalThis.fetch;
-  // The ONE tuning row every cutover reads (cutover.precutover_suite_timeout_ms, its pre-cutover suite budget) is ABSENT
-  // by default (activity-api answers 404), so the cutover takes its coded default; a test that pins the row's effect
-  // routes it itself (later routes win). Named by its exact path: any OTHER tuning read is still an unstubbed fetch.
-  const routes: GuardRoute[] = [{
-    name: "tuning row cutover.precutover_suite_timeout_ms (absent by default)",
-    match: (u) => { try { return new URL(u).pathname === "/v2/tuning-params/cutover.precutover_suite_timeout_ms"; } catch { return false; } },
+  // The TWO tuning rows every cutover reads are ABSENT by default (activity-api answers 404), so the cutover takes their
+  // coded defaults: cutover.precutover_suite_timeout_ms (its suite budget) and maintenance_lease.max_total_hold_s (the
+  // change-window renew before each suite reads the hold's total bound, at most once per 10 min per process, so which
+  // cutover test reads it depends on file order). A test that pins a row's effect routes it itself (later routes win).
+  // Named by their exact paths: any OTHER tuning read is still an unstubbed fetch.
+  const absentRow = (row: string): GuardRoute => ({
+    name: `tuning row ${row} (absent by default)`,
+    match: (u) => { try { return new URL(u).pathname === `/v2/tuning-params/${row}`; } catch { return false; } },
     respond: () => new Response("not found", { status: 404 }),
-  }];
+  });
+  const routes: GuardRoute[] = [absentRow("cutover.precutover_suite_timeout_ms"), absentRow("maintenance_lease.max_total_hold_s")];
   const violations: string[] = [];
   const hits: string[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {

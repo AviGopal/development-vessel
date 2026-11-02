@@ -336,6 +336,29 @@ describe("auto-revert: a regressed lane landing is reverted once, by the lane, a
     expect(marks(att).map((m) => m["status"])).toEqual(["pending"]);
   });
 
+  // The change-window lease is now renewed through a cutover's suites (vessel-mitosis-cutover.ts renewChangeWindow); the
+  // reader's number is unchanged. It only ever meets a pending marker whose revert cutover is no longer running here
+  // (kickAutoRevert runs one reader at a time, and the reader awaits its own cutover), so the number stays a grace period.
+  it("F4c (staleness, CONTROL): a pending revert is in flight within CUTOVER_LEASE_TTL_MS of its marker and stuck past it", async () => {
+    const [young, old] = ["att-mf4cccc-young", "att-mf4dddd-old"];
+    const Ly = await land(1, young);
+    const Lo = await land(2, old);
+    await publish();
+    const ttlMin = cut.CUTOVER_LEASE_TTL_MS / 60_000;
+    expect(ttlMin).toBe(10);
+    ledger.appendRecord("attemptRevert", `${young}#revert:0:pending`, { reverted_attempt_id: young, status: "pending", gap_id: GAP, at: minutesAgo(ttlMin - 1) });
+    ledger.appendRecord("attemptRevert", `${old}#revert:0:pending`, { reverted_attempt_id: old, status: "pending", gap_id: GAP, at: minutesAgo(ttlMin + 1) });
+    for (const a of [young, old]) intent(a, { directed: false });
+    settle(young, 2, { shas: [Ly], at: minutesAgo(5) });
+    settle(old, 2, { shas: [Lo], at: minutesAgo(5) });
+    useDeps(stubCutover(PUSHED));
+    const r = await gtf.autoRevertRegressedLandings();
+    expect(decisionsFor(r, young)).toEqual(["skipped=in_flight"]);
+    expect(decisionsFor(r, old)).toEqual(["stuck"]);
+    expect(marks(old).at(-1)).toMatchObject({ status: "stuck" });
+    expect(cutoverCalls).toBe(0);
+  });
+
   it("F5: a landing that is itself a revert is not reverted (by its commit, and by an auto_revert intent): skipped=is_revert", async () => {
     const a = "att-mf5aaaa-landing";
     const b = "att-mf5bbbb-landing";

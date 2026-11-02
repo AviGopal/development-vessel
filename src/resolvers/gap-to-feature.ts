@@ -2077,6 +2077,16 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // exactly as in learn and writes nothing; the answer carries the would-be children and their verdicts.
     const observe = (pointer as { learning_mode?: unknown }).learning_mode === "observe";
     const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true, ...(observe ? { observe: true } : {}) });
+    // ONE INVESTIGATION PER STATE (the investigation damper). A decline for missing information changes nothing the next
+    // dispatch reads, so the gap-goal supply sent the same "investigate and decompose" walk about five times a day per
+    // gap, each re-running this decline. The row is stamped with the fingerprint of the inputs it declined on (the
+    // escalation's own chronicEscalationFingerprint, stamped as chronic_escalation is); the supply reads it and skips
+    // the gap while those inputs are unchanged. Keyed on state, never a clock, and no disposition: check-supply's
+    // localizer must keep seeing the row. Observe mode writes nothing.
+    if (!observe && d.written.length === 0 && /^needs_information\b/.test(d.reason)) {
+      try { await persistGapMetaPatch(found, { investigation_declined: { fingerprint: chronicEscalationFingerprint(found, "investigation_declined"), at: new Date().toISOString(), reason: d.reason.slice(0, 300) } }); }
+      catch (e) { console.warn(`[gap-to-feature] investigation-decline stamp for ${decomposeId} not written: ${(e as Error).message}`); }
+    }
     return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason, ...(d.raw_len !== undefined ? { raw_len: d.raw_len, raw_tail: d.raw_tail } : {}),
       ...(observe ? { observe: true, would_be_children: d.would_be_children ?? [], edit_site: d.edit_site ?? null, excerpt: d.excerpt ?? null } : {}) } };
   }

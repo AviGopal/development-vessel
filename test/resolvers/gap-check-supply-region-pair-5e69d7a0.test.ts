@@ -163,10 +163,10 @@ async function landAndArm(prefix: string, check: string): Promise<Row> {
 describe("the 5e69d7a0 pair under the region gate (token anchor red_independent_of_edit_site)", () => {
   it("[MUST-FAIL] 5e69d7a0's own check (outcomeKindOf) is REFUSED: region_red_unchanged", async () => {
     const row = await landAndArm("pair-own", fixture("5e69d7a0-mutation-gate-refusal-logs.check.ts.txt"));
-    expect(ledgerOf(row)["last_verdict"]).toBe("present");
+    // Since the arm predicates moved to lane core (check-supply-admission.ts), this historical check (it imports
+    // gap-check-supply for outcomeKindOf) no longer imports the edit site, and is refused at that earlier gate.
     expect(ledgerOf(row)["state"]).toBe("arm_refused");
-    expect(String(ledgerOf(row)["reason"])).toStartWith("region_red_unchanged:");
-    expect(regionGateOf(row)).toMatchObject({ region: "derived_from_token_anchor", anchor: "red_independent_of_edit_site", occurrences: 2, measured: 1, changed: 0 });
+    expect(String(ledgerOf(row)["reason"])).toStartWith("test_writing_check_misses_edit_site");
   }, 240_000);
 
   it("[CONTROL] the hand-written correct check (arm_refused write AND the log line) ARMS: its signature moves under the region mutant", async () => {

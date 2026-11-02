@@ -789,6 +789,17 @@ export interface LocalizeResult {
   candidates?: number;
 }
 
+/** A metadata path field as a repos/<vessel>/…ts path that exists, else null: /vessels/<v>/… and a bare <v>/src|test/…
+ *  become repos/<v>/…, and a trailing :symbol or :line suffix is stripped. */
+function metadataSitePath(v: string): string | null {
+  let cand = v.trim();
+  // Normalise /vessels/<v>/… and bare <v>/… into repos/<v>/…
+  cand = cand.replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
+  if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
+  // strip a trailing :symbol / :line suffix
+  cand = cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
+  return /^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand) ? cand : null;
+}
 /**
  * Derive a CONCRETE existing edit-site for a gap that has no proposal-report edit target.
  * Returns null when no confident single file emerges (NEVER fabricates). Bounded + graceful.
@@ -814,16 +825,8 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
     let v = meta[f];
     if ((typeof v !== "string" || !v.trim()) && typeof (gap as Record<string, unknown>)[f] === "string") v = (gap as Record<string, unknown>)[f];
     if (typeof v !== "string" || !v.trim()) continue;
-    let cand = v.trim();
-    // Normalise /vessels/<v>/… and bare <v>/… into repos/<v>/…
-    cand = cand.replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
-    if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
-    // strip a trailing :symbol / :line suffix
-    cand = cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
-    if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand)) {
-      const vesselDir = cand.match(/^repos\/([^/]+)\//)?.[1] ?? "";
-      return { file: cand, description: `change site named by detector evidence (${f})`, vessel: vesselDir, method: "metadata_edit_site" };
-    }
+    const cand = metadataSitePath(v);
+    if (cand) return { file: cand, description: `change site named by detector evidence (${f})`, vessel: cand.match(/^repos\/([^/]+)\//)?.[1] ?? "", method: "metadata_edit_site" };
     // THE GATE NAMES A SYMBOL, NOT A PATH (contained-self-development, drafting reliability). The
     // semantic gate writes `suspected_real_location` as a symbol or shape (`self_fact_reconcile`,
     // `self_fact_reconcile:authoring_root`); the path check above skipped it, so every retry went
@@ -864,6 +867,16 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
     scopeForPick ??= await autonomyScope();
     return autonomyScopeExcludes(scopeForPick, file) === null;
   };
+
+  // THE DETECTOR'S STRUCTURED SITES (env-gate-scan writes classification_metadata.sites: [{vessel, file, line}], file
+  // as a bare "<vessel>/src/…"). The named fields and the own check's call path above win; a row with neither was never
+  // sited from its own evidence, and its investigation walk declined needs_information on every pass. The first
+  // existing site is taken, held to the autonomy scope like a search pick (pickInScope: directed work none, fail closed).
+  const sites = Array.isArray(meta.sites) ? meta.sites as Array<{ file?: unknown } | null> : [];
+  for (const s of sites) {
+    const cand = typeof s?.file === "string" ? metadataSitePath(s.file) : null;
+    if (cand && await pickInScope(cand)) return { file: cand, description: "change site named by detector evidence (sites[].file)", vessel: cand.match(/^repos\/([^/]+)\//)?.[1] ?? "", method: "metadata_edit_site" };
+  }
 
   // (a) identify the target vessel.
   const vessel = identifyVessel(gap, meta);

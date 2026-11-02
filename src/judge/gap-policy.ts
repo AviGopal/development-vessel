@@ -32,7 +32,7 @@ export function vesselDirExists(vessel: string): boolean {
 /**
  * Identify the target vessel for a gap. Order: explicit metadata.vessel, then an
  * edit-site/file_path's repos/<vessel>/ or /vessels/<vessel>/ prefix, then a vessel name
- * embedded in the gap id ("responsibility-<vessel>-…", "<…>-<vessel>-…"). Returns a
+ * embedded in the gap id ("responsibility-<vessel>-…", "<…>-<vessel>-…", "<…>-<vessel>_…"). Returns a
  * vessel dir name that EXISTS under the runtime root, else null.
  */
 export function identifyVessel(gap: Record<string, unknown>, meta: Record<string, unknown>): string | null {
@@ -59,8 +59,9 @@ export function identifyVessel(gap: Record<string, unknown>, meta: Record<string
     });
     for (const d of dirs) {
       if (!/-(vessel|api)$/.test(d) && !/^(activity-api|goal-host-vessel)$/.test(d)) continue;
-      // hyphen-bounded: "-<dir>-" or "-<dir>" at end, or "<dir>-" at start
-      if (new RegExp(`(?:^|-)${d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`).test(id)) {
+      // hyphen-bounded: "-<dir>-" or "-<dir>" at end, or "<dir>-" at start; an underscore also ends the name, as in a
+      // capability detector's "systematic-failure-<vessel>_<capability>-zero" id
+      if (new RegExp(`(?:^|-)${d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[-_]|$)`).test(id)) {
         if (!best || d.length > best.length) best = d;
       }
     }

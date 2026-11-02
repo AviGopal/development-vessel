@@ -817,7 +817,25 @@ export async function llmCallWithFailover(endpoints: string[], prompt: string, m
       await new Promise((r) => setTimeout(r, backoffMs));
     }
   }
-  throw lastError ?? new Error('All LLM endpoints failed without returning a specific error.');
+  throw lastError ?? new Error(LLM_NO_ENDPOINT_ERROR);
+}
+const LLM_NO_ENDPOINT_ERROR = 'All LLM endpoints failed without returning a specific error.';
+/**
+ * THE LLM PLANE DID NOT ANSWER: an outage, not a failed attempt. True for what llmCallWithFailover ends on when no
+ * endpoint produced an answer at all: its deadline, no endpoint to call, or rounds that ran out on transport errors,
+ * timeouts and 5xx. False for a 4xx (a decision: auth, request, quota) and for an answer that came back unusable (empty,
+ * an error body, truncated), which stay charged as before. The draft call's exit reads it (decomposeThrowReport).
+ */
+export function isLlmPlaneFailure(message: string): boolean {
+  if (message.startsWith("llm failover deadline:") || message === LLM_NO_ENDPOINT_ERROR) return true;
+  if (/^llmCall to \S+ (returned empty content|returned error in body|returned federated error|was TRUNCATED)/.test(message)) return false;
+  return isRetryableLlmError(new Error(message));
+}
+/** The report of a compose whose draft LLM call threw. When the LLM plane did not answer, no draft ran and the attempt
+ *  says nothing about the gap: it carries failure_kind "environment", the non-attempt isNonAttemptComposeResult already
+ *  exempts, so the grader charges no failed attempt and no class miss. Any other throw is reported as before. */
+export function decomposeThrowReport(message: string): { ok: false; stage: "decompose"; error: string; failure_kind?: "environment" } {
+  return { ok: false, stage: "decompose", error: message, ...(isLlmPlaneFailure(message) ? { failure_kind: "environment" as const } : {}) };
 }
 
 async function discoverAll(shape: string): Promise<string[]> {
@@ -8768,8 +8786,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // fc-plan, no verdict, and no error line. That invisibility is why composes
       // "die after spec-refine" with no diagnosable cause. Log it loudly.
       const _de = (e as Error).message;
-      console.log(`[fc-decompose-failed] draft LLM call threw — compose dies BEFORE fc-plan (llm_endpoints=${llmEndpoints.length}, model=${model}): ${_de.slice(0, 300)}`);
-      return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: _de } };
+      const _dr = decomposeThrowReport(_de);
+      console.log(`[fc-decompose-failed] draft LLM call threw — compose dies BEFORE fc-plan (llm_endpoints=${llmEndpoints.length}, model=${model})${_dr.failure_kind ? "; the LLM plane did not answer, so this is a non-attempt (failure_kind environment)" : ""}: ${_de.slice(0, 300)}`);
+      return { shape: "featureComposeReport", body: _dr };
     }
     plan = parseJsonObject(planRaw);
     ops = (plan?.ops as PlanOp[] | undefined) ?? [];

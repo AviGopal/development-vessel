@@ -4125,8 +4125,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     countOwnCheck("check_landing", `vessel=${vessel_name} mitosis=${mitosis_version_id} sha=${String(newSha).slice(0, 12)} gap=${gapId}: ${checkLandingReason}`);
   }
   // Threaded to the pending-land stamp below: a landing that newly broke a test in its vessel's
-  // post-land suite must NOT earn landed_verified credit. Stays false when the suite does not run
-  // or shows nothing newly failing, preserving the existing stamp behaviour there.
+  // post-land suite must NOT earn landed_verified credit. Nor does a landing whose post-land suite
+  // did not run to its summary (ran !== true: killed by its budget, a dispatch failure, a gate
+  // refusal): an absent regression check is not a clean one. Stays false only when the suite ran
+  // and shows nothing newly failing.
   //
   // RETIRED (2026-10-10, operator ruling "retire the spec"): a structured
   // classification_metadata.verification_spec used to be executed here by
@@ -4151,13 +4153,24 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // this observes the landing, it does not gate it, and a reporting failure must never fail a
   // cutover that already succeeded.
   try {
+    // The same shaped budget as the pre-cutover suite (precutoverSuiteTimeoutMs): under test_suite's 240 s default the
+    // development-vessel and activity-api whole suites were killed before their summary on every landing.
+    const postLandTimeoutMs = await precutoverSuiteTimeoutMs();
     const suite = await resolveTestSuite({
       vessel: vessel_name,
       landed_sha: newSha,
       gap_id: gapId,
       proposal_id: proposalId,
+      timeout_ms: postLandTimeoutMs,
     });
     const sb = (suite as { body?: Record<string, unknown> }).body ?? {};
+    // WHY the suite did not run, kept on the record (bounded): a structuredError's failure_mode and detail, a gate
+    // refusal, or no summary within the budget. Without it a killed suite and a missing one read alike.
+    const notRanReason = sb.ran === true ? null
+      : ((suite as { shape?: string }).shape === "structuredError"
+        ? `structuredError${typeof sb.failure_mode === "string" ? ` ${sb.failure_mode}` : ""}: ${String(sb.detail ?? "no detail")}`
+        : typeof sb.gate_refused === "string" ? `gate refused: ${sb.gate_refused}`
+        : `no summary within timeout_ms=${postLandTimeoutMs}`).slice(0, 300);
     // Carry it on the emitted cutoverApplied shape (and the applied log) so a landing and
     // its verification are ONE observable record. Two records that must be joined by hand
     // is how the outcome of a change stayed unattributable in the first place.
@@ -4166,10 +4179,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       pass: sb.pass ?? null,
       fail: sb.fail ?? null,
       skip: sb.skip ?? null,
+      timeout_ms: postLandTimeoutMs,
+      ...(notRanReason !== null ? { not_ran_reason: notRanReason, landing_credit_withheld: true } : {}),
     };
     console.log(
       `[mitosis-cutover] post-land suite vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} ran=${String(sb.ran)} pass=${String(sb.pass)} fail=${String(sb.fail)}`,
     );
+    if (notRanReason !== null) {
+      // Not a regression signal (nothing was measured), so no gap is filed; but no landed_verified credit either.
+      landingCreditWithheld = true;
+      console.log(`[mitosis-cutover] post-land suite NOT RUN vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} reason=${notRanReason} — landed_verified credit withheld`);
+    }
     // A red suite after landing is a regression signal the system should act on, not a log
     // line. Reuse the gap store (already advertised, already traced) rather than inventing a
     // second alarm channel.
@@ -4221,6 +4241,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       } as never);
     }
   } catch (err) {
+    // Non-fatal for the cutover, but a post-land check that errored verified nothing: withhold the credit unless the
+    // suite already ran to its summary (an error after that, e.g. in the gap write, leaves its verdict standing).
+    const recorded = (appliedBody as Record<string, unknown>).post_land_suite as { ran?: unknown } | undefined;
+    if (recorded?.ran !== true) landingCreditWithheld = true;
     console.warn("[mitosis-cutover] post-land suite verification errored (non-fatal):", err);
   }
   // Land->close credit for the apply-proposal->cutover path (gap

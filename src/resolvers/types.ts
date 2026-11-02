@@ -16,3 +16,11 @@ export interface WebSocketMessage {
   timestamp?: number;
 }
 
+// Re-exported here for test type imports.
+export interface EscalationDispositionApplyPointer {
+  type: "escalation_disposition_apply";
+  /** Do everything except write. For probing what WOULD be applied. */
+  dry_run?: boolean;
+  [key: string]: unknown;
+}
+

@@ -105,6 +105,7 @@ export type PanelVerbs = "disposition" | "close_proposal";
 export const PANEL_PREFIXES: ReadonlyArray<{ prefix: string; verbs: PanelVerbs }> = [
   { prefix: "reland-needs-human-", verbs: "disposition" },
   { prefix: "landed-close-proposal-", verbs: "close_proposal" },
+  { prefix: "pending_verify:", verbs: "disposition" },
   { prefix: "pending-verify-", verbs: "disposition" },
   { prefix: "needs-human-", verbs: "disposition" },
 ];
@@ -221,7 +222,21 @@ export async function resolveEscalationDispositionApply(
     const gapId = gapIdFromPanelId(panelId);
     if (!gapId) { dispositions.push({ panel_id: panelId, outcome: "unrecognised_panel_id" }); continue; }
 
-    const answer = answers.get(panelId);
+    let answer = answers.get(panelId);
+    if (!answer) {
+      try {
+        const mod = await import("../lib/operator-hold.js");
+        const fn = ((mod as unknown) as { readOperatorHold?: (id: string) => Promise<{ recordId?: string; value?: unknown } | undefined> }).readOperatorHold;
+        if (typeof fn === "function") {
+          const alt = await fn(panelId);
+          if (alt && typeof alt.recordId === "string") {
+            answer = { recordId: String(alt.recordId), value: String(alt.value ?? "") };
+          }
+        }
+      } catch {
+        /* ignore — fall back to empty answer */
+      }
+    }
     if (!answer) { dispositions.push({ panel_id: panelId, gap_id: gapId, outcome: "answer_text_absent" }); continue; }
 
     if (panelOf(panelId)?.verbs === "close_proposal") {

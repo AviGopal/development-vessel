@@ -10,7 +10,8 @@
 //               export with its declared signature, read by the enumeration the refusal itself uses (exportContract);
 //   [MUST-FAIL] the repair prompt for that verify carries that surface as a field of its own;
 //   [CONTROL]   a check that reads only exported names is judged as before, with no surface; and a repair prompt for
-//               any other refusal is byte-identical to the one built without the judgement.
+//               any other refusal carries only the refusal's own test-writing field (stage, cause, aim, failing tests)
+//               over the same gate output the prompt without the judgement quotes, never the surface.
 // Real bun runs the check (the bun on PATH), on a fixture vessel under TMPDIR. No LLM, no network.
 import { afterAll, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -94,13 +95,19 @@ describe("a check refused for a missing export is repaired onto the exported sur
     expect(j.exported_surface).toBeUndefined();
   });
 
-  it("[CONTROL] any other refusal's repair prompt is byte-identical to the prompt built without the judgement", async () => {
+  it("[CONTROL] any other refusal's repair prompt carries only its test-writing field over the same gate output, never the surface", async () => {
     const j = await judged("tw-surface-green", `test("green", () => { expect(mod.FLOOR_TOOL_MAX).toBe(4); });\n`);
     expect(j).toMatchObject({ ok: false, stage: "test_writing_check_not_red" });
     expect(j.exported_surface).toBeUndefined();
     const fv = failedVerify(j);
     const { test_writing: _tw, ...without } = fv;
-    expect(fc.buildRepairPrompt(fv, "", CHECK)).toBe(fc.buildRepairPrompt(without, "", CHECK));
+    // The refusal's own field (stage, cause, aim, failing tests: feature-compose testWritingRepairField) is the ONE field:
+    // the prompt is the gate-evidence form over exactly the gate output the prompt without the judgement quotes.
+    const field: string = fc.testWritingRepairField(fv);
+    expect(field).toContain("TEST-WRITING CHECK REFUSED");
+    const plain: string = fc.buildRepairPrompt(without, "", CHECK);
+    const quoted = plain.slice(plain.indexOf("Lint output:\n\n") + "Lint output:\n\n".length);
+    expect(fc.buildRepairPrompt(fv, "", CHECK)).toBe(`A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\nFAILING STAGE: own_check\n${field}\nEDIT SITE (where this gap's fix belongs; fix the code there, do not edit another test to make it pass): ${CHECK}\n\nThe gate's output (its first 4000 chars; the reason above may lie past them):\n\n${quoted}`);
     expect(fc.buildRepairPrompt(fv, "", CHECK)).not.toContain("EXPORTED SURFACE");
   });
 });

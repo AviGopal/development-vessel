@@ -60,7 +60,7 @@ import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, intro
 import { addCallPathEntry, callPathLine, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
 import type { OwnCheckBaseline } from "./own-check-baseline.js";
 import { codeReachableAgreement, creditOwnCheckBaseline } from "./own-check-baseline-credit.js";
-import { checkRunVerdict, classifyCheckRun } from "./retry-evidence.js";
+import { checkRunVerdict, classifyCheckRun, RED_REASON_GUIDANCE } from "./retry-evidence.js";
 import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
 /**
@@ -6388,7 +6388,46 @@ const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFail
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
 /** The compose used the gap's own-check baseline (own-check-baseline.ts): which reading, and for what. The grading join. */
 export type OwnCheckBaselineConsumed = { dispatch_id: string | null; verdict: OwnCheckBaseline["verdict"]; base_sha: string; used: Array<"call_path" | "parent_run"> };
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; unjudged?: true; output_tail?: string; exit_code?: number; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; unjudged?: true; output_tail?: string; exit_code?: number; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement; test_writing_red?: TestWritingRed[] };
+/** One failing test of a REFUSED test-writing check's deciding run, for the repair round (testWritingRedOf). */
+export type TestWritingRed = { name: string; cause?: string; error: string | null };
+/** At most this many failing tests, each error at most TEST_WRITING_RED_ERROR chars, reach the repair prompt. */
+export const TEST_WRITING_RED_MAX = 8;
+export const TEST_WRITING_RED_ERROR = 300;
+/** The failing tests of a test-writing check's deciding run (the last run judgeTestWritingCheck took: it stops at the first
+ *  run that is not an assertion red), each with its class's cause and its error text, bounded; an error between tests
+ *  (the file failed to load) is one more entry. */
+export function testWritingRedOf(raw: string): TestWritingRed[] {
+  const c = classifyCheckRun(raw);
+  const out: TestWritingRed[] = c.failures.slice(0, TEST_WRITING_RED_MAX).map((f) => ({ name: f.name, ...(f.cause ? { cause: f.cause } : {}), error: f.error ? f.error.slice(0, TEST_WRITING_RED_ERROR) : null }));
+  if (c.unhandled && out.length < TEST_WRITING_RED_MAX) out.push({ name: "(an error between tests: the check file did not load cleanly)", ...(c.unhandled_cause ? { cause: c.unhandled_cause } : {}), error: c.unhandled_error ? c.unhandled_error.slice(0, TEST_WRITING_RED_ERROR) : null });
+  return out;
+}
+/** What a repair of a refused test-writing check must achieve, by the check's verify stage (judgeTestWritingCheck). A
+ *  wrong_reason refusal is said by its cause (RED_REASON_GUIDANCE, the classifier's own words); a stage not listed here is
+ *  said by the refusal's own reason. */
+const TEST_WRITING_REPAIR_AIM: Record<string, string> = {
+  test_writing_check_wrong_reason: "the red must come from an expect() assertion on the defect, not from a throw, an import or a load error",
+  test_writing_check_not_red: "the check does not reproduce the defect: it passes on this tree. It must FAIL here, on an expect() assertion, because of the defect at the edit site: call the edit site on the defect's input and expect what it should return",
+  test_writing_check_flaky: "the check's red is not reproducible: it must fail the same tests the same way on every run, so assert only on deterministic values (no shared state, counters, clocks or randomness)",
+};
+/** The repair prompt's field for a REFUSED test-writing check: its stage, cause and reason, what the fix must achieve,
+ *  and the deciding run's failing tests with their failure text (bounded). null when there is no refusal. */
+export function testWritingRepairField(fv: VerifyResult): string | null {
+  const tw = fv.test_writing;
+  if (!tw || tw.ok) return null;
+  const stage = String(tw.stage ?? "test_writing_check_not_red");
+  const byCause = tw.cause && (RED_REASON_GUIDANCE as Record<string, string>)[tw.cause];
+  const aim = [TEST_WRITING_REPAIR_AIM[stage], byCause].filter(Boolean).join("; ") || `the check must satisfy what its verify refused: ${tw.reason.slice(0, 400)}`;
+  const red = fv.test_writing_red ?? [];
+  const names = red.length > 0 ? [] : (tw.runs[tw.runs.length - 1]?.red ?? []).slice(0, TEST_WRITING_RED_MAX);
+  const lines = red.length > 0
+    ? red.map((r) => `  - ${r.name}${r.cause ? ` [${r.cause}]` : ""}${r.error ? `: ${r.error}` : ""}`)
+    : names.map((n) => `  - ${n}`);
+  return `TEST-WRITING CHECK REFUSED (${tw.check_file}): ${stage}${tw.cause ? `, cause ${tw.cause}` : ""}. ${tw.reason.slice(0, 600)}\n`
+    + `WHAT THE FIX MUST ACHIEVE: ${aim}. The repair edits the check file ${tw.check_file} only${tw.edit_site ? `; the gap's source ${tw.edit_site} is read-only context` : ""}.\n`
+    + (lines.length > 0 ? `THE CHECK'S FAILING TESTS on its deciding run (${lines.length}):\n${lines.join("\n")}` : "The check's deciding run failed no test.");
+}
 /**
  * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
@@ -6434,7 +6473,10 @@ export function repairPromptLogged(fv: VerifyResult, errorSiteWindow: string, ed
   if (writeScope) editSite = writeScope[0] ?? null;
   const p = buildRepairPrompt(fv, errorSiteWindow, editSite);
   // An unjudged own check has no failing count: logging own_failing 0 read like a green check (the blind-repair row).
-  if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", ...(fv.own?.unjudged ? { own_unjudged: true, own_failing: null } : { own_failing: (fv.own?.failing ?? []).length }), edit_site: editSite })}`);
+  // A refused test-writing check has no own check at all: its line names the check's stage, cause and failing tests.
+  const tw = fv.test_writing && !fv.test_writing.ok ? fv.test_writing : null;
+  const twLog = tw ? { test_writing: { stage: tw.stage, cause: tw.cause ?? null, red: (fv.test_writing_red ?? []).length || (tw.runs[tw.runs.length - 1]?.red ?? []).length } } : null;
+  if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", ...(twLog ?? (fv.own?.unjudged ? { own_unjudged: true, own_failing: null } : { own_failing: (fv.own?.failing ?? []).length })), edit_site: editSite })}`);
   return p;
 }
 export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, editSite: string | null): string {
@@ -6445,6 +6487,11 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   const gateDetail = fv.draft?.gate_detail;
   const fields: string[] = [];
   if (hidden(gateDetail)) fields.push(`GATE DETAIL (the pre-land gate's own reason): ${gateDetail!.trim().slice(0, 1500)}`);
+  // A REFUSED TEST-WRITING CHECK IS NOT A STILL-RED FIX. The round was told FAILING STAGE own_check with no failing test
+  // (a test-writing compose runs no own check), so it was blind to what its own verify refused. It is named, with what a
+  // fix must achieve and the failing tests, whether or not the slice shows the gate detail.
+  const twField = testWritingRepairField(fv);
+  if (twField) fields.push(twField);
   // A check refused for reading a name its module does not export is repaired onto the module's real exports, so the
   // round is told them (check-supply-admission.ts exportedSurface), not left to guess from the reason's first 12 names.
   const surface = fv.test_writing?.exported_surface;
@@ -10421,6 +10468,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const csaV = await import("./check-supply-admission.js");
     const testWritingMode = (pointer as { compose_mode?: unknown }).compose_mode === csaV.CHECK_SUPPLY_COMPOSE_MODE;
     let testWriting: import("./check-supply-admission.js").TestWritingJudgement | null = null;
+    // The check's runs, as this compose's shell printed them: a refusal's repair reads the deciding run's failing tests.
+    const twRaws: string[] = [];
     if (testWritingMode && tcOk) {
       const twMeta = (gateGapMeta ?? {}) as Record<string, unknown>;
       const twLedger = (twMeta.check_supply && typeof twMeta.check_supply === "object" ? twMeta.check_supply : {}) as { edit_site?: unknown };
@@ -10440,7 +10489,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             // The shell resolver kills the process group at 30 s without this.
             timeout_sec: 240,
           });
-          return String((shT.body as { stdout?: unknown })?.stdout ?? "");
+          const twRaw = String((shT.body as { stdout?: unknown })?.stdout ?? "");
+          twRaws.push(twRaw);
+          return twRaw;
         },
       });
       console.log(`[fc-test-writing-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, check_file: testWriting.check_file, edit_site: testWriting.edit_site, stage: testWriting.stage ?? "passed", cause: testWriting.cause ?? null, runs: testWriting.runs })}`);
@@ -10605,8 +10656,12 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
-    const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoResult ?? {}), ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}), ...(composeBaseline && baselineUsed.size > 0 ? { own_check_baseline_consumed: { dispatch_id: composeBaseline.dispatch_id ?? null, verdict: composeBaseline.verdict, base_sha: composeBaseline.base_sha, used: [...baselineUsed] } } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
+    // A refused test-writing check is its own stage (it was filed as own_check, which no test-writing compose runs), unless
+    // the own-check gate failed too (a stray test edit, a closed gap): that one still names the stage.
+    const gateStage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
+    const stage: FailStage | null = gateStage === "own_check" && ownOk && !testWritingOk ? "test_writing" : gateStage;
+    const twRed = testWriting && !testWriting.ok && twRaws.length > 0 ? testWritingRedOf(twRaws[twRaws.length - 1]!) : [];
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(twRed.length > 0 ? { test_writing_red: twRed } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoResult ?? {}), ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}), ...(composeBaseline && baselineUsed.size > 0 ? { own_check_baseline_consumed: { dispatch_id: composeBaseline.dispatch_id ?? null, verdict: composeBaseline.verdict, base_sha: composeBaseline.base_sha, used: [...baselineUsed] } } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }

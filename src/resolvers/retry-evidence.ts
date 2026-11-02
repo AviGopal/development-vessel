@@ -32,7 +32,9 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint" | "decompose" | "seed_delivery";
+// test_writing: a test-writing compose's check was REFUSED by its own verify (check-supply-admission.ts
+// judgeTestWritingCheck), which is not a fix whose own check is still red ("own_check").
+export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "test_writing" | "scope" | "apply" | "constraint" | "decompose" | "seed_delivery";
 
 export interface EditedSpan {
   path: string;
@@ -971,7 +973,7 @@ export interface RetryEvidenceMeasure {
   offenders: Array<{ gap: string; at: string; kind: "overlap" | "class_stage" | "stuck_refusal"; detail: string }>;
 }
 
-const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "scope", "constraint", "seed_delivery"]);
+const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "test_writing", "scope", "constraint", "seed_delivery"]);
 
 /**
  * Over gap rows: retries whose edits overlap an earlier no-effect span, and lessons whose class contradicts

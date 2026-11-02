@@ -90,6 +90,7 @@ import {
 import { autonomyScopeExcludes, editSitePath, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { codeContract, type CodeContract } from "./code-introspect.js";
+import { VESSEL_TEST_FILE_RE } from "./vessel-paths.js";
 import { isSystemBornLineage, lineageIndex } from "./operator-acts.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
@@ -792,9 +793,15 @@ export function declaredTestTitles(src: string): string[] {
   return titles;
 }
 
+/** A test file, vessel-relative: a *.test / *.spec / *.check module or a path under test/ or tests/ (VESSEL_TEST_FILE_RE),
+ *  or any path with a test/, tests/ or __tests__/ segment. */
+export function isTestSourcePath(rel: string): boolean {
+  return VESSEL_TEST_FILE_RE.test(rel) || /(^|\/)(tests?|__tests__)\//.test(rel);
+}
+
 /**
- * The gap's localized edit site: its own edit site WHENEVER the row sets one, else a src file its summary names that
- * exists in the vessel clone.
+ * The gap's localized edit site: its own edit site WHENEVER the row sets one, else a src file (never a test file:
+ * isTestSourcePath) its summary names that exists in the vessel clone.
  *
  * The row's edit_site is the spec. It used to win only when it sat under repos/<vessel>/ AND already existed in the
  * clone; otherwise the summary's first existing src/*.ts won instead. So a row naming a file the fix creates, or a site
@@ -808,6 +815,11 @@ export function checkSupplySite(row: Row, vessel: string): string | null {
   for (const m of String(row["summary"] ?? "").matchAll(/(?:repos\/[A-Za-z0-9_.-]+\/)?(src\/[A-Za-z0-9_./-]+\.ts)\b/g)) {
     const rel = normalize(m[1] ?? "");
     if (!rel.startsWith("src/") || rel.includes("..")) continue;
+    // NEVER THE GAP'S OWN TEST. A failing-test row's summary names its failing test file, and a vessel whose tests live
+    // under src/ (src/…/x.n1.test.ts, src/…/__tests__/x.test.ts) had that test sited as the change: edit_site_is_own_check,
+    // refused on every pass. Skipped, so the scan goes on, and with no other file the localizer reads the own check's
+    // call path (localizeForSupply → localizeGap, own_check_call_path).
+    if (isTestSourcePath(rel)) continue;
     if (existsSync(join(clonesRoot(), vessel, rel))) return `repos/${vessel}/${rel}`;
   }
   return null;

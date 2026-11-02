@@ -121,6 +121,9 @@ export const PARKING_DISPOSITIONS: readonly string[] = ["needs_information", "ne
 export function isParkingDisposition(d: unknown): boolean {
   return typeof d === "string" && PARKING_DISPOSITIONS.includes(d);
 }
+/** The parks that wait for a fact (needs_information, needs_info): what a fact can lift (escalation-disposition-apply's
+ *  human answer; admission's needs_information drain). awaiting_operator_review waits for a review, never a fact. */
+export const INFORMATION_PARKS: readonly string[] = PARKING_DISPOSITIONS.filter((d) => d !== "awaiting_operator_review");
 
 /** Categories resolveGapToFeature routes to a resolver other than feature_compose (trace-store reconcile seed,
  *  doc_drift_fix, author_producer). The compose gate does not judge them. A test pins that every category branch in

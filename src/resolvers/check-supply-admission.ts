@@ -22,7 +22,7 @@ import { CHECK_SUPPLY_DISPOSITION, EDIT_SITE_IS_OWN_CHECK, isAwaitingLandVerific
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type TS from "typescript";
-import { planPathProblem, underVesselRoot, vesselRelativePath } from "./vessel-paths.js";
+import { planPathProblem, underVesselRoot, vesselRelativePath, VESSEL_TEST_FILE_RE } from "./vessel-paths.js";
 
 /** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */
 export const CHECK_SUPPLY_COMPOSE_MODE = "test_writing";
@@ -224,9 +224,8 @@ export type EditSiteImport = { ok: true; edit_site: string } | { ok: false; stag
  * which src module the check means to test is not decidable from its imports alone (gap-eligibility editSiteIsOwnCheck is
  * the same rule over a stored row). null = the site is not a test.
  */
-const TEST_FILE_RE = /^(?:test|tests)\/|\.(?:test|spec|check)\.[cm]?[jt]sx?$/;
 export function ownCheckSiteRefusal(siteRel: string, checkRel: string): Extract<EditSiteImport, { ok: false }> | null {
-  if (siteRel !== checkRel && !TEST_FILE_RE.test(siteRel)) return null;
+  if (siteRel !== checkRel && !VESSEL_TEST_FILE_RE.test(siteRel)) return null;
   return { ok: false, stage: EDIT_SITE_IS_OWN_CHECK, edit_site: siteRel, reason: `the edit site ${siteRel} is ${siteRel === checkRel ? "the check file itself" : "a test file"}, so the only edit that greens the check is editing a test (self-certification); the gap needs the src module under test as its site` };
 }
 

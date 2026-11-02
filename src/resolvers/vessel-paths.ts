@@ -36,6 +36,9 @@ export function vesselRelativePath(path: string): string | null {
   return underVesselRoot(p) ?? (VESSEL_RELATIVE_TOP_RE.test(bare) ? bare : null);
 }
 
+/** A test or check file, vessel-relative: under test/ or tests/, or a *.test / *.spec / *.check module anywhere. */
+export const VESSEL_TEST_FILE_RE = /^(?:test|tests)\/|\.(?:test|spec|check)\.[cm]?[jt]sx?$/;
+
 /** The characters a model-derived path may carry: no whitespace, quote, `$`, backtick, `;`, `|`, `&`, `<`, `>`, `\`, `:`, NUL or newline. */
 const PLAN_PATH_CHARS_RE = /^[A-Za-z0-9._/@+-]+$/;
 const PLAN_PATH_REPOS_RE = /^(?:\.\/)*repos\/[^/]+\/[^/]/;

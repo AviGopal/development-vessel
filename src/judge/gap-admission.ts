@@ -23,9 +23,10 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { withTestChildEnv } from "../test-child-env.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { lineageIndex, lineageOrigin } from "../resolvers/operator-acts.js";
-import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
+import { heldLineageAncestor, lineageParentIds, refusedSupplyChecks, refusedSupplyCheckFor, type RefusedSupplyChecks, identicalRepeatedFailure, inheritedOperatorHold, isParkingDisposition, composeEligibilitySkipReason, editSiteIsOwnCheck, isAwaitingLandVerification, greenOnParentFresh, ownCheckBaselineFor, ownCheckVesselOf, vesselFileOf, INFORMATION_PARKS, CHECK_SUPPLY_DISPOSITION, NON_COMPOSE_ROUTE_CATEGORIES, type ComposeEligibilitySkipReason } from "./gap-eligibility.js";
 import { identifyVessel, ownedVessels, autonomyScope, autonomyScopeExcludes, editSitePath, scopeHoldFor, gapInHoldLineage, vesselDirExists, vesselsCloneRoot, discoverResolveUrls } from "./gap-policy.js";
 import { verifyGapCondition, testSuiteWholeFileDefault, type GapCheckVerdict } from "./gap-check-judge.js";
+import { VESSEL_TEST_FILE_RE } from "../resolvers/vessel-paths.js";
 import type { OwnCheckBaseline } from "../resolvers/own-check-baseline.js";
 import { readCalibration, landabilityScore, vesselOriginDevSha, originDevShaOnce, PRIOR_ATTEMPTS_SECTION_HEADING } from "./gap-attempt-credit.js";
 import { solicitedHumanGaps, markPendingVerification, type Ask } from "./gap-landing-verdict.js";
@@ -605,16 +606,19 @@ export async function admitActionableGaps(
     // waived the edit-site requirement only: it must still be open, armed and unheld (452 sited, unarmed recommit
     // children were admitted on 2026-10-03 by the old "site OR armed" rule).
     // The predicate and its exemptions live in composeAdmissionExclusion, which the targeted entry calls too.
-    // THE needs_information DRAIN (see detectorParkDrain): a row parked for a fact it now carries is unparked here, in
-    // the pass that sees the fact, so the predicate below judges it as it stands; one still missing it stays parked,
-    // and its exclusion says what it awaits.
+    // THE OWN-CHECK BASELINE (own-check-baseline.ts), read once per row: only a reading measured at the vessel's CURRENT
+    // origin/dev for the check the row names decides anything (the drain below, the baseline exclusion, the grounding).
+    const ocb = ownCheckBaselineFor<OwnCheckBaseline>(meta, headOf(ownCheckVesselOf(meta)));
+    // THE needs_information DRAIN (see detectorParkDrain, ownCheckLocatesPark): a row parked for a fact it now carries is
+    // unparked here, in the pass that sees the fact, so the predicate below judges it as it stands; one still missing it
+    // stays parked, and a detector park's exclusion says what it awaits.
     let parkNote = "";
     {
-      const park = detectorParkDrain(meta);
+      const park = ownCheckLocatesPark(meta, ocb, (p) => autonomyScopeExcludes(scope, p)) ?? detectorParkDrain(meta);
       if (park && park.liftable && drainLifts >= NEEDS_INFORMATION_DRAIN_MAX_PER_PASS) parkNote = "; parked: drain deferred, pass budget spent";
       else if (park && park.liftable) {
         drainLifts++;
-        const refused = await liftDetectorPark(g, park.because);
+        const refused = await liftDetectorPark(g, park.because, String(meta.disposition));
         if (refused) {
           parkNote = `; parked: lift not written (${refused})`;
           console.warn(`[gap-admission] needs_information drain: ${id} not unparked: lift not written (${refused})`);
@@ -697,11 +701,10 @@ export async function admitActionableGaps(
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
-    // THE OWN-CHECK BASELINE (own-check-baseline.ts), measured at the vessel's CURRENT origin/dev: green there, a draft
+    // THE OWN-CHECK BASELINE (read above), measured at the vessel's CURRENT origin/dev: green there, a draft
     // cannot be certified by the check; red for its environment (a live client answering nothing, a refused connection),
     // no src draft can turn it green. A baseline on another sha is stale and decides nothing.
     // The same reading grounds the gap below when its edit_site does not (ownCheckCallPathFile).
-    const ocb = ownCheckBaselineFor<OwnCheckBaseline>(meta, headOf(ownCheckVesselOf(meta)));
     {
       const sha12 = ocb ? ocb.base_sha.slice(0, 12) : "";
       const why = ocb?.verdict === "green_at_parent" ? `own_check_baseline_green_at_parent(${sha12})`
@@ -953,7 +956,7 @@ export async function admitActionableGaps(
 
   if (drained.length) {
     const drainedAdmitted = drained.filter((d) => admitted.some((a) => String(a.id ?? "") === d)).length;
-    console.log(`[gap-admission] needs_information drain: ${drained.length} parked row(s) unparked (detector check confirmed), ${drainedAdmitted} admitted this pass: ${drained.slice(0, 5).join(", ")}`);
+    console.log(`[gap-admission] needs_information drain: ${drained.length} parked row(s) unparked (detector check confirmed, or own check locates), ${drainedAdmitted} admitted this pass: ${drained.slice(0, 5).join(", ")}`);
   }
   if (excluded.length) {
     const byReason: Record<string, number> = {};
@@ -1031,10 +1034,15 @@ export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: C
  * Returns null for a row this drain does not own.
  */
 export const NEEDS_INFORMATION_DRAIN_MAX_PER_PASS = 20;
+/** A human or operator mark beside a park (operator_hold, operator_routing, an auto-revert escalation or hold, a
+ *  released landing): the park is a human's to lift, and no drain clause lifts it. */
+function parkHumanMarked(meta: Record<string, unknown>): boolean {
+  const marked = (v: unknown): boolean => v !== undefined && v !== null && v !== "" && v !== false;
+  return meta.operator_hold === true || marked((meta.operator_routing as { files?: unknown } | undefined)?.files) || marked(meta.auto_revert_escalation) || marked(meta.auto_revert_hold) || marked(meta.pending_released);
+}
 export function detectorParkDrain(meta: Record<string, unknown>): { liftable: true; because: string } | { liftable: false; awaits: string } | null {
   if (meta.disposition !== "needs_information" || meta.evidence_resolve_from !== DETECTOR_READING_FIELD) return null;
-  const marked = (v: unknown): boolean => v !== undefined && v !== null && v !== "" && v !== false;
-  if (meta.operator_hold === true || marked((meta.operator_routing as { files?: unknown } | undefined)?.files) || marked(meta.auto_revert_escalation) || marked(meta.auto_revert_hold) || marked(meta.pending_released)) return null;
+  if (parkHumanMarked(meta)) return null;
   const rawFalsifier = meta.falsifier as unknown;
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   if (falsifierClass !== "class2") return { liftable: false, awaits: `a class2 check (falsifier=${falsifierClass || "unset"})` };
@@ -1045,9 +1053,29 @@ export function detectorParkDrain(meta: Record<string, unknown>): { liftable: tr
   return { liftable: true, because: "its detector_reading check read present at birth" };
 }
 
-/** The drain's one write: lift the detector park on an open row. Null when written; otherwise why not. */
-async function liftDetectorPark(g: Record<string, unknown>, because: string): Promise<string | null> {
-  const drainedMeta = { disposition: "", needs_information_drained: { from: "needs_information", because, at: new Date().toISOString() } };
+/**
+ * THE OWN-CHECK CLAUSE OF THE DRAIN (user ruling "Unpark only if it locates"). A row parked for information
+ * (INFORMATION_PARKS: needs_information, needs_info) waits for the fact that says where its fix goes. Its own check's
+ * reading supplies that fact only when it LOCATES: a red_code_reachable reading the caller accepted (ownCheckBaselineFor:
+ * at the vessel's current origin/dev, for the check the row names now) whose call path, read by ownCheckCallPathFiles
+ * under the autonomy scope (no file at all when any existing entry is excluded), names an existing src/ file that is not
+ * a test or check (VESSEL_TEST_FILE_RE). A call path of only tests, one through an excluded file, a green, environmental
+ * or stale reading, or none, leaves the row parked with its exclusion unchanged. awaiting_operator_review waits for a
+ * review, not a fact, and is never lifted; nor is a park beside a human or operator mark (parkHumanMarked).
+ * The lift is a WRITE (liftDetectorPark), not a read-side pass: feature_compose re-reads the STORED row and refuses a
+ * parked one as held (composeEligibilitySkipReason), as do the nudges and the check supply's orders, so an unpark this
+ * pass alone saw would be a pick nothing could draft. Returns null for a row this clause does not lift.
+ */
+export function ownCheckLocatesPark(meta: Record<string, unknown>, ocb: { verdict?: unknown; call_path?: unknown; base_sha?: unknown } | null | undefined, excludes: (path: string) => string | null): { liftable: true; because: string } | null {
+  if (typeof meta.disposition !== "string" || !INFORMATION_PARKS.includes(meta.disposition) || parkHumanMarked(meta)) return null;
+  const file = ownCheckCallPathFiles(ocb, excludes).files.find((p) => { const rel = vesselFileOf(p)?.rel ?? ""; return rel.startsWith("src/") && !VESSEL_TEST_FILE_RE.test(rel); });
+  if (!file) return null;
+  return { liftable: true, because: `its own check's red_code_reachable reading at ${String(ocb?.base_sha ?? "").slice(0, 12)} locates ${file}` };
+}
+
+/** The drain's one write: lift the park (`from`, the disposition lifted) on an open row. Null when written; otherwise why not. */
+async function liftDetectorPark(g: Record<string, unknown>, because: string, from: string): Promise<string | null> {
+  const drainedMeta = { disposition: "", needs_information_drained: { from, because, at: new Date().toISOString() } };
   try {
     const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { id: g.id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: "open", classification_metadata: drainedMeta } } as never);
     if (w?.shape === "structuredError") return `refused: ${JSON.stringify(w.body).slice(0, 120)}`;

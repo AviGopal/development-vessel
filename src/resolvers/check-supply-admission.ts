@@ -23,6 +23,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type TS from "typescript";
 import { planPathProblem, underVesselRoot, vesselRelativePath, VESSEL_TEST_FILE_RE } from "./vessel-paths.js";
+import { join } from "node:path";
+import { testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
+import { countLiteral, regionOf } from "../lib/region-literal.js";
+import { regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
+import { gapStoreIsLocal } from "./substrate-gap.js";
+import { resolveTestSuite } from "./test-suite.js";
+import { METABOB_API_KEY } from "../config.js";
+import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
 
 /** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */
 export const CHECK_SUPPLY_COMPOSE_MODE = "test_writing";
@@ -1672,4 +1680,471 @@ export function testWritingDetail(j: TestWritingJudgement): string {
   if (j.ok) return "";
   const text = ` | THE TEST-WRITING CHECK ${j.check_file} IS REFUSED (${j.stage}${j.cause ? `: ${j.cause}` : ""}): ${j.reason}`;
   return text.replace(/timed out after (\d+)\s*ms/gi, "timed out ($1 ms budget)").slice(0, 1200);
+}
+
+// ===== THE ARM STEP'S PREDICATES (moved from gap-check-supply.ts unchanged; user ruling, arm pre-check option i) =====
+// The static rules (check_call_misses_region, check_no_control) and the edit-site / region mutant gates the arm step
+// applies after cutover and the test-writing verify applies before landing. Lane core: the verify reads them from here.
+type Row = Record<string, unknown>;
+
+/** A check run's first failure from its red_reason (retry-evidence.ts classifyCheckRun): name, error line, and Expected/Received when it is an assertion. */
+export const firstFailureOf = (redReason: unknown): Row | null => {
+  const c = redReason as { failures?: unknown; compared?: unknown } | null | undefined;
+  const f = Array.isArray(c?.failures) ? (c!.failures[0] as { name?: unknown; error?: unknown } | undefined) : undefined;
+  if (!f || typeof f !== "object") return null;
+  const v = Array.isArray(c?.compared) ? (c!.compared as Array<{ name?: unknown; expected?: unknown; received?: unknown } | null>).find((x) => x?.name === f.name) : undefined;
+  return { name: f.name ?? null, error: f.error ?? null, expected: v?.expected ?? null, received: v?.received ?? null };
+};
+export const clonesRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
+
+/**
+ * The goal: the one check file to write, the symptom to reproduce, and what feature_compose's verify will enforce
+ * (judgeTestWritingCheck): ONE test whose expect() assertion fails because of the defect, the edit site imported
+ * (as a namespace, so a missing export is an assertion red, not a load error), no network, no src edits. The lead
+ * sentence names only the check path (goal-host's edit-intent route targets the file the lead sentence names); the
+ * edit site is named by its import specifier.
+ */
+/**
+ * WHAT A CHECK MAY BE BUILT ON (C-invented-1). An EXISTENCE assertion is never a falsifier by itself: anything can be exported,
+ * so a check that a symbol exists is closed by exporting it. The goal therefore never offers an example symbol, and a symbol
+ * anchors a check only when it ALREADY RESOLVES in the code (used or declared in the edit site's code, or, with no edit site,
+ * declared in the vessel's src), so its existence is already true and the red must come from its BEHAVIOUR.
+ *  - symbol: a backticked, called (`x(`) or camelCase identifier from the evidence that resolves as above. A plain word is
+ *    never one, even when the code exports it (an export is exactly what a hollow fix adds), and neither is a word that only
+ *    the prose names (a shape name, a label) or that resolves only inside strings or comments;
+ *  - text: an OBSERVED output in quotes (an error, a log line, a message, returned or printed text: said so by a nearby
+ *    context word, or written in the falsifier_spec). A quoted goal or question is not an observed output;
+ *  - behaviour: a stated actual-vs-expected pair ("returns 1; it must return 2").
+ *  - region: the row's REGION LITERAL (AnchorSources.region) when it occurs exactly once in the site file, counted raw
+ *    as the region gate counts it (regionGateApplies, regionLiteralVerdict): the line grounding centres the edit on.
+ */
+export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token" | "region"; value: string };
+/**
+ * MORE ANCHOR SOURCES, FOR THE REGION GATE (qa anchor-source ruling, 2026-10-24). The row's must_fail and control text
+ * are read like the falsifier_spec (a quoted span there is an observed output), and with `site_tokens` a snake_case
+ * or camelCase identifier the evidence names that occurs in the edit site's code or strings (never its comments) is a
+ * `token` anchor; the region gate takes it when 1 to 5 of those occurrences are outside declarations (concept: `arm_refused`, which the gap names and the site writes as a string). The
+ * check goal passes `site_tokens` and `region` only for a row the evidence alone does not anchor (checkSupplyAnchors),
+ * so what the drafter is told for an anchored row is unchanged.
+ */
+export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean; region?: string };
+/** The site with its comments blanked to spaces (offsets kept): an anchor named only in a comment is no region. */
+export function commentFreeSource(src: string): string {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return src; }
+  const sf = ts.createSourceFile("c.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const chars = src.split("");
+  const seen = new Set<number>();
+  const blank = (ranges: readonly import("typescript").CommentRange[] | undefined) => {
+    for (const r of ranges ?? []) {
+      if (seen.has(r.pos)) continue;
+      seen.add(r.pos);
+      for (let i = r.pos; i < r.end; i += 1) if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = " ";
+    }
+  };
+  const visit = (n: import("typescript").Node): void => {
+    blank(ts.getLeadingCommentRanges(src, n.getFullStart()));
+    blank(ts.getTrailingCommentRanges(src, n.getEnd()));
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  blank(ts.getLeadingCommentRanges(src, sf.getEnd()));
+  return chars.join("");
+}
+/** Where a token anchor occurs as a whole identifier (or inside a string) in comment-free text; a text anchor, as a literal. */
+export function anchorOccurrences(text: string, a: CheckAnchor): number[] {
+  const out: number[] = [];
+  if (a.kind === "token") {
+    const rx = new RegExp(`(?<![\\w$])${a.value.replace(/\$/g, "\\$")}(?![\\w$])`, "g");
+    for (const m of text.matchAll(rx)) out.push(m.index!);
+    return out;
+  }
+  for (let i = text.indexOf(a.value); i !== -1; i = text.indexOf(a.value, i + a.value.length)) out.push(i);
+  return out;
+}
+export const TOKEN_ANCHOR_MAX = 5;
+/** Code with comments and string literals blanked, so a name only quoted or commented does not resolve. */
+export const codeOnly = (src: string): string => src
+  .replace(/\/\*[\s\S]*?\*\//g, " ")
+  .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+  .replace(/(["'`])(?:\\.|(?!\1)[^\\\n])*\1/g, '""');
+const OUTPUT_CONTEXT = /\b(error|errors|throws?|thrown|logs?|logged|message|prints?|printed|returns?|returned|outputs?|says|reports?|responds?|answers?)\b[^."'`]{0,40}$/i;
+export function falsifiableAnchors(evidence: string, siteSrc: string | null, spec = "", vesselDeclared: ReadonlySet<string> | null = null, more: AnchorSources = {}): CheckAnchor[] {
+  const out: CheckAnchor[] = [];
+  const add = (a: CheckAnchor) => { if (!out.some((x) => x.kind === a.kind && x.value === a.value)) out.push(a); };
+  const ident = /^[A-Za-z_$][\w$]*$/;
+  const siteCode = siteSrc !== null ? codeOnly(siteSrc) : null;
+  const resolves = (name: string): boolean => siteCode !== null
+    ? new RegExp(`(?<![\\w$])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(siteCode)
+    : !!vesselDeclared?.has(name);
+  const candidates = new Set<string>();
+  const rowSpec = [more.must_fail, more.control].filter((x): x is string => typeof x === "string" && x.trim().length > 0).join("\n");
+  const all = `${evidence}\n${spec}${rowSpec ? `\n${rowSpec}` : ""}`;
+  for (const m of all.matchAll(/`([A-Za-z_$][\w$]*)`/g)) candidates.add(m[1]!);
+  for (const m of all.matchAll(/\b([A-Za-z_$][\w$]{2,})\(/g)) candidates.add(m[1]!);
+  for (const m of all.matchAll(/\b([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)\b/g)) if (m[1]!.length >= 5) candidates.add(m[1]!);
+  for (const c of candidates) if (resolves(c)) add({ kind: "symbol", value: c });
+  const quoted = (text: string, fromSpec: boolean) => {
+    for (const m of text.matchAll(/`([^`\n]{1,200})`|"([^"\n]{1,200})"|'([^'\n]{1,200})'/g)) {
+      const q = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+      if (ident.test(q) || !/\s/.test(q) || q.length < 8 || /\?$/.test(q)) continue;
+      if (fromSpec || OUTPUT_CONTEXT.test(text.slice(Math.max(0, m.index! - 60), m.index!))) add({ kind: "text", value: q });
+    }
+  };
+  quoted(evidence, false);
+  if (spec) quoted(spec, true);
+  if (rowSpec) quoted(rowSpec, true);
+  const b = /\b(returns?|yields?|produces?|gives?|is)\s+([^\s,;]+)[^.;]*[;,]?\s*(?:it\s+|but\s+)?(?:must|should)\s+(?:return|yield|produce|give|be)\s+([^\s,;.]+)/i.exec(all);
+  if (b) add({ kind: "behaviour", value: b[0].trim() });
+  const region = (more.region ?? "").trim();
+  if (region && siteSrc !== null && countLiteral(siteSrc, region) === 1) add({ kind: "region", value: region });
+  if (more.site_tokens && siteSrc !== null) {
+    const free = commentFreeSource(siteSrc);
+    for (const m of all.matchAll(/(?<![\w$.\/-])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)(?![\w$\/-])/g)) {
+      const t: CheckAnchor = { kind: "token", value: m[1]! };
+      if (t.value.length < 5 || out.some((x) => x.kind === "token" && x.value === t.value)) continue;
+      const n = anchorOccurrences(free, t).length;
+      if (n >= 1) add(t); // the 1-5 bound is on its non-declaration occurrences (derivedTextRegion)
+    }
+  }
+  return out;
+}
+
+/**
+ * NO CONTROL, NO ARM (CHECK_NO_CONTROL_STAGE). A check whose every new test is red at HEAD carries no control: nothing
+ * in it shows the code still does what the defect does not touch, so a fix that breaks everything else passes it. The
+ * run's report splits the new titles (the failingTests match the red-reason judges use): red are the must-fail tests,
+ * green the controls. With no green title the check is refused; the reason, read back by priorAttemptSentence inside
+ * its first 160 characters, tells the next draft to add one.
+ */
+export const CHECK_NO_CONTROL_STAGE = "check_no_control";
+export const CHECK_NO_CONTROL_REASON = `${CHECK_NO_CONTROL_STAGE}: every new test is red at HEAD; add a CONTROL test (an input the defect does not touch) that passes now and after the fix`;
+export function splitRedGreen(report: Row | null, titles: readonly string[]): { red: string[]; green: string[] } {
+  const failing = Array.isArray(report?.["failingTests"]) ? (report!["failingTests"] as unknown[]).map(String) : [];
+  const red: string[] = [], green: string[] = [];
+  for (const t of titles) (failing.some((f) => f.includes(t)) ? red : green).push(t);
+  return { red, green };
+}
+export function noControlRefusal(controlTitles: readonly string[]): string | null {
+  return controlTitles.length === 0 ? CHECK_NO_CONTROL_REASON : null;
+}
+
+/** A `test("<title>"` / `it(…)` call's quoted title (group 2, as written), and that title decoded as a run name. */
+export const TEST_TITLE_CALL_RE = /\b(?:test|it)(?:\.only|\.failing)?\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
+export const decodedTitle = (written: string): string => written.replace(/\\(.)/g, "$1");
+
+/** String-literal test titles declared in a test file (template titles with placeholders are not runnable names). */
+export function declaredTestTitles(src: string): string[] {
+  const titles: string[] = [];
+  for (const m of src.matchAll(TEST_TITLE_CALL_RE)) {
+    const t = decodedTitle(m[2] ?? "");
+    if (!t.trim() || (m[1] === "`" && t.includes("${"))) continue;
+    if (testTitleInSource(src, t) && !titles.includes(t)) titles.push(t);
+  }
+  return titles;
+}
+
+/**
+ * THE CHECK'S RUN REPORT, READ WHERE ITS VERDICT WAS TAKEN. A node that forwards its gap store settles a handed-off
+ * check from the holder's birth stamp, which carries a verdict and no report; the arm gates (red for the right reason,
+ * the red-reason classifier, the contract rule, the first failure) need the report. So the check's own pointer is
+ * resolved at the holder (the forward's endpoint, as forwardToGapStore sends it, under the judge's check timeout),
+ * and its report is the holder's run on the holder's tree. A null report arms nothing.
+ */
+export async function holderCheckReport(evidence: { shape: string; input: Row }): Promise<{ report: Row | null; detail: string }> {
+  const ep = process.env["GAP_STORE_ENDPOINT"];
+  if (!ep) return { report: null, detail: "no gap-store holder endpoint" };
+  try {
+    const r = await fetch(ep, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      body: JSON.stringify({ impulse: { pointer: { type: evidence.shape, ...evidence.input } } }),
+      signal: AbortSignal.timeout(gapCheckTimeoutMs(evidence.shape, evidence.input)),
+    });
+    if (!r.ok) return { report: null, detail: `holder answered HTTP ${r.status}` };
+    const j = (await r.json()) as Row;
+    if (j["shape"] !== evidence.shape) return { report: null, detail: `holder answered ${String(j["shape"] ?? "no shape")}: ${JSON.stringify(j["body"] ?? null).slice(0, 160)}` };
+    const body = j["body"];
+    return typeof body === "object" && body !== null ? { report: body as Row, detail: "read" } : { report: null, detail: "holder answered no report body" };
+  } catch (err) {
+    return { report: null, detail: `holder unreachable: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
+  }
+}
+
+/**
+ * EDIT-SITE MUTATION GATE. A check red for an assertion, on a contract its target has, can still be red whatever the
+ * edit site does: it mocks the module it asserts on (activity-api 2138d94), its mock's key is never what the code sends
+ * (goal-host 979b966d), it reads a field of a value the site never returns that way (goal-host 725638cc, `.shapes` on a
+ * Promise), or it calls through a cast with arguments the site cannot use (2182d140). No fix of the site can turn such a
+ * check green, so armed it makes a gap no landing closes. The arm step runs the check under operator mutants OF THE EDIT
+ * SITE ITSELF (scope-earn-in selectMutants, applied by test_suite's mutate_edit through lib/apply-mutant.ts on the
+ * committed tree), never of a helper it imports: a mutant that turns the named tests green, or changes the failing
+ * assertion's error line, Expected or Received, shows the red depends on the site. A run that did not measure (the
+ * mutant did not apply, the file did not load, a named test threw instead of asserting) tells nothing either way. When at least one mutant
+ * measured and none changed anything, the red is not about the site: refused, `red_independent_of_edit_site`.
+ *
+ * COST, bounded: at most k extra runs of the check per arm (`mutants_per_file` on this family's rhythm record, read by
+ * scope-earn-in's coverageKnobs: default 6, capped at 20), one at a time, stopping at the first mutant that changes the
+ * red, so a check that depends on its site usually costs one or two. They run where the check's report was taken: here,
+ * or at the gap-store holder on a node that forwards its store. A site with no mutable construct runs none.
+ */
+export type MutationGateOutcome =
+  | { kind: "pass"; record: Row }
+  | { kind: "refuse"; reason: string; record: Row }
+  | { kind: "wait"; detail: string };
+/** THE FAILURE SIGNATURE (qa ruling 2026-10-24: "changed" is the signature, not pass/fail). How a run's named tests fail:
+ *  per title, pass, or the failing assertion's error line (the matcher and its message), Expected and Received, and
+ *  where it failed: the first stack frame's file name, line and column, when that frame is in the check itself (a
+ *  frame in the mutated site moves with the mutant's line count, which says nothing about the check). null
+ *  when the run did not measure that: it did not run, the file did not load, or a named test failed on something other
+ *  than an assertion (a mutant that makes the check throw shows the check reaches the site, not that it tests it). */
+function redSignature(report: Row | null, titles: string[]): string | null {
+  const c = (report?.["red_reason"] ?? null) as CheckRunClass | null;
+  if (!report || report["ran"] !== true || !c || typeof c !== "object" || !Array.isArray(c.failures) || c.unhandled || !c.ran) return null;
+  const compared = Array.isArray(c.compared) ? c.compared : [];
+  const sig: unknown[] = [];
+  for (const t of titles) {
+    const f = c.failures.find((x) => x.name.includes(t));
+    if (!f) { sig.push([t, "pass"]); continue; }
+    if (f.cls !== "assertion") return null;
+    const v = compared.find((x) => x?.name === f.name);
+    const frame = v?.file && /\.(?:check|test|spec)\.[cm]?[jt]sx?$/.test(v.file) ? `${v.file.split("/").pop()}:${v.line ?? "?"}:${v.col ?? "?"}` : null;
+    sig.push([t, f.error ?? null, v?.expected ?? null, v?.received ?? null, frame]);
+  }
+  return JSON.stringify(sig);
+}
+/** The gate's decision from the unmutated report and one report per mutant run (null: that run answered nothing). */
+export function mutationGateVerdict(baseline: Row | null, runs: Array<{ mutant: Mutant; report: Row | null }>, titles: string[]): { measured: number; changed: number; unmeasured: number } {
+  const base = redSignature(baseline, titles);
+  let measured = 0, changed = 0, unmeasured = 0;
+  for (const { report } of runs) {
+    const applied = ((report?.["mutation"] ?? null) as Row | null)?.["applied"] === true;
+    const green = applied && report?.["ran"] === true && report?.["requested_not_passing"] === 0;
+    const sig = applied ? redSignature(report, titles) : null;
+    if (!applied || (!green && sig === null) || base === null) { unmeasured += 1; continue; }
+    measured += 1;
+    if (green || sig !== base) changed += 1;
+  }
+  return { measured, changed, unmeasured };
+}
+/**
+ * THE PART OF THE SITE THE CHECK EXERCISES. Operator mutants spread over a whole file land mostly in code a check never
+ * reaches (one function of a large module), so a genuine check would read as unmoved and be refused. The mutants are
+ * taken from the site's top-level declarations the check names (`ns.x` on any namespace import, or a named import) and
+ * the same-file declarations those reach, transitively; everything else is blanked to spaces, so offsets and lines are
+ * the file's own. The whole file when the check names nothing the site declares.
+ */
+export function siteRegionSource(siteSrc: string, checkSrc: string): string {
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return siteSrc; }
+  const check = ts.createSourceFile("c.ts", checkSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const nsNames = new Set<string>();
+  const wanted = new Set<string>();
+  check.forEachChild((n) => {
+    if (!ts.isImportDeclaration(n) || !n.importClause || !ts.isStringLiteral(n.moduleSpecifier) || !n.moduleSpecifier.text.startsWith(".")) return;
+    const nb = n.importClause.namedBindings;
+    if (nb && ts.isNamespaceImport(nb)) nsNames.add(nb.name.text);
+    if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) wanted.add((el.propertyName ?? el.name).text);
+  });
+  const reads = (n: import("typescript").Node): void => {
+    if (ts.isPropertyAccessExpression(n)) {
+      let e: import("typescript").Expression = n.expression;
+      while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+      if (ts.isIdentifier(e) && nsNames.has(e.text)) wanted.add(n.name.text);
+    }
+    ts.forEachChild(n, reads);
+  };
+  reads(check);
+  const site = ts.createSourceFile("s.ts", siteSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const decls = new Map<string, import("typescript").Statement>();
+  for (const st of site.statements) {
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) decls.set(st.name.text, st);
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) decls.set(d.name.text, st);
+  }
+  const keep = new Set<import("typescript").Statement>();
+  const queue = [...wanted].filter((w) => decls.has(w));
+  while (queue.length > 0) {
+    const st = decls.get(queue.pop()!)!;
+    if (keep.has(st)) continue;
+    keep.add(st);
+    const walk = (n: import("typescript").Node): void => { if (ts.isIdentifier(n) && decls.has(n.text) && !keep.has(decls.get(n.text)!)) queue.push(n.text); ts.forEachChild(n, walk); };
+    walk(st);
+  }
+  if (keep.size === 0) return siteSrc;
+  const chars: string[] = siteSrc.split("").map((ch) => (ch === "\n" || ch === "\r" ? ch : " "));
+  for (const st of keep) for (let i = st.getStart(site); i < st.getEnd(); i += 1) chars[i] = siteSrc[i]!;
+  return chars.join("");
+}
+/**
+ * THE CHECK'S CALLS MUST REACH THE GAP'S REGION (arm step only, 2026-10-24). goal-host 6c6d632's check called
+ * dispatchFailureReasons, which never reaches its gap's region (`if (r == null) return "the command produced no
+ * result";`, in runGoalAsPoolWalkBody), so its red was its fixture's, not the defect's, and the mutation gate below,
+ * mutating the declarations the check names, counted that red moving as "the check tests the site". Refused
+ * (CHECK_MISSES_REGION_STAGE) when the gap carries a region (classification_metadata.region) that occurs exactly once in
+ * the edit site inside a NAMED top-level declaration, the check names declarations of the site, and neither they nor
+ * the same-file declarations they reach (siteRegionSource) contain it. A region in an unnamed top-level statement (a
+ * route registration, a loop) decides nothing: siteRegionSource keeps only named declarations. Static, before the run.
+ * Not applied at the verify: check-supply-admission.ts is an evaluator file and this module is outside its closure.
+ */
+export const CHECK_MISSES_REGION_STAGE = "check_call_misses_region";
+export function checkMissesRegionRefusal(siteSrc: string, siteRel: string, checkSrc: string, region: string): { reason: string } | null {
+  const r = region.trim();
+  if (!r) return null;
+  const start = siteSrc.indexOf(r);
+  if (start < 0 || siteSrc.indexOf(r, start + r.length) >= 0) return null;
+  const end = start + r.length;
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return null; }
+  const site = ts.createSourceFile("s.ts", siteSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const top = site.statements.find((st) => st.getStart(site) <= start && st.getEnd() >= end);
+  const enclosing = !top ? null
+    : (ts.isFunctionDeclaration(top) || ts.isClassDeclaration(top)) && top.name ? top.name.text
+    : ts.isVariableStatement(top) && top.declarationList.declarations.every((d) => ts.isIdentifier(d.name)) ? top.declarationList.declarations.map((d) => (d.name as import("typescript").Identifier).text).join(", ")
+    : null;
+  if (!enclosing) return null;
+  const kept = siteRegionSource(siteSrc, checkSrc);
+  if (kept === siteSrc || kept.slice(start, end) === r) return null;
+  const reached: string[] = [];
+  for (const st of site.statements) {
+    if (kept[st.getStart(site)] === " ") continue;
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) reached.push(st.name.text);
+    else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) reached.push(d.name.text);
+  }
+  const shown = r.replace(/\s+/g, " ").slice(0, 160);
+  return { reason: `${CHECK_MISSES_REGION_STAGE}: what the check calls in ${siteRel} (${reached.slice(0, 8).join(", ")}${reached.length > 8 ? ", …" : ""}, with the same-file declarations it reaches) never reaches the gap's region (\`${shown}\`, in ${enclosing}), so its red is not the defect's: call an export that reaches the region` };
+}
+/** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
+export async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; root?: string }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
+  const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator }, ...(a.root ? { root: a.root } : {}) };
+  // A compose root (the arm pre-check) is a local tree: its runs are this node's, never the holder's.
+  if (a.root || gapStoreIsLocal()) {
+    const r = await resolveTestSuite(input).catch(() => null);
+    return { report: r && r.shape === "test_suite" ? (r.body as Row) : null };
+  }
+  const held = await holderCheckReport({ shape: "test_suite", input });
+  if (!held.report && /unreachable|HTTP/.test(held.detail)) return { wait: `the mutant runs could not be read at the holder (${held.detail})` };
+  return { report: held.report };
+}
+export async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number; root?: string }): Promise<MutationGateOutcome> {
+  let src: string | null = null;
+  try { src = readFileSync(a.root ? join(a.root, a.siteRel) : join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  if (src === null) return { kind: "refuse", reason: `red_independent_of_edit_site: the edit site ${a.siteRel} is not readable here, so no change to it can be shown to move the check`, record: { mutants: 0, site: a.siteRel } };
+  const region = siteRegionSource(src, a.checkSrc);
+  const mutants = selectMutants(region, a.k).map((m) => ({ ...m, original: src!.slice(m.start, m.end) }));
+  const record: Row = { site: a.siteRel, k: a.k, selected: mutants.length, region: region === src ? "file" : "declarations_the_check_names" };
+  if (mutants.length === 0) return { kind: "pass", record: { ...record, decided: "nothing: the edit site has no mutable construct" } };
+  const runs: Array<{ mutant: Mutant; report: Row | null }> = [];
+  for (const m of mutants) {
+    const run = await mutantRun(a, m);
+    if ("wait" in run) return { kind: "wait", detail: run.wait };
+    const report = run.report;
+    runs.push({ mutant: m, report });
+    const v = mutationGateVerdict(a.baseline, runs, a.titles);
+    if (v.changed > 0) return { kind: "pass", record: { ...record, ran: runs.length, ...v, changed_by: { operator: m.operator, line: m.line } } };
+  }
+  const v = mutationGateVerdict(a.baseline, runs, a.titles);
+  const out = { ...record, ran: runs.length, ...v };
+  if (v.measured === 0) return { kind: "pass", record: { ...out, decided: "nothing: no mutant run measured the check" } };
+  return { kind: "refuse", reason: `red_independent_of_edit_site: the named test(s) fail the same way under all ${v.measured} measured mutant(s) of ${a.siteRel} (${mutants.map((m) => `${m.operator}@${m.line}`).join(", ")}), so no change to the site moves the check`, record: out };
+}
+
+/**
+ * THE CHECK'S RED MUST DEPEND ON THE GAP'S REGION (arm step, 2026-10-24). concept-db 23f78717's check posted a pointer
+ * with no `type`, so its red was the 400 "Missing or invalid pointer.type" from the request validation, wherever the
+ * defect is (the `throw new Error(\`'${pointer.shape}' is not yet implemented.\`)` stub further down the same
+ * function). It armed: its row has no literal region, and the operator gate above found nothing mutable in what the
+ * check names (the Hono app constant), so it decided nothing. The gap's region is DERIVED here from the evidence's own
+ * observed output: a TEXT anchor of falsifiableAnchors (the anchor the check goal hands the drafter) that occurs exactly
+ * once in the edit site; its smallest enclosing statement, not a declaration, is the region. The check runs once more
+ * with that statement replaced by an inert one (scope-earn-in regionStatementMutant, through test_suite's mutate_edit):
+ * code that emits the observed output is on the symptom's path, so a check that reaches the defect moves (green, or a
+ * different failing assertion). Unchanged: refused, REGION_RED_UNCHANGED_STAGE, the reason being the drafter's lesson.
+ * A run that did not measure decides nothing. Only DERIVED regions: a literal classification_metadata.region is where
+ * grounding centres the edit, often the line a missing fix goes next to, so replacing it need not move a correct check
+ * (that row kind keeps checkMissesRegionRefusal). No text anchor occurring once: no region, recorded so.
+ */
+export const REGION_RED_UNCHANGED_STAGE = "region_red_unchanged";
+/** The region gate applies to a row with no literal region, and (qa, 2026-10-24) to one whose literal region does not
+ *  occur in the check's edit-site file `siteSrc` (it names another file or repo, as 84460a91's row names the super-repo
+ *  transport server's resolveOverLibp2p for a check of libp2p-federation-transport src/index.ts): the region is then
+ *  derived from the evidence (derivedTextRegion). A literal that occurs in the site is where grounding centres the edit,
+ *  and gets no region mutant. With no site text to look in, only the no-literal case applies. */
+export const regionGateApplies = (meta: Row, siteSrc: string | null = null): boolean => {
+  const literal = regionOf(meta);
+  return literal === "" || (siteSrc !== null && countLiteral(siteSrc, literal) === 0);
+};
+/**
+ * The derived region and, when there is none, why (recorded on region_gate.why). A text anchor needs 1 to 5
+ * occurrences, none of them in a declaration. A TOKEN anchor's declaration occurrences are SKIPPED, not disqualifying
+ * (qa, 2026-10-24): a name's own declaration is not the code that uses it, so only its other occurrences count toward
+ * 1 to 5 and are replaced.
+ */
+export function explainedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { region: { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null; why: string } {
+  const anchors = falsifiableAnchors(evidence, siteSrc, spec, null, { ...more, site_tokens: true });
+  const free = commentFreeSource(siteSrc);
+  const notes: string[] = [];
+  for (const a of [...anchors.filter((x) => x.kind === "text"), ...anchors.filter((x) => x.kind === "token")]) {
+    const all = anchorOccurrences(free, a).map((i) => [i, i + a.value.length] as [number, number]);
+    const spans = a.kind === "token" ? all.filter(([s0, e0]) => regionStatementMutant(siteSrc, s0, e0, siteRel) !== null) : all;
+    if (spans.length < 1 || spans.length > TOKEN_ANCHOR_MAX) {
+      notes.push(a.kind === "token" ? `token ${a.value}: ${spans.length} non-declaration occurrence(s) of ${all.length}` : `text ${JSON.stringify(a.value.slice(0, 60))}: ${all.length} occurrence(s)`);
+      continue;
+    }
+    const mutant = allOccurrencesMutant(siteSrc, siteRel, spans);
+    if (mutant) return { region: { anchor: a.value, kind: a.kind as "text" | "token", occurrences: spans.length, mutant }, why: "" };
+    notes.push(`text ${JSON.stringify(a.value.slice(0, 60))}: an occurrence is in a declaration`);
+  }
+  return { region: null, why: notes.length ? notes.join("; ").slice(0, 400) : "the evidence names no text anchor or site identifier" };
+}
+/**
+ * ONE MUTANT FOR EVERY OCCURRENCE (qa ruling): each occurrence's smallest enclosing statement (scope-earn-in
+ * regionStatementMutant), replaced together in one edit over the span from the first to the last, so the existing
+ * mutate_edit path applies it as one mutant. A statement inside another occurrence's is covered by the outer one. null
+ * when any occurrence's statement is a declaration: the region would be only part of the anchor's code.
+ */
+export function allOccurrencesMutant(src: string, siteRel: string, spans: Array<[number, number]>): Mutant | null {
+  const stmts: Mutant[] = [];
+  for (const [s0, e0] of spans) {
+    const m = regionStatementMutant(src, s0, e0, siteRel);
+    if (!m) return null;
+    stmts.push(m);
+  }
+  const outer = stmts.filter((m, i) => !stmts.some((o, j) => j !== i && o.start <= m.start && o.end >= m.end && (o.start !== m.start || o.end !== m.end || j < i)));
+  outer.sort((x, y) => x.start - y.start);
+  if (outer.length === 1) return outer[0]!;
+  const start = outer[0]!.start, end = outer[outer.length - 1]!.end;
+  let replacement = "", at = start;
+  for (const m of outer) { replacement += src.slice(at, m.start) + m.replacement; at = m.end; }
+  replacement += src.slice(at, end);
+  return { operator: "replace_statement", start, end, original: src.slice(start, end), replacement, line: outer[0]!.line };
+}
+export async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string; more?: AnchorSources; root?: string }): Promise<MutationGateOutcome> {
+  let src: string | null = null;
+  try { src = readFileSync(a.root ? join(a.root, a.siteRel) : join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  const explained = src === null ? { region: null, why: `the edit site ${a.siteRel} is not readable here` } : explainedTextRegion(src, a.siteRel, a.evidence, a.spec, a.more ?? {});
+  const region = explained.region;
+  if (!region) return { kind: "pass", record: { decided: "unmeasured: no region", why: explained.why } };
+  const m = region.mutant;
+  const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
+  const record: Row = { region: region.kind === "text" ? "derived_from_text_anchor" : "derived_from_token_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement.slice(0, 200), ...(region.occurrences > 1 ? { occurrences: region.occurrences } : {}) };
+  const run = await mutantRun(a, m);
+  if ("wait" in run) return { kind: "wait", detail: run.wait };
+  const v = mutationGateVerdict(a.baseline, [{ mutant: m, report: run.report }], a.titles);
+  if (v.measured === 0) return { kind: "pass", record: { ...record, ...v, decided: "unmeasured: the region mutant run measured nothing" } };
+  if (v.changed > 0) return { kind: "pass", record: { ...record, ...v } };
+  const ff = firstFailureOf((a.baseline as Row | null)?.["red_reason"]);
+  const failure = ff ? [ff["error"] != null ? String(ff["error"]) : "", ff["expected"] != null ? `Expected ${String(ff["expected"])}` : "", ff["received"] != null ? `Received ${String(ff["received"])}` : ""].filter(Boolean).join(", ").slice(0, 240) || "the same failing assertion" : "the same failing assertion";
+  return { kind: "refuse", reason: `${REGION_RED_UNCHANGED_STAGE}: the check's red survives replacing the gap's region (\`${shown}\`, ${a.siteRel}:${m.line}); its failure comes from elsewhere (${failure}), so it does not measure the gap`, record: { ...record, ...v } };
+}
+/**
+ * THE MUTANT GATES AT A COMPOSE WORKTREE (the arm pre-check). The same editSiteMutationGate and regionMutantGate, no logic
+ * or threshold changed, with `root` the compose worktree that holds the drafted check: the site is read there and every
+ * mutant run is test_suite with that root (test-suite.ts composeRootProblem accepts a compose-workspace path only), which
+ * runs each mutant in a throwaway copy of the worktree, never in the worktree itself. Local runs (never the holder's).
+ */
+export function editSiteMutationGateAt(root: string, a: Omit<Parameters<typeof editSiteMutationGate>[0], "root">): Promise<MutationGateOutcome> {
+  return editSiteMutationGate({ ...a, root });
+}
+export function regionMutantGateAt(root: string, a: Omit<Parameters<typeof regionMutantGate>[0], "root">): Promise<MutationGateOutcome> {
+  return regionMutantGate({ ...a, root });
 }

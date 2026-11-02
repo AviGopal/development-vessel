@@ -55,7 +55,7 @@ import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
 import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold, ownCheckBaselineFor, ownCheckVesselOf } from "../judge/gap-eligibility.js";
-import { countLiteral, regionFromProposalText, regionOf } from "../lib/region-literal.js";
+import { countLiteral, regionFromProposalText, regionLiteralVerdict, regionOf } from "../lib/region-literal.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, ownCheckStillRed, testExpectCount, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 import { addCallPathEntry, callPathLine, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
 import type { OwnCheckBaseline } from "./own-check-baseline.js";
@@ -173,6 +173,8 @@ import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 import { bindDraftedAnchor, lineMatchesDrafted, renderControlBytes, renderWindowForDrafter } from "../control-bytes.js";
 import { codeContract } from "./code-introspect.js";
 import { srcReaderAt } from "./check-supply-admission.js";
+// The arm step's predicates, statically from lane core (user ruling, arm pre-check option i): never from gap-check-supply.
+import * as armPredicates from "./check-supply-admission.js";
 
 // COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
 // returns `usage` on every completion and llmCall used to drop it, so every compose report
@@ -6401,8 +6403,8 @@ export const TEST_WRITING_RED_ERROR = 300;
  * THE ARM STEP'S STATIC PREDICATES, AT THE TEST-WRITING VERIFY (arm pre-check, static slice). A test-writing check that
  * passed this verify (red at the parent, by assertion) landed as a check-only commit, and the arm step then refused it on
  * predicates the verify never applied, and that need only the check and the parent's edit site: 10 of 11 such landings in
- * a day, each a commit and a cutover that armed nothing. Three of them are static, and run here, imported from the arm
- * step (gap-check-supply.ts, outside the evaluator closure, so never from check-supply-admission): the arm-time region
+ * a day, each a commit and a cutover that armed nothing. Three of them are static, and run here: the arm step's own
+ * functions, which live in lane core (check-supply-admission.ts; gap-check-supply.ts re-exports them): the arm-time region
  * gate (regionLiteralVerdict, as substrate-gap's arm write applies it), checkMissesRegionRefusal, and noControlRefusal
  * (last, as the arm step orders it; skipped for a config site, and when the arm's own rhythm says require_control false).
  * The result is the refusal the arm step would write, with the same reason string, or null.
@@ -6413,9 +6415,8 @@ export async function testWritingArmStaticRefusal(a: { vessel: string; vesselRoo
   const checkSrc = read(a.checkFile);
   const siteSrc = read(a.siteRel);
   if (checkSrc === null || siteSrc === null) return null;
-  const supply = await import("./gap-check-supply.js");
+  const supply = armPredicates;
   if (a.region) {
-    const { regionLiteralVerdict } = await import("../lib/region-literal.js");
     const editSite = `repos/${a.vessel.replace(/^repos\//, "")}/${a.siteRel}`;
     const v = regionLiteralVerdict(a.region, editSite);
     if (!v.ok) return { stage: v.error, reason: `${v.error} occurrences=${v.occurrences ?? "n/a"} edit_site=${editSite}: ${v.detail}` };
@@ -6434,8 +6435,8 @@ export async function testWritingArmStaticRefusal(a: { vessel: string; vesselRoo
 /**
  * THE ARM STEP'S MUTANT GATES, AT THE TEST-WRITING VERIFY (arm pre-check, mutant slice). The two gates the static slice
  * cannot apply: red_independent_of_edit_site (editSiteMutationGate) and region_red_unchanged (regionMutantGate), the
- * arm step's own functions run at the compose worktree that holds the drafted check (gap-check-supply.ts *At variants:
- * no logic or threshold changed). Their baseline is test_suite's report of the check, read at that root; each mutant
+ * arm step's own functions run at the compose worktree that holds the drafted check (the *At variants, in lane core
+ * check-supply-admission.ts with the gates themselves: no logic or threshold changed). Their baseline is test_suite's report of the check, read at that root; each mutant
  * runs in a throwaway copy of the worktree (test-suite.ts), so the draft under verify is never mutated. Combined as the
  * arm step combines them: a site refusal stands unless the region mutant moved the red. A root test_suite will not
  * accept (a non-isolated compose) or a run that measured nothing decides nothing. The refusal, or null.
@@ -6444,7 +6445,7 @@ export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoo
   if (!a.siteRel) return null;
   let checkSrc: string;
   try { checkSrc = readFileSync(`${a.vesselRoot}/${a.checkFile}`, "utf8"); } catch { return null; }
-  const supply = await import("./gap-check-supply.js");
+  const supply = armPredicates;
   const { resolveTestSuite } = await import("./test-suite.js");
   const name = a.vessel.replace(/^repos\//, "");
   const titles = supply.declaredTestTitles(checkSrc);

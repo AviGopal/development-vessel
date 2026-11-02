@@ -1726,8 +1726,8 @@ function byLandableBand(rows: Row[], byId: ReadonlyMap<string, Row>, scope: Auto
 }
 
 /**
- * One own-check-baseline goal per row whose test_suite own check has no baseline (and no baseline goal) at its vessel's
- * current origin/dev, in three bands, each in landability order: system-born (isSystemBornLineage) rows the lane could
+ * One own-check-baseline goal per row whose test_suite own check has no baseline fresh at its vessel's current origin/dev
+ * (ownCheckBaselineFor) and no baseline goal at it, in three bands, each in landability order: system-born (isSystemBornLineage) rows the lane could
  * land, then the other system-born rows, then the rest; at most the shaped per-tick bound. Each goal is its own goal-host execution (selectable and traced); its dispatch is appended to the
  * row's own_check_baseline_dispatches (the last 5), so the same (gap, sha) is never sent twice, and each earlier
  * dispatch's execution id is read back from goal-host's record (own-check-baseline-credit.ts dispatchExecutionId) and
@@ -1739,7 +1739,7 @@ export async function dispatchOwnCheckBaselines(
   deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined>; byId?: ReadonlyMap<string, Row>; scope?: () => Promise<AutonomyScope> },
 ): Promise<Array<{ id: string; base_sha: string; dispatch_id: string }>> {
   const { readOwnCheckEnvPolicy } = await import("./own-check-baseline.js");
-  const { ownCheckVesselOf } = await import("../judge/gap-eligibility.js");
+  const { ownCheckVesselOf, ownCheckBaselineFor } = await import("../judge/gap-eligibility.js");
   const { dispatchExecutionId } = await import("./own-check-baseline-credit.js");
   const pol = await readOwnCheckEnvPolicy(deps.env);
   if (!pol.ok) { console.warn(`[gap-check-supply] ${pol.why}: no own-check baseline is measured this pass`); return []; }
@@ -1782,7 +1782,9 @@ export async function dispatchOwnCheckBaselines(
     }));
     if (!heads.has(vessel)) heads.set(vessel, headOf(vessel));
     const head = heads.get(vessel) ?? null;
-    const measured = !head || !/^[0-9a-f]{40}$/.test(head) || list.some((d) => d?.base_sha === head) || (meta["own_check_baseline"] as { base_sha?: unknown } | undefined)?.base_sha === head;
+    // A reading FRESH at head (ownCheckBaselineFor: at head, or at an older sha whose diff to head touches none of its
+    // files) is not measured again; a stale one is. A goal still in flight is matched by its exact sha (no reading yet).
+    const measured = !head || !/^[0-9a-f]{40}$/.test(head) || list.some((d) => d?.base_sha === head) || (meta["own_check_baseline"] as { base_sha?: unknown } | undefined)?.base_sha === head || ownCheckBaselineFor(meta, head) !== null;
     if (measured) { if (filled) await deps.write(row, { own_check_baseline_dispatches: list }); continue; }
     const testFile = String(((meta["evidence_resolve"] as { input?: Row } | undefined)?.input ?? {})["test_file"] ?? "");
     const goal = `classify gap ${id}'s own check ${vessel}/${testFile} at base ${head!.slice(0, 12)} as green_at_parent | red_code_reachable | red_environmental | unrunnable (ownCheckBaseline)`;

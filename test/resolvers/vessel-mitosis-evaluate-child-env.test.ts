@@ -558,7 +558,7 @@ const CHILD_SPAWN_ALLOWLIST: Record<string, [number, string]> = {
   "src/judge/gap-landing-verdict.ts#landedCommitViaLineage#argv:git": [1, GIT],
   "src/judge/gap-landing-verdict.ts#shaIsAncestorOfAnyClone#argv:git": [1, GIT],
   "src/judge/gap-check-judge.ts#shaWasRevertedInAnyClone#argv:git": [2, GIT],
-  "src/judge/gap-check-judge.ts#sweepGitOut#argv:git": [1, GIT],
+  "src/judge/gap-eligibility.ts#sweepGitOut#argv:git": [1, GIT],
   "src/judge/gap-landing-verdict.ts#systemdUnitStartedAt#argv:systemctl": [1, UNIT],
   "src/resolvers/git-add.ts#resolveGitAdd#argv:git": [1, GIT],
   "src/resolvers/git-branch-create.ts#resolveGitBranchCreate#argv:git": [1, GIT],

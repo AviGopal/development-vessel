@@ -5,10 +5,12 @@
  * isTerminalRefusalResult) and whether a landing verdict is a measurement (landVerdictIsMeasured).
  *
  * Moved verbatim out of src/resolvers/gap-to-feature.ts (the gap-to-feature judge split, BOUNDARY.md 1.1): a judge
- * must not live in the file whose changes it judges. Leaf module: it imports nothing, so every closed reader
- * (substrate-gap, vessel-mitosis-cutover, feature-compose, check-supply-admission) can depend on it without
- * pulling in the lane.
+ * must not live in the file whose changes it judges. It imports only node builtins and gap-policy (another core module,
+ * for the own-check freshness predicate's clone root and edit-site rule), so every closed reader (substrate-gap,
+ * vessel-mitosis-cutover, feature-compose, check-supply-admission) can depend on it without pulling in the lane.
  */
+import { join } from "node:path";
+import { editSitePath, vesselsCloneRoot } from "./gap-policy.js";
 
 /**
  * The file a gap says it is about, in the order the rest of this file already trusts:
@@ -425,17 +427,73 @@ export function ownCheckVesselOf(meta: Record<string, unknown>): string {
   return typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
 }
 
+export function sweepGitOut(cloneDir: string, args: string[]): string | null {
+  let out: string | null = null;
+  try {
+    const p = Bun.spawnSync(["git", "-C", cloneDir, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    if (p.exitCode === 0) out = new TextDecoder().decode(p.stdout).trim();
+  } catch { /* spawn failed: no output */ }
+  return out;
+}
+
+/** The files `fromSha..toSha` changed in a vessel's clone (the clone vesselOriginDevSha reads), vessel-relative, or null
+ *  when `fromSha` is not a commit there (unknown, a shallow clone, gc'd) or git fails. One diff per distinct (clone,
+ *  from, to): a diff between two commits never changes, so a result is kept across passes (bounded); a null is not
+ *  kept, so a transient git failure is asked again. */
+const changedFilesMemo = new Map<string, string[]>();
+const CHANGED_FILES_MEMO_MAX = 4096;
+export function vesselChangedFiles(vessel: string, fromSha: string, toSha: string): string[] | null {
+  const dir = join(vesselsCloneRoot(), vessel);
+  const key = `${dir}\0${fromSha}\0${toSha}`;
+  const hit = changedFilesMemo.get(key);
+  if (hit) return hit;
+  if (sweepGitOut(dir, ["cat-file", "-e", `${fromSha}^{commit}`]) === null) return null;
+  // --no-renames: a renamed file is listed under its old name too, so a guarded file moved away is a change to it.
+  const out = sweepGitOut(dir, ["diff", "--no-renames", "--name-only", fromSha, toSha]);
+  if (out === null) return null;
+  const files = out.split("\n").map((f) => f.trim()).filter((f) => f.length > 0);
+  if (changedFilesMemo.size >= CHANGED_FILES_MEMO_MAX) changedFilesMemo.clear();
+  changedFilesMemo.set(key, files);
+  return files;
+}
+
 /**
- * The baseline on a gap row, only when it was measured at `currentSha` (the vessel's origin/dev now) and for the check
- * the row names now (same file and titles). A baseline on another sha is stale: it decides nothing.
+ * THE OWN-CHECK READING'S FRESHNESS (user ruling, "Both, freshness first"): a reading taken at `base_sha` S is fresh at
+ * the vessel's origin/dev H iff S == H, or `git diff S..H` in that vessel's clone touches none of the files the reading
+ * rests on: the check's test file, the reading's call_path files, and the gap's edit site (gapEditSite through
+ * editSitePath), each compared vessel-relative (a repos/<vessel>/ prefix is cut; a path in another vessel cannot be in
+ * this vessel's diff). An unknown or unreachable S is stale. ACCEPTED RISK: a change to a file the check imports that is
+ * on none of those paths can change the check's result without staling the reading.
+ */
+export function ownCheckReadingFresh(meta: Record<string, unknown>, b: OwnCheckBaselineKey, headSha: string): boolean {
+  if (b.base_sha === headSha) return true;
+  const vessel = ownCheckVesselOf(meta);
+  if (!vessel || !/^[A-Za-z0-9_.-]+$/.test(vessel) || !/^[0-9a-f]{40}$/.test(b.base_sha) || !/^[0-9a-f]{40}$/.test(headSha)) return false;
+  const changed = vesselChangedFiles(vessel, b.base_sha, headSha);
+  if (!changed) return false;
+  const prefix = `repos/${vessel}/`;
+  const rel = (p: string): string | null => {
+    const q = p.replace(/^\.?\/+/, "").split(/[\s(]/)[0] ?? "";
+    if (q.startsWith(prefix)) return q.slice(prefix.length);
+    return q.startsWith("repos/") || q.length === 0 ? null : q;
+  };
+  const site = gapEditSite({}, meta);
+  const callPath = Array.isArray(b.call_path) ? (b.call_path as Array<{ path?: unknown }>).map((e) => (typeof e?.path === "string" ? editSitePath(e.path) : "")) : [];
+  const guarded = [typeof b.test_file === "string" ? rel(b.test_file) : null, ...callPath.map(rel), site ? rel(editSitePath(site)) : null].filter((g): g is string => !!g);
+  return !changed.some((f) => guarded.some((g) => f === g || f.startsWith(g.endsWith("/") ? g : `${g}/`)));
+}
+
+/**
+ * The baseline on a gap row, only when it is FRESH at `currentSha` (the vessel's origin/dev now; ownCheckReadingFresh)
+ * and for the check the row names now (same file and titles). A stale baseline decides nothing.
  */
 /** The fields a reader keys a reading on (the whole record is resolvers/own-check-baseline.ts OwnCheckBaseline). */
-export type OwnCheckBaselineKey = { base_sha: string; test_file: string; only_tests?: string[] };
+export type OwnCheckBaselineKey = { base_sha: string; test_file: string; only_tests?: string[]; call_path?: unknown };
 export function ownCheckBaselineFor<T extends OwnCheckBaselineKey>(meta: Record<string, unknown>, currentSha: string | null): T | null {
   const b = meta["own_check_baseline"] as T | undefined;
-  if (!b || typeof b !== "object" || !currentSha || typeof b.base_sha !== "string" || b.base_sha !== currentSha) return null;
+  if (!b || typeof b !== "object" || !currentSha || typeof b.base_sha !== "string") return null;
   const er = meta["evidence_resolve"] as { input?: { test_file?: unknown; only_tests?: unknown } } | undefined;
   const only = Array.isArray(er?.input?.only_tests) ? (er!.input!.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.length > 0) : [];
   if (er?.input?.test_file !== b.test_file || JSON.stringify(only) !== JSON.stringify(b.only_tests ?? [])) return null;
-  return b;
+  return ownCheckReadingFresh(meta, b, currentSha) ? b : null;
 }

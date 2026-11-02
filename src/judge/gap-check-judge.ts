@@ -17,7 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { evaluatorTreePath } from "../lib/evaluator-tree.js";
-import { nonEmptyStr } from "./gap-eligibility.js";
+import { nonEmptyStr, sweepGitOut } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 
 /**
@@ -724,14 +724,8 @@ export function landedCommitVerdict(gapId: string, editSite: string): 'pending' 
   return 'pending';
 }
 
-export function sweepGitOut(cloneDir: string, args: string[]): string | null {
-  let out: string | null = null;
-  try {
-    const p = Bun.spawnSync(["git", "-C", cloneDir, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
-    if (p.exitCode === 0) out = new TextDecoder().decode(p.stdout).trim();
-  } catch { /* spawn failed: no output */ }
-  return out;
-}
+// sweepGitOut lives in gap-eligibility (the own-check freshness predicate runs git there); re-exported for its readers.
+export { sweepGitOut };
 
 // ── PRODUCER CONTRACT (package B, user ruling 2026-10-13: "Yes, additive mode") ─────────────────────────────────────
 // evidence_resolve {shape, mode:"producer_contract", required_keys?, timeout_ms?} asks one question: does any producer

@@ -58,6 +58,26 @@ export function testSuiteCheckRoot(vessel: string): string {
   return vessel === "super-repo" ? (process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo") : `${VESSEL_CLONES_ROOT}/${vessel}`;
 }
 const DEFAULT_TIMEOUT_MS = 240_000;
+/** The compose workspace (compose-workspace.ts writes a compose's isolated worktrees under it): the same bootstrap path,
+ *  read at call time. */
+const composeWorkspaceDir = (): string => process.env["COMPOSE_WS_DIR"] ?? "/workspace/git/compose";
+/**
+ * A `root` OVERRIDE NAMES A COMPOSE WORKTREE, AND NOTHING ELSE (the arm pre-check's mutant gates). A test-writing
+ * compose's drafted check lives only in its compose worktree, uncommitted, so the edit-site and region mutant gates could
+ * not run it through this resolver (the vessel clone, or a base_ref worktree of it, has no such file). With `root` the
+ * run reads that tree instead, with the same report code. Accepted only for an existing directory under the compose
+ * workspace (realpath, no '..'); anything else is refused, fail closed. Null when acceptable, else why not.
+ */
+export function composeRootProblem(root: unknown): string | null {
+  if (typeof root !== "string" || !root.trim().startsWith("/") || root.split("/").includes("..")) return "root must be an absolute path with no '..'";
+  let real: string;
+  let ws: string;
+  try { real = fs.realpathSync(root.trim()); } catch { return "root does not exist"; }
+  try { ws = fs.realpathSync(composeWorkspaceDir()); } catch { return "the compose workspace does not exist here, so no root can be under it"; }
+  if (!real.startsWith(ws + "/")) return `root is not under the compose workspace (${ws})`;
+  try { if (!fs.statSync(real).isDirectory()) return "root is not a directory"; } catch { return "root does not exist"; }
+  return null;
+}
 
 async function discoverShellEndpoint(): Promise<string | null> {
   try {
@@ -388,9 +408,17 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     const m = pointer.mutate_edit as MutationEdit;
     edit = { file: m.file, start: m.start, end: m.end, original: m.original, replacement: m.replacement, ...(typeof m.operator === "string" ? { operator: m.operator.slice(0, 40) } : {}) };
   }
+  // A compose worktree named as the tree to read (composeRootProblem): its plain run reads it in place; a mutation run
+  // reads a throwaway copy of it (below), so the draft under verify is never mutated.
+  let composeRoot: string | null = null;
+  if (pointer.root !== undefined && pointer.root !== null) {
+    const bad = composeRootProblem(pointer.root);
+    if (bad) return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "root", detail: bad } };
+    composeRoot = fs.realpathSync(String(pointer.root).trim());
+  }
   const rel = `repos/${name}`;
-  const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
-  const fallbackRoot = `${SUPER_REPO_ROOT}/repos/${name}`;
+  const preferredRoot = composeRoot ?? `${VESSEL_CLONES_ROOT}/${name}`;
+  const fallbackRoot = composeRoot ?? `${SUPER_REPO_ROOT}/repos/${name}`;
   const landedSha = typeof pointer.landed_sha === "string" ? pointer.landed_sha.trim() : undefined;
   const timeoutMs = typeof pointer.timeout_ms === "number" && pointer.timeout_ms > 0 ? pointer.timeout_ms : DEFAULT_TIMEOUT_MS;
   const budgetSec = Math.ceil(timeoutMs / 1000);
@@ -484,16 +512,25 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const bunRun = `timeout ${budgetSec} ${testChildEnvShellPrefix()} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
   const command = baseRef
     ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
-      `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
-      `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then ` +
+      (composeRoot
+        // A COMPOSE ROOT IS COPIED, NEVER CHECKED OUT OR MUTATED IN PLACE: its draft is uncommitted (a base_ref worktree
+        // would lack it) and it is the tree under verify. The copy (tar of the root without .git and node_modules,
+        // node_modules linked back) is removed below like a worktree.
+        ? `BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
+          `if [ -d "$ROOT/node_modules" ] && (cd "$ROOT" && tar --exclude=./.git --exclude=./node_modules -cf - .) | tar -xf - -C "$BW" >/dev/null 2>&1; then `
+        : `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
+          `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then `) +
       `ln -s "$ROOT/node_modules" "$BW/node_modules"; echo "VERIFIED_ROOT=$BW"; echo "VERIFIED_HEAD=$(git -C "$BW" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
       (mutate || edit
         ? `MUT="$(${mutate ? mutationRevertScript(mutate.sha, mutate.file) : mutationEditScript(edit!)})"; echo "$MUT"; case "$MUT" in *MUTATION_APPLIED=1*) (cd "$BW" && ${bunRun});; esac; fi; `
         : `(cd "$BW" && ${bunRun}); fi; `) +
-      `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
+      (composeRoot ? `rm -rf "$BW"; true` : `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`)
     : `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-      `cd "$ROOT" && ([ -d node_modules ] || timeout 120 ${testChildEnvShellPrefix()} bun install >/dev/null 2>&1; ${bunRun})`;
+      // A compose root is never installed into (it is the tree under verify): it runs only with the node_modules it has.
+      (composeRoot
+        ? `cd "$ROOT" && ${bunRun}`
+        : `cd "$ROOT" && ([ -d node_modules ] || timeout 120 ${testChildEnvShellPrefix()} bun install >/dev/null 2>&1; ${bunRun})`);
 
   let raw = "";
   let gateRefused: string | null = null;

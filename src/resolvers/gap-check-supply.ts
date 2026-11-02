@@ -1403,9 +1403,10 @@ export function withArmRefusalLesson(meta: Row, a: { reason: string; testFile: s
   return lessons;
 }
 /** One run of the check under one mutant of its site, where the check's report was taken: here, or at the gap-store holder. */
-async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[] }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
-  const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } };
-  if (gapStoreIsLocal()) {
+async function mutantRun(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; root?: string }, m: Mutant): Promise<{ report: Row | null } | { wait: string }> {
+  const input: Row = { vessel: `repos/${a.vessel}`, test_file: a.testFile, only_tests: a.titles, base_ref: "HEAD", mutate_edit: { file: a.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator }, ...(a.root ? { root: a.root } : {}) };
+  // A compose root (the arm pre-check) is a local tree: its runs are this node's, never the holder's.
+  if (a.root || gapStoreIsLocal()) {
     const r = await resolveTestSuite(input).catch(() => null);
     return { report: r && r.shape === "test_suite" ? (r.body as Row) : null };
   }
@@ -1413,9 +1414,9 @@ async function mutantRun(a: { vessel: string; siteRel: string; testFile: string;
   if (!held.report && /unreachable|HTTP/.test(held.detail)) return { wait: `the mutant runs could not be read at the holder (${held.detail})` };
   return { report: held.report };
 }
-async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number }): Promise<MutationGateOutcome> {
+async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number; root?: string }): Promise<MutationGateOutcome> {
   let src: string | null = null;
-  try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  try { src = readFileSync(a.root ? join(a.root, a.siteRel) : join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
   if (src === null) return { kind: "refuse", reason: `red_independent_of_edit_site: the edit site ${a.siteRel} is not readable here, so no change to it can be shown to move the check`, record: { mutants: 0, site: a.siteRel } };
   const region = siteRegionSource(src, a.checkSrc);
   const mutants = selectMutants(region, a.k).map((m) => ({ ...m, original: src!.slice(m.start, m.end) }));
@@ -1517,9 +1518,9 @@ export function allOccurrencesMutant(src: string, siteRel: string, spans: Array<
   replacement += src.slice(at, end);
   return { operator: "replace_statement", start, end, original: src.slice(start, end), replacement, line: outer[0]!.line };
 }
-async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string; more?: AnchorSources }): Promise<MutationGateOutcome> {
+async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: string; titles: string[]; baseline: Row | null; evidence: string; spec: string; more?: AnchorSources; root?: string }): Promise<MutationGateOutcome> {
   let src: string | null = null;
-  try { src = readFileSync(join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
+  try { src = readFileSync(a.root ? join(a.root, a.siteRel) : join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
   const explained = src === null ? { region: null, why: `the edit site ${a.siteRel} is not readable here` } : explainedTextRegion(src, a.siteRel, a.evidence, a.spec, a.more ?? {});
   const region = explained.region;
   if (!region) return { kind: "pass", record: { decided: "unmeasured: no region", why: explained.why } };
@@ -1534,6 +1535,18 @@ async function regionMutantGate(a: { vessel: string; siteRel: string; testFile: 
   const ff = firstFailureOf((a.baseline as Row | null)?.["red_reason"]);
   const failure = ff ? [ff["error"] != null ? String(ff["error"]) : "", ff["expected"] != null ? `Expected ${String(ff["expected"])}` : "", ff["received"] != null ? `Received ${String(ff["received"])}` : ""].filter(Boolean).join(", ").slice(0, 240) || "the same failing assertion" : "the same failing assertion";
   return { kind: "refuse", reason: `${REGION_RED_UNCHANGED_STAGE}: the check's red survives replacing the gap's region (\`${shown}\`, ${a.siteRel}:${m.line}); its failure comes from elsewhere (${failure}), so it does not measure the gap`, record: { ...record, ...v } };
+}
+/**
+ * THE MUTANT GATES AT A COMPOSE WORKTREE (the arm pre-check). The same editSiteMutationGate and regionMutantGate, no logic
+ * or threshold changed, with `root` the compose worktree that holds the drafted check: the site is read there and every
+ * mutant run is test_suite with that root (test-suite.ts composeRootProblem accepts a compose-workspace path only), which
+ * runs each mutant in a throwaway copy of the worktree, never in the worktree itself. Local runs (never the holder's).
+ */
+export function editSiteMutationGateAt(root: string, a: Omit<Parameters<typeof editSiteMutationGate>[0], "root">): Promise<MutationGateOutcome> {
+  return editSiteMutationGate({ ...a, root });
+}
+export function regionMutantGateAt(root: string, a: Omit<Parameters<typeof regionMutantGate>[0], "root">): Promise<MutationGateOutcome> {
+  return regionMutantGate({ ...a, root });
 }
 /**
  * A CHECK A GUTTED SITE PASSES (gate 9, ruling 2026-10-24). light-dispatch ac2ed275's check expects answerOutcome's

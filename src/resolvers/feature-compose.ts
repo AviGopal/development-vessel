@@ -6432,16 +6432,55 @@ export async function testWritingArmStaticRefusal(a: { vessel: string; vesselRoo
   return null;
 }
 /**
+ * THE ARM STEP'S MUTANT GATES, AT THE TEST-WRITING VERIFY (arm pre-check, mutant slice). The two gates the static slice
+ * cannot apply: red_independent_of_edit_site (editSiteMutationGate) and region_red_unchanged (regionMutantGate), the
+ * arm step's own functions run at the compose worktree that holds the drafted check (gap-check-supply.ts *At variants:
+ * no logic or threshold changed). Their baseline is test_suite's report of the check, read at that root; each mutant
+ * runs in a throwaway copy of the worktree (test-suite.ts), so the draft under verify is never mutated. Combined as the
+ * arm step combines them: a site refusal stands unless the region mutant moved the red. A root test_suite will not
+ * accept (a non-isolated compose) or a run that measured nothing decides nothing. The refusal, or null.
+ */
+export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoot: string; checkFile: string; siteRel: string | null; meta: Record<string, unknown>; summary: string; k: number }): Promise<{ stage: string; reason: string } | null> {
+  if (!a.siteRel) return null;
+  let checkSrc: string;
+  try { checkSrc = readFileSync(`${a.vesselRoot}/${a.checkFile}`, "utf8"); } catch { return null; }
+  const supply = await import("./gap-check-supply.js");
+  const { resolveTestSuite } = await import("./test-suite.js");
+  const name = a.vessel.replace(/^repos\//, "");
+  const titles = supply.declaredTestTitles(checkSrc);
+  const base = await resolveTestSuite({ type: "test_suite", vessel: `repos/${name}`, test_file: a.checkFile, only_tests: titles, root: a.vesselRoot });
+  if (base.shape !== "test_suite") { console.log(`[fc-test-writing-check] mutant gates not applied: ${JSON.stringify(base.body).slice(0, 200)}`); return null; }
+  const report = base.body as Record<string, unknown>;
+  const split = supply.splitRedGreen(report, titles);
+  const redTitles = split.red.length > 0 ? split.red : titles;
+  const mutation = await supply.editSiteMutationGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, checkSrc, titles: redTitles, baseline: report, k: a.k });
+  const region = regionOf(a.meta);
+  let regionSite: string | null = null;
+  if (region) { try { regionSite = readFileSync(`${a.vesselRoot}/${a.siteRel}`, "utf8"); } catch { regionSite = null; } }
+  const regionGate = (mutation.kind === "pass" || mutation.kind === "refuse") && supply.regionGateApplies(a.meta, region ? regionSite : null)
+    ? await supply.regionMutantGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, titles: redTitles, baseline: report, evidence: a.summary, spec: typeof a.meta["falsifier_spec"] === "string" ? String(a.meta["falsifier_spec"]) : "", more: { must_fail: typeof a.meta["must_fail"] === "string" ? String(a.meta["must_fail"]) : undefined, control: typeof a.meta["control"] === "string" ? String(a.meta["control"]) : undefined } })
+    : null;
+  const regionMoved = regionGate?.kind === "pass" && Number(regionGate.record["changed"] ?? 0) > 0;
+  const reason = mutation.kind === "refuse" && !regionMoved ? mutation.reason : regionGate?.kind === "refuse" ? regionGate.reason : null;
+  return reason ? { stage: reason.slice(0, Math.max(0, reason.indexOf(":"))) || "arm_mutant_gate", reason } : null;
+}
+/**
  * THE ARM STEP'S PREDICATES AT THE TEST-WRITING VERIFY: a judgement the verify passed comes back refused (ok false, the
  * arm step's stage and reason string) when the arm step would refuse its check after it lands; otherwise unchanged.
- * The control rule follows the arm rhythm's require_control, failing closed when the rhythm cannot be read. Kept out
+ * The control rule follows the arm rhythm's require_control, failing closed when the rhythm cannot be read; the mutant
+ * gates take k from the arm rhythm's coverage knobs, as the arm step does. Kept out
  * of the verify's body so its call site stays one line.
  */
 async function testWritingArmPrecheck(tw: TestWritingVerdict, a: { vessel: string; vesselRoot: string; meta: Parameters<typeof regionOf>[0]; gap?: { id?: unknown; summary?: unknown } | null }): Promise<TestWritingVerdict> {
   if (!tw.ok) return tw;
   const { readFamilyRhythm } = await import("./rhythm-conductor-tick.js");
   const armRhythm = await readFamilyRhythm("gap-check-supply").catch(() => null);
-  const arm = await testWritingArmStaticRefusal({ vessel: a.vessel, vesselRoot: a.vesselRoot, checkFile: tw.check_file, siteRel: tw.edit_site, region: regionOf(a.meta), red: tw.runs[0]?.red ?? [], requireControl: armRhythm?.body?.["require_control"] !== false });
+  // In the arm step's order: the static predicates, then the mutant gates at this compose worktree, then the control.
+  const armIn = { vessel: a.vessel, vesselRoot: a.vesselRoot, checkFile: tw.check_file, siteRel: tw.edit_site, red: tw.runs[0]?.red ?? [] };
+  const { coverageKnobs } = await import("./scope-earn-in.js");
+  const arm = await testWritingArmStaticRefusal({ ...armIn, region: regionOf(a.meta), requireControl: false })
+    ?? await testWritingArmMutantRefusal({ ...armIn, meta: a.meta as Record<string, unknown>, summary: String(a.gap?.summary ?? ""), k: coverageKnobs((armRhythm?.body ?? {}) as never).k })
+    ?? await testWritingArmStaticRefusal({ ...armIn, region: "", requireControl: armRhythm?.body?.["require_control"] !== false });
   if (!arm) return tw;
   console.log(`[fc-test-writing-check] ${String(a.gap?.id ?? "-")}: the arm step's ${arm.stage} would refuse this check after it lands; refused at the verify instead`);
   return { ...tw, ok: false, stage: arm.stage as TestWritingVerdict["stage"], reason: arm.reason };

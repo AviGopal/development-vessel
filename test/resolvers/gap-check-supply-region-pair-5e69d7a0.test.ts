@@ -54,7 +54,7 @@ const REPO = join(import.meta.dir, "..", "..");
 const FIX = join(import.meta.dir, "..", "fixtures", "check-asserts-defect-output");
 const fixture = (name: string): string => readFileSync(join(FIX, name), "utf8");
 const VESSEL = "fixture-dv";
-const SITE = `repos/${VESSEL}/src/resolvers/gap-check-supply.ts`;
+const SITE = `repos/${VESSEL}/src/resolvers/check-supply-admission.ts`;
 const ROW = JSON.parse(fixture("5e69d7a0-row-evidence.json")) as { summary: string; must_fail: string; control: string; falsifier_spec: string };
 
 const originalFetch = globalThis.fetch;

@@ -101,7 +101,7 @@ import { onlyTestsProblem, resolveTestSuite } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY, VOLUME_ROOT } from "../config.js";
 import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
-import { countLiteral, regionOf } from "../lib/region-literal.js";
+import { countLiteral, regionFromProposalText, regionOf } from "../lib/region-literal.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
 /** The predicate_source a system-authored check carries: the discriminator the measures count. */
@@ -340,16 +340,19 @@ function importSpecifier(testFile: string, siteRel: string): string {
  *  - text: an OBSERVED output in quotes (an error, a log line, a message, returned or printed text: said so by a nearby
  *    context word, or written in the falsifier_spec). A quoted goal or question is not an observed output;
  *  - behaviour: a stated actual-vs-expected pair ("returns 1; it must return 2").
+ *  - region: the row's REGION LITERAL (AnchorSources.region) when it occurs exactly once in the site file, counted raw
+ *    as the region gate counts it (regionGateApplies, regionLiteralVerdict): the line grounding centres the edit on.
  */
-export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token"; value: string };
+export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token" | "region"; value: string };
 /**
  * MORE ANCHOR SOURCES, FOR THE REGION GATE (qa anchor-source ruling, 2026-10-24). The row's must_fail and control text
  * are read like the falsifier_spec (a quoted span there is an observed output), and with `site_tokens` a snake_case
  * or camelCase identifier the evidence names that occurs in the edit site's code or strings (never its comments) is a
  * `token` anchor; the region gate takes it when 1 to 5 of those occurrences are outside declarations (concept: `arm_refused`, which the gap names and the site writes as a string). The
- * check goal does not pass these: what the drafter is told is unchanged.
+ * check goal passes `site_tokens` and `region` only for a row the evidence alone does not anchor (checkSupplyAnchors),
+ * so what the drafter is told for an anchored row is unchanged.
  */
-export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean };
+export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean; region?: string };
 /** The site with its comments blanked to spaces (offsets kept): an anchor named only in a comment is no region. */
 export function commentFreeSource(src: string): string {
   let ts: typeof import("typescript");
@@ -424,6 +427,8 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
   if (rowSpec) quoted(rowSpec, true);
   const b = /\b(returns?|yields?|produces?|gives?|is)\s+([^\s,;]+)[^.;]*[;,]?\s*(?:it\s+|but\s+)?(?:must|should)\s+(?:return|yield|produce|give|be)\s+([^\s,;.]+)/i.exec(all);
   if (b) add({ kind: "behaviour", value: b[0].trim() });
+  const region = (more.region ?? "").trim();
+  if (region && siteSrc !== null && countLiteral(siteSrc, region) === 1) add({ kind: "region", value: region });
   if (more.site_tokens && siteSrc !== null) {
     const free = commentFreeSource(siteSrc);
     for (const m of all.matchAll(/(?<![\w$.\/-])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)(?![\w$\/-])/g)) {
@@ -436,6 +441,44 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
   return out;
 }
 /**
+ * THE ANCHORS STEP 3 BUILDS A CHECK ON (user ruling on the anchor census): the evidence's own (falsifiableAnchors over
+ * the summary and falsifier_spec) first, unchanged. Only a row those leave with none falls through to what its writers
+ * already put there: (a) its region literal (classification_metadata.region, else the `in the region "X"` clause
+ * goal-host's restateWithTargetFile writes into a route-edit summary) when it occurs exactly once in the site; (b) the
+ * snake_case and camelCase site tokens it names (the region gate's `site_tokens` rule); then (c), for an "investigate
+ * and decompose gap <parent>:" wrapper (gap-to-feature's decompose goal), the PARENT row's summary and falsifier_spec
+ * against the wrapper's own site. The parent id is a structured field when the row has one, else the id that prefix
+ * names; the parent is read from the pass's store read, never fetched. Nothing anchors: [] (no check, as before).
+ * semantic_gate_reason and failure_lessons describe a rejected patch, so they are never sources.
+ */
+const DECOMPOSE_WRAPPER = /^investigate and decompose gap (\S+?):\s/i;
+const PARENT_FIELDS = ["parent_gap_id", "root_gap_id", "source_gap_id"] as const;
+/** The parent a decompose wrapper names: a structured field first, the summary prefix's id only when there is none. */
+export function decomposeWrapperParentId(row: Row): string | null {
+  const m = DECOMPOSE_WRAPPER.exec(String(row["summary"] ?? ""));
+  if (!m) return null;
+  const meta = metaOf(row);
+  const field = PARENT_FIELDS.map((k) => meta[k]).find(nonEmpty);
+  return field !== undefined ? String(field).trim() : m[1]!;
+}
+export function checkSupplyAnchors(row: Row, siteSrc: string | null, byId: ReadonlyMap<string, Row>, vesselDeclared: ReadonlySet<string> | null = null): { anchors: CheckAnchor[]; parent: string | null } {
+  const of = (r: Row): CheckAnchor[] => {
+    const meta = metaOf(r);
+    const summary = String(r["summary"] ?? "");
+    const spec = typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "";
+    const own = falsifiableAnchors(summary, siteSrc, spec, vesselDeclared);
+    if (own.length > 0 || siteSrc === null) return own;
+    return falsifiableAnchors(summary, siteSrc, spec, null, { site_tokens: true, region: regionOf(meta) || regionFromProposalText(summary) });
+  };
+  const anchors = of(row);
+  if (anchors.length > 0) return { anchors, parent: null };
+  const pid = decomposeWrapperParentId(row);
+  const parent = pid !== null ? byId.get(pid) : undefined;
+  if (!parent || pid === String(row["id"] ?? "")) return { anchors: [], parent: null };
+  const inherited = of(parent);
+  return { anchors: inherited, parent: inherited.length > 0 ? pid : null };
+}
+/**
  * A SYMBOL ANCHOR IS NOT A CALLABLE UNLESS THE SITE EXPORTS IT. A symbol anchors a check when it resolves in the site's
  * code, and an internal function does: the goal then said "Build it on … symbol `universalToolFallback` …: call the
  * code", the drafter called it off the namespace import, and the verify refused the check,
@@ -443,7 +486,7 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
  * (its codeContract, the list the goal shows), a symbol anchor it does not export is said to be internal and reached
  * through an export on the list. No names (no reader, an unreadable site, an open list) labels nothing.
  */
-const anchorText = (anchors: readonly CheckAnchor[], site?: { rel: string; exported: ReadonlySet<string> }): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`${site && !site.exported.has(a.value) ? ` (internal to ${site.rel}, not exported: the test cannot call it, so reach it through an export on the list that does)` : ""}` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : a.kind === "token" ? `token \`${a.value}\`` : `behaviour "${a.value}"`).join("; ");
+const anchorText = (anchors: readonly CheckAnchor[], site?: { rel: string; exported: ReadonlySet<string> }): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`${site && !site.exported.has(a.value) ? ` (internal to ${site.rel}, not exported: the test cannot call it, so reach it through an export on the list that does)` : ""}` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : a.kind === "token" ? `token \`${a.value}\`` : a.kind === "region" ? `region ${JSON.stringify(a.value)} (the one line of the site holding it)` : `behaviour "${a.value}"`).join("; ");
 
 /**
  * QUOTE WHAT THE GATE WOULD READ AS AN UNRENDERED BINDING (CHANGE-32a). A check goal is built from a gap's own prose,
@@ -2611,11 +2654,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const reader = srcReaderAt(join(clonesRoot(), vessel));
     const siteRel = vesselRelativeEditSite(site);
     const siteSrc = siteRel ? reader.read(siteRel) : null;
-    // A CODE site needs a falsifiable anchor from the evidence; never guess one (a config site's goal is built from the
-    // template it names). No anchor: no goal, one loud skip record, re-read every tick in case the evidence grows.
+    // A CODE site needs a falsifiable anchor from the evidence, or from what its writers put on the row (checkSupplyAnchors);
+    // never guess one (a config site's goal is built from the template it names). No anchor: no goal, one loud skip
+    // record, re-read every tick in case the evidence grows.
     if (!configEditSite(siteRel, siteSrc)) {
-      const spec = typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "";
-      const anchors = falsifiableAnchors(summary, siteSrc, spec, siteSrc === null ? vesselDeclarations(vessel, reader) : null);
+      const anchors = checkSupplyAnchors(row, siteSrc, byIdAll, siteSrc === null ? vesselDeclarations(vessel, reader) : null).anchors;
       if (anchors.length === 0) {
         skipped.push({ id, reason: NO_ANCHOR_REASON });
         // Its own line once, when its ledger first records it; every pass counts it in the dispatch line below.

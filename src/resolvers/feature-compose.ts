@@ -55,7 +55,7 @@ import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
 import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold, ownCheckBaselineFor, ownCheckVesselOf } from "../judge/gap-eligibility.js";
-import { countLiteral, regionOf } from "../lib/region-literal.js";
+import { countLiteral, regionFromProposalText, regionOf } from "../lib/region-literal.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, ownCheckStillRed, testExpectCount, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 import { addCallPathEntry, callPathLine, checkCallPathFromRun, findDeclarations, CALL_PATH_MAX, type CallPathEntry } from "./retry-evidence.js";
 import type { OwnCheckBaseline } from "./own-check-baseline.js";
@@ -2551,15 +2551,9 @@ export function regionContainmentVerdict(
   };
 }
 
-/**
- * The canonical phrasing gap-to-feature puts in a gap summary:
- * `Edit <file> in the region "<region>".` Machine-generated, so this is a contract,
- * not prose parsing — but it returns "" on any miss and every caller treats "" as
- * "no region known, do not gate".
- */
-export function regionFromProposalText(text: string): string {
-  return (text.match(/\bin the region\s+"([^"]{2,120})"/i)?.[1] ?? "").trim();
-}
+/** The region a gap summary names (`in the region "<region>"`): one reader, lib/region-literal.ts, shared with the
+ *  check supply. Re-exported here for its existing callers. */
+export { regionFromProposalText };
 
 // ── A CHANGE THAT NARROWS ITS FILE'S DOCUMENTED CONTRACT NEEDS AN OMISSION OR LIMIT TEST ──────────────────────────
 // Three autonomous landings narrowed the contract their own file documents and this gate said addresses:true:

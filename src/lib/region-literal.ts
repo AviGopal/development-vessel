@@ -36,6 +36,16 @@ export function regionOf(meta: Record<string, unknown> | null | undefined): stri
   return r === undefined || r === null ? "" : String(r).trim();
 }
 
+/**
+ * The canonical phrasing gap-to-feature puts in a gap summary:
+ * `Edit <file> in the region "<region>".` Machine-generated, so this is a contract,
+ * not prose parsing — but it returns "" on any miss and every caller treats "" as
+ * "no region known, do not gate".
+ */
+export function regionFromProposalText(text: string): string {
+  return (text.match(/\bin the region\s+"([^"]{2,120})"/i)?.[1] ?? "").trim();
+}
+
 /** Non-overlapping literal occurrences (indexOf, never a regex). */
 export function countLiteral(text: string, literal: string): number {
   if (literal.length === 0) return 0;

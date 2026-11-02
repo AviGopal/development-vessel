@@ -13,7 +13,7 @@
  *
  * WHAT COUNTS AS AN OPERATOR ACT (the accepted link requirements, operator_acts_addenda, in order):
  *   2a   a hold OR a release (any operator_<x>_by stamped "operator:…") on the row or ANY lineage ancestor, timed at or
- *        before the fix. Lineage follows parent_gap_id / parent_gap / root_gap_id / root_gap transitively, AND the id
+ *        before the fix. Lineage follows parent_gap_id / parent_gap / root_gap_id / root_gap / source_gap_id transitively, AND the id
  *        rule: a recommit child PREPENDS "recommit-", a narrow / step / verify child APPENDS "-<suffix>".
  *   2a′  an operator_<x>_at stamp with no matching _by still counts (holds and releases are only ever operator acts).
  *   3    an operator scope act opening the edit_site, effective from its earliest per-node apply (the caller passes
@@ -86,7 +86,15 @@ const metaOf = (r: GapRow | undefined): Record<string, unknown> => {
   return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : {};
 };
 
-const LINK_FIELDS = ["parent_gap_id", "parent_gap", "root_gap_id", "root_gap"] as const;
+// source_gap_id: the link a recommit row carries to the row it re-commits (gap-admission / gap-landing-verdict read it
+// as the parent beside parent_gap_id). Without it a recommit's lineage was followed only by the id rule, which a
+// reason-suffixed recommit id never satisfies (judge recommit fix, user ruling).
+const LINK_FIELDS = ["parent_gap_id", "parent_gap", "root_gap_id", "root_gap", "source_gap_id"] as const;
+/** Whether the row itself carries an explicit link field (LINK_FIELDS) naming another row the store read holds. */
+function linksToARowRead(gid: string, cur: GapRow | undefined, has: (id: string) => boolean): boolean {
+  const m = metaOf(cur);
+  return LINK_FIELDS.some((k) => { const v = m[k] || cur?.[k]; return typeof v === "string" && v.length > 0 && v !== gid && has(v); });
+}
 
 /**
  * The lineage ancestors of `gid`: explicit links (transitively, from the row and from each linked ancestor) UNION the
@@ -118,8 +126,10 @@ export function lineageAncestors(gid: string, byId: ReadonlyMap<string, GapRow>)
  * What lineageAncestors could NOT read (qa eval5 B1): an ancestor it cannot see is unknown, and unknown is never clean.
  * - A link field (LINK_FIELDS) on the row, or on an ancestor reached through the links, that names an id the store read
  *   does not hold: the parent exists somewhere, unseen, so whoever filed it cannot be ruled out.
- * - A recommit row (coreId depth > 0) with no key in the store sharing its core at a lower depth: its recommit parent
- *   is not in the read.
+ * - A recommit row (coreId depth > 0) whose parent is not SEEN: the parent is seen only when the row's own explicit link
+ *   field (LINK_FIELDS, source_gap_id among them) names a row the store read holds, or a key of exactly its core sits at
+ *   a lower depth. No id guessing beyond that: a reason-suffixed recommit (recommit-X-verify_failed) with no link and no
+ *   exact lower-depth core stays unseen (judge recommit fix, user ruling).
  * Named limit of the id rule's "-" prefix half: a narrowed child whose parent is absent from the store is, by its id
  * alone, indistinguishable from a root whose id happens to contain "-", so the prefix half cannot report a missing
  * parent; only an explicit link field or a recommit- prefix can say one is missing.
@@ -142,7 +152,7 @@ export function lineageUnknown(gid: string, byId: ReadonlyMap<string, GapRow>): 
     }
   }
   const g = coreId(gid);
-  if (g.depth > 0 && ![...byId.keys()].some((k) => k !== gid && (() => { const c = coreId(k); return c.core === g.core && c.depth < g.depth; })())) {
+  if (g.depth > 0 && !linksToARowRead(gid, byId.get(gid), (v) => byId.has(v)) && ![...byId.keys()].some((k) => k !== gid && (() => { const c = coreId(k); return c.core === g.core && c.depth < g.depth; })())) {
     out.push(`lineage: ${gid.slice(-60)} is a recommit (depth ${g.depth}) and no row of core ${g.core.slice(-60)} at a lower depth is in the gap store read`);
   }
   return out;
@@ -238,7 +248,7 @@ export function indexedLineageUnknown(gid: string, idx: LineageIndex): string[] 
     }
   }
   const g = coreId(gid);
-  if (g.depth > 0 && !(idx.cores().get(g.core) ?? []).some((e) => e.k !== gid && e.depth < g.depth)) {
+  if (g.depth > 0 && !linksToARowRead(gid, idx.get(gid), (v) => idx.has(v)) && !(idx.cores().get(g.core) ?? []).some((e) => e.k !== gid && e.depth < g.depth)) {
     out.push(`lineage: ${gid.slice(-60)} is a recommit (depth ${g.depth}) and no row of core ${g.core.slice(-60)} at a lower depth is in the gap store read`);
   }
   return out;

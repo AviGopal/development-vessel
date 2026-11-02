@@ -780,7 +780,7 @@ const LLM_RETRY_ROUNDS = 3;
  * attempt outlived the ceiling (one repair call hung past 15 min, 2026-10-30) and was killed by a lossy restart. The
  * deadline is a third of the ceiling pull-sync reads (the same COMPOSE_CEILING_MS, same default): it admits one whole
  * slow attempt (llmCall's 250 s cap) and the other endpoints' fast failures, and is at most half of pull-sync's
- * no-progress bound. Each attempt is clipped to what is left; at the deadline the call
+ * no-progress bound. Each attempt is clipped to what is left (to half of it while untried endpoints remain, below); at the deadline the call
  * throws, so the compose ends through its own exit and releases normally. Fast failures cost the budget nothing.
  */
 const LLM_FAILOVER_DEADLINE_MS = Math.floor(COMPOSE_CEILING_MS / 3);
@@ -792,21 +792,57 @@ function isRetryableLlmError(e: Error): boolean {
   // No status parsed => transport-level (abort, socket, DNS) => retryable.
   return true;
 }
+/**
+ * A HUNG ENDPOINT IS DEMOTED, NOT RETRIED FIRST. An endpoint that accepts the request and never answers ran to its whole
+ * per-call cap (most of the deadline) and kept its discovery health score, so it stayed first and the same hang ended
+ * the next compose too. This is an in-process recency signal layered on discovery's order, never a list of its own: an
+ * endpoint whose call timed out is tried after the ones that did not, for the rest of that call and for later calls,
+ * until it answers (its stamp is cleared) or one compose ceiling (COMPOSE_CEILING_MS) has passed since the timeout (the
+ * stamp is dropped, pruned on every call). It holds only endpoints discovery handed a call, so it stays bounded.
+ */
+const llmEndpointTimedOutAt = new Map<string, number>();
+function isLlmCallTimeout(e: Error): boolean {
+  return e.name === "TimeoutError" || /^The operation timed out/.test(e.message);
+}
+/** Discovery's order with the recently timed-out endpoints moved behind the rest (each group keeps discovery's order). */
+function llmEndpointOrder(endpoints: string[], now: number): string[] {
+  for (const [ep, at] of llmEndpointTimedOutAt) if (now - at >= COMPOSE_CEILING_MS) llmEndpointTimedOutAt.delete(ep);
+  return [...endpoints.filter((e) => !llmEndpointTimedOutAt.has(e)), ...endpoints.filter((e) => llmEndpointTimedOutAt.has(e))];
+}
+/** A log label for an endpoint: the vessel a federated hop names, else the URL's host. Never the query or any header. */
+function llmEndpointLabel(endpoint: string): string {
+  try { const u = new URL(endpoint); return u.searchParams.get("vessel") ?? u.host; } catch { return "(unparseable endpoint)"; }
+}
 export async function llmCallWithFailover(endpoints: string[], prompt: string, model: string): Promise<string> {
   let lastError: Error | null = null;
   const deadline = Date.now() + LLM_FAILOVER_DEADLINE_MS;
   const pastDeadline = () => new Error(`llm failover deadline: no endpoint answered within ${LLM_FAILOVER_DEADLINE_MS}ms (a third of the compose ceiling) — last: ${lastError?.message.slice(0, 200) ?? "none"}`);
+  const tried = new Set<string>();
   for (let round = 0; round < LLM_RETRY_ROUNDS; round++) {
     let anyRetryable = false;
-    for (const endpoint of endpoints) {
+    const order = llmEndpointOrder(endpoints, Date.now());
+    for (const [i, endpoint] of order.entries()) {
       const left = deadline - Date.now();
       if (left <= 0) throw pastDeadline();
+      // ONE ENDPOINT CANNOT TAKE THE TIME THE UNTRIED ONES NEED. While an endpoint this call has not tried yet comes
+      // after this one, this call may use at most HALF of what is left (still capped at LLM_CALL_TIMEOUT_MS); the other
+      // half is kept for the untried ones. The last untried endpoint, a lone endpoint, and every retry round get all
+      // that is left, as before. Halving rather than an equal split keeps a slow but healthy first endpoint answerable.
+      const untriedAfter = order.slice(i + 1).some((e) => !tried.has(e) && e !== endpoint);
+      const callMs = Math.min(LLM_CALL_TIMEOUT_MS, untriedAfter ? Math.floor(left / 2) : left);
+      tried.add(endpoint);
       try {
-        return await llmCall(endpoint, prompt, model, Math.min(LLM_CALL_TIMEOUT_MS, left));
+        const answer = await llmCall(endpoint, prompt, model, callMs);
+        llmEndpointTimedOutAt.delete(endpoint);
+        return answer;
       } catch (e) {
         const err = e instanceof Error ? e : new Error(String(e));
         lastError = err;
         if (isRetryableLlmError(err)) anyRetryable = true;
+        if (isLlmCallTimeout(err)) {
+          llmEndpointTimedOutAt.set(endpoint, Date.now());
+          console.log(`[llm-failover] endpoint ${llmEndpointLabel(endpoint)} timed out after ${callMs}ms (round ${round + 1}/${LLM_RETRY_ROUNDS}); demoted behind the endpoints that did not time out`);
+        }
       }
     }
     // Every lane failed for a NON-transient reason — another round cannot help.

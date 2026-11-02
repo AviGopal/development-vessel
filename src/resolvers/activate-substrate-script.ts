@@ -54,10 +54,38 @@ const GATE_PUBLIC_DIR = "/workspace/.gate-public";
 let gatePublicDirOverride: string | null = null;
 export function __setGatePublicDirForTests(dir: string | null): void { gatePublicDirOverride = dir; }
 const gatePublicDir = (): string => gatePublicDirOverride ?? GATE_PUBLIC_DIR;
-/** A write error that means "this dir is not ours to write" (read-only mount or permission), not a transient fault. */
+/** Errnos that mean "this dir is not ours to write": a PERMANENT refusal, never a retry. */
+const GATE_FED_ERRNOS: readonly string[] = ["EROFS", "EACCES", "EPERM"];
+// The same evidence survives in the MESSAGE when the errno field is dropped in transit — a wrapped or
+// aggregated spawn result, or a re-thrown Error carrying only text ("EROFS: read-only file system, open ...").
+// Without this, that shape reads as transient and pull-sync burns the whole per-tick gate budget retrying it.
+const GATE_FED_ERRNO_IN_TEXT = /\b(EROFS|EACCES|EPERM)\b/;
+
+function gateFedErrnoIn(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  const m = GATE_FED_ERRNO_IN_TEXT.exec(value);
+  return m?.[1] ?? null;
+}
+
+function carriesGateFedErrno(err: unknown, depth: number): boolean {
+  if (depth > 4) return false;
+  if (typeof err === "string") return gateFedErrnoIn(err) !== null;
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof e.code === "string" && GATE_FED_ERRNOS.includes(e.code)) return true;
+  if (gateFedErrnoIn(e.message) !== null) return true;
+  if (Array.isArray(e.errors) && (e.errors as unknown[]).some((inner) => carriesGateFedErrno(inner, depth + 1))) return true;
+  return carriesGateFedErrno(e.cause, depth + 1);
+}
+
+/**
+ * A write error that means "this dir is not ours to write" (read-only mount or permission), not a transient fault.
+ * A read-only mount is PERMANENT, so retrying it (pull-sync's per-tick test-gate budget) can only starve the tick.
+ * The errno reaches the caller as `code` OR — when a wrapper/aggregate drops the field — only inside `message`;
+ * both carry the same evidence, so both are read here, following `cause`/`errors` chains too.
+ */
 export function isGateFedWriteError(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+  return carriesGateFedErrno(err, 0);
 }
 const isUnder = (dir: string, root: string): boolean => {
   const d = resolvePath(dir); const r = resolvePath(root);

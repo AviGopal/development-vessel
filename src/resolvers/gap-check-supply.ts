@@ -1739,13 +1739,14 @@ export async function dispatchOwnCheckBaselines(
   deps: { node: string; nowIso: string; write: (row: Row, meta: Row) => Promise<ResolverResult>; send?: typeof resolveDispatchGoal; headOf?: (vessel: string) => string | null; executionIdOf?: (dispatchId: string) => Promise<string | null>; env?: Record<string, string | undefined>; byId?: ReadonlyMap<string, Row>; scope?: () => Promise<AutonomyScope> },
 ): Promise<Array<{ id: string; base_sha: string; dispatch_id: string }>> {
   const { readOwnCheckEnvPolicy } = await import("./own-check-baseline.js");
-  const { ownCheckVesselOf, ownCheckBaselineFor } = await import("../judge/gap-eligibility.js");
+  const { ownCheckVesselOf, ownCheckBaselineFor, newOwnCheckLookupPass } = await import("../judge/gap-eligibility.js");
   const { dispatchExecutionId } = await import("./own-check-baseline-credit.js");
   const pol = await readOwnCheckEnvPolicy(deps.env);
   if (!pol.ok) { console.warn(`[gap-check-supply] ${pol.why}: no own-check baseline is measured this pass`); return []; }
   const max = pol.policy.own_check_baseline_per_tick;
   const sent: Array<{ id: string; base_sha: string; dispatch_id: string }> = [];
   if (max <= 0) return sent;
+  newOwnCheckLookupPass(); // this tick's guard is a pass: failed own-check lookups of an earlier pass are asked again
   const { orderByLandability } = await import("../judge/gap-admission.js");
   const heads = new Map<string, string | null>();
   const headOf = deps.headOf ?? ((v: string): string | null => sweepGitOut(join(clonesRoot(), v), ["rev-parse", "origin/dev"]));

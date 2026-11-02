@@ -19,7 +19,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, inheritableParentCheck } from "../resolvers/substrate-gap.js";
-import { inheritedOperatorHold, isNonAttemptComposeResult, isTerminalRefusalResult, ownCheckBaselineFor, ownCheckVesselOf, type OwnCheckBaselineKey } from "./gap-eligibility.js";
+import { inheritedOperatorHold, isNonAttemptComposeResult, isTerminalRefusalResult, newOwnCheckLookupPass, ownCheckBaselineFor, ownCheckVesselOf, type OwnCheckBaselineKey } from "./gap-eligibility.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { creditLearning, isGapStoreHolder, replayLearningJournal, writeThroughLearning } from "./learning-credit.js";
@@ -62,8 +62,10 @@ const NONACTIONABLE_LOG_CATEGORIES = new Set<string>(DECISION_LOG_GAP_CATEGORIES
 /** The vessel's origin/dev in its clone: the only sha an own-check baseline decides at. */
 export const vesselOriginDevSha = (vessel: string): string | null => sweepGitOut(join(vesselsCloneRoot(), vessel), ["rev-parse", "origin/dev"]);
 /** vesselOriginDevSha read once per vessel: one pass's view of every vessel's origin/dev (a pass scores thousands of
- *  rows, and git runs only for a row that carries a red reading). */
+ *  rows, and git runs only for a row that carries a red reading). Creating one starts a pass: the own-check lookups that
+ *  failed in the last pass are asked again (newOwnCheckLookupPass). */
 export function originDevShaOnce(baseShaOf: (vessel: string) => string | null = vesselOriginDevSha): (vessel: string) => string | null {
+  newOwnCheckLookupPass();
   const heads = new Map<string, string | null>();
   return (vessel) => {
     if (!heads.has(vessel)) heads.set(vessel, baseShaOf(vessel));

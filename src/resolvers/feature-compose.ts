@@ -6397,6 +6397,56 @@ export const TEST_WRITING_RED_ERROR = 300;
 /** The failing tests of a test-writing check's deciding run (the last run judgeTestWritingCheck took: it stops at the first
  *  run that is not an assertion red), each with its class's cause and its error text, bounded; an error between tests
  *  (the file failed to load) is one more entry. */
+/**
+ * THE ARM STEP'S STATIC PREDICATES, AT THE TEST-WRITING VERIFY (arm pre-check, static slice). A test-writing check that
+ * passed this verify (red at the parent, by assertion) landed as a check-only commit, and the arm step then refused it on
+ * predicates the verify never applied, and that need only the check and the parent's edit site: 10 of 11 such landings in
+ * a day, each a commit and a cutover that armed nothing. Three of them are static, and run here, imported from the arm
+ * step (gap-check-supply.ts, outside the evaluator closure, so never from check-supply-admission): the arm-time region
+ * gate (regionLiteralVerdict, as substrate-gap's arm write applies it), checkMissesRegionRefusal, and noControlRefusal
+ * (last, as the arm step orders it; skipped for a config site, and when the arm's own rhythm says require_control false).
+ * The result is the refusal the arm step would write, with the same reason string, or null.
+ */
+export async function testWritingArmStaticRefusal(a: { vessel: string; vesselRoot: string; checkFile: string; siteRel: string | null; region: string; red: readonly string[]; requireControl: boolean }): Promise<{ stage: string; reason: string } | null> {
+  if (!a.siteRel) return null;
+  const read = (rel: string): string | null => { try { return readFileSync(`${a.vesselRoot}/${rel}`, "utf8"); } catch { return null; } };
+  const checkSrc = read(a.checkFile);
+  const siteSrc = read(a.siteRel);
+  if (checkSrc === null || siteSrc === null) return null;
+  const supply = await import("./gap-check-supply.js");
+  if (a.region) {
+    const { regionLiteralVerdict } = await import("../lib/region-literal.js");
+    const editSite = `repos/${a.vessel.replace(/^repos\//, "")}/${a.siteRel}`;
+    const v = regionLiteralVerdict(a.region, editSite);
+    if (!v.ok) return { stage: v.error, reason: `${v.error} occurrences=${v.occurrences ?? "n/a"} edit_site=${editSite}: ${v.detail}` };
+    const misses = supply.checkMissesRegionRefusal(siteSrc, a.siteRel, checkSrc, a.region);
+    if (misses) return { stage: supply.CHECK_MISSES_REGION_STAGE, reason: misses.reason };
+  }
+  const { configEditSite } = await import("./check-supply-admission.js");
+  if (a.requireControl && configEditSite(a.siteRel, siteSrc) === null) {
+    const titles = supply.declaredTestTitles(checkSrc);
+    const control = supply.splitRedGreen({ failingTests: [...a.red] }, titles).green;
+    const noControl = supply.noControlRefusal(control);
+    if (noControl) return { stage: supply.CHECK_NO_CONTROL_STAGE, reason: noControl };
+  }
+  return null;
+}
+/**
+ * THE ARM STEP'S PREDICATES AT THE TEST-WRITING VERIFY: a judgement the verify passed comes back refused (ok false, the
+ * arm step's stage and reason string) when the arm step would refuse its check after it lands; otherwise unchanged.
+ * The control rule follows the arm rhythm's require_control, failing closed when the rhythm cannot be read. Kept out
+ * of the verify's body so its call site stays one line.
+ */
+async function testWritingArmPrecheck(tw: TestWritingVerdict, a: { vessel: string; vesselRoot: string; meta: Parameters<typeof regionOf>[0]; gap?: { id?: unknown; summary?: unknown } | null }): Promise<TestWritingVerdict> {
+  if (!tw.ok) return tw;
+  const { readFamilyRhythm } = await import("./rhythm-conductor-tick.js");
+  const armRhythm = await readFamilyRhythm("gap-check-supply").catch(() => null);
+  const arm = await testWritingArmStaticRefusal({ vessel: a.vessel, vesselRoot: a.vesselRoot, checkFile: tw.check_file, siteRel: tw.edit_site, region: regionOf(a.meta), red: tw.runs[0]?.red ?? [], requireControl: armRhythm?.body?.["require_control"] !== false });
+  if (!arm) return tw;
+  console.log(`[fc-test-writing-check] ${String(a.gap?.id ?? "-")}: the arm step's ${arm.stage} would refuse this check after it lands; refused at the verify instead`);
+  return { ...tw, ok: false, stage: arm.stage as TestWritingVerdict["stage"], reason: arm.reason };
+}
+type TestWritingVerdict = import("./check-supply-admission.js").TestWritingJudgement;
 export function testWritingRedOf(raw: string): TestWritingRed[] {
   const c = classifyCheckRun(raw);
   const out: TestWritingRed[] = c.failures.slice(0, TEST_WRITING_RED_MAX).map((f) => ({ name: f.name, ...(f.cause ? { cause: f.cause } : {}), error: f.error ? f.error.slice(0, TEST_WRITING_RED_ERROR) : null }));
@@ -10494,6 +10544,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           return twRaw;
         },
       });
+      // A check this verify passes must also pass the arm step's predicates, or it lands and is refused arming.
+      testWriting = await testWritingArmPrecheck(testWriting, { vessel: v, vesselRoot: vAbs, meta: twMeta, gap: pointer.gap });
       console.log(`[fc-test-writing-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, check_file: testWriting.check_file, edit_site: testWriting.edit_site, stage: testWriting.stage ?? "passed", cause: testWriting.cause ?? null, runs: testWriting.runs })}`);
     }
     const testWritingOk = !testWriting || testWriting.ok;

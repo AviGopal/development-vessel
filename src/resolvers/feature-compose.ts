@@ -6340,7 +6340,7 @@ const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFail
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
 /** The compose used the gap's own-check baseline (own-check-baseline.ts): which reading, and for what. The grading join. */
 export type OwnCheckBaselineConsumed = { dispatch_id: string | null; verdict: OwnCheckBaseline["verdict"]; base_sha: string; used: Array<"call_path" | "parent_run"> };
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; unjudged?: true; output_tail?: string; exit_code?: number; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
 /**
  * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
@@ -6363,6 +6363,8 @@ export function gapEditSiteOf(pointer: { gap?: unknown } | null | undefined): st
 }
 /** How much of a failed verify's raw output the repair prompt quotes (unchanged; the evidence goes AHEAD of it, not in a bigger slice). */
 export const REPAIR_OUTPUT_SLICE = 4000;
+/** How much of an UNJUDGED own-check run's raw output its verify result carries (the last 4 KB): the repair's only view of why it ended. */
+export const OWN_UNJUDGED_TAIL = 4096;
 /**
  * THE REPAIR PROMPT (CHANGE-33/R1). The repair round used to quote only the first 4000 chars of `fv.output`, which is
  * raw + detail: the whole pipeline log (install, a passing typecheck, thousands of "(pass)" lines) with the gate's own
@@ -6383,7 +6385,8 @@ export function repairPromptLogged(fv: VerifyResult, errorSiteWindow: string, ed
   // A test-writing compose's repair edits its check (testWritingWriteScope's target), never the gap's src edit site.
   if (writeScope) editSite = writeScope[0] ?? null;
   const p = buildRepairPrompt(fv, errorSiteWindow, editSite);
-  if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", own_failing: (fv.own?.failing ?? []).length, edit_site: editSite })}`);
+  // An unjudged own check has no failing count: logging own_failing 0 read like a green check (the blind-repair row).
+  if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", ...(fv.own?.unjudged ? { own_unjudged: true, own_failing: null } : { own_failing: (fv.own?.failing ?? []).length }), edit_site: editSite })}`);
   return p;
 }
 export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, editSite: string | null): string {
@@ -6398,6 +6401,14 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   // round is told them (check-supply-admission.ts exportedSurface), not left to guess from the reason's first 12 names.
   const surface = fv.test_writing?.exported_surface;
   if (surface && hidden(surface.text)) fields.push(`EXPORTED SURFACE of ${surface.module} (the check may read, call and mock only these names; call each function with the parameters its signature declares, and reach internal code through one of them):\n${surface.text}`);
+  // AN UNJUDGED OWN CHECK IS NOT A GREEN ONE. Its run printed no (pass)/(fail) line, so `failing` is empty exactly as for a
+  // green run, and the round was told nothing was failing, wrote nothing, and the loop stopped. It is named, with the run's
+  // tail (not in fv.output, which is the pipeline log), whether or not the slice shows the gate detail.
+  if (fv.own?.unjudged) {
+    const tail = (fv.own.output_tail ?? "").trim();
+    const how = typeof fv.own.exit_code === "number" ? ` (the run was ended with exit code ${fv.own.exit_code}${fv.own.exit_code === 124 || fv.own.exit_code === 137 || fv.own.exit_code === 143 ? ", timed out or killed" : ""})` : "";
+    fields.push(`OWN CHECK PRODUCED NO RESULT (${fv.own.test_file}): the gap's own check produced NO RESULT (killed or crashed before any test finished)${how}: fix the cause. This is not a run with no failing tests; nothing was judged. ${tail ? `The last ${tail.length} chars of that run:\n${tail}` : "The run printed nothing before it ended."}`);
+  }
   if (failing.length > 0) {
     fields.push(`OWN CHECK STILL RED (${fv.own!.test_file}), the tests this draft must turn green:\n` + failing.slice(0, 8).map((f) => `  - ${f.name}${f.expected !== undefined || f.received !== undefined ? ` (expected ${String(f.expected ?? "?").slice(0, 160)}, received ${String(f.received ?? "?").slice(0, 160)})` : f.error ? ` (${f.error.slice(0, 200)})` : ""}`).join("\n"));
   }
@@ -6410,6 +6421,17 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
     ...(editSite ? [`EDIT SITE (where this gap's fix belongs; fix the code there, do not edit another test to make it pass): ${editSite}`] : []),
   ].join("\n");
   return `A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\n${head}\n\nThe gate's output (its first ${REPAIR_OUTPUT_SLICE} chars; the reason above may lie past them):\n\n${slice}${errorSiteWindow}${ask}`;
+}
+/** The own block's unjudged state for a run that printed no result line: its last OWN_UNJUDGED_TAIL chars, and the shell's
+ *  exit code when non-zero (the shell budget ended it; the command's `|| true` reports 0 for everything else, so 0 is unknown). */
+export function ownNoResultEvidence(raw: string, shellExit?: unknown): { unjudged: true; output_tail: string; exit_code?: number } {
+  const out = String(raw ?? "");
+  return { unjudged: true, output_tail: out.slice(-OWN_UNJUDGED_TAIL), ...(typeof shellExit === "number" && shellExit !== 0 ? { exit_code: shellExit } : {}) };
+}
+/** Whether a repair round that wrote nothing goes on to the next round: only while rounds remain and only when a failing
+ *  vessel's own check was unjudged. The general no-edit case is its own row and still stops. */
+export function unjudgedNoEditRoundContinues(verify: ReadonlyArray<VerifyResult>, attempt: number, repairCap: number): boolean {
+  return attempt + 1 < repairCap && verify.some((v) => !v.ok && v.own?.unjudged === true);
 }
 /**
  * The base re-read's journal line when it clears a PASS-COUNT drop (no test vanished: the draft executed at least as many
@@ -10411,6 +10433,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let ownExpects: { base: number | null; draft: number | null; static_base?: number; static_draft?: number } | null = null;
     let ownRef: { test_file: string; only_tests: string[] } | null = null;
     let ownFailing: OwnCheckFailure[] = [];
+    let ownNoResult: { unjudged: true; output_tail: string; exit_code?: number } | null = null;
     let ownNoEffect: boolean | undefined;
     let ownCallPath: CallPathEntry[] = [];
     let ownBaseSha: string | undefined;
@@ -10440,6 +10463,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const draftRaw = String((shO.body as { stdout?: unknown })?.stdout ?? "");
         const red = ownCheckStillRed(draftRaw, own.only_tests);
         if (red === null) ownUnjudged = true; else ownRed = red;
+        // No result line at all: the repair round is handed the run's tail, and the exit code when the shell budget ended it
+        // (`|| true` hides the inner one). Only this run's state, never the store_unreadable one below.
+        if (red === null) ownNoResult = ownNoResultEvidence(draftRaw, (shO.body as { exit_code?: unknown })?.exit_code);
         ownRan = true;
         // Expected/Received from THIS file's run alone, never from the full-suite log above.
         ownFailing = parseOwnCheckFailures(draftRaw, own.only_tests);
@@ -10531,7 +10557,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}), ...(composeBaseline && baselineUsed.size > 0 ? { own_check_baseline_consumed: { dispatch_id: composeBaseline.dispatch_id ?? null, verdict: composeBaseline.verdict, base_sha: composeBaseline.base_sha, used: [...baselineUsed] } } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoResult ?? {}), ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}), ...(ownCallPath.length ? { call_path: ownCallPath } : {}), ...(composeBaseline && baselineUsed.size > 0 ? { own_check_baseline_consumed: { dispatch_id: composeBaseline.dispatch_id ?? null, verdict: composeBaseline.verdict, base_sha: composeBaseline.base_sha, used: [...baselineUsed] } } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }
@@ -10874,7 +10900,12 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       } catch (err) { console.warn(`[fc-repair] repair round threw for ${fv.vessel}: ${String(err).slice(0, 200)}`); }
     }
     if (regionRepairRefused) break;
-    if (!anyFixed) { console.warn(`[fc-repair] round ${attempt} wrote nothing (no parsable fix, unreadable path, or old_string not found) — repair stops`); break; }
+    if (!anyFixed) {
+      // An unjudged own check is re-verified within the same round budget: a run that hung or crashed once is often judged
+      // on the next, and re-prompting unchanged input would get the same empty answer. Every other no-edit round still stops.
+      if (!unjudgedNoEditRoundContinues(verify, attempt, repairCap)) { console.warn(`[fc-repair] round ${attempt} wrote nothing (no parsable fix, unreadable path, or old_string not found) — repair stops`); break; }
+      console.warn(`[fc-repair] round ${attempt} wrote nothing, but the gap's own check produced no result (unjudged): re-verifying for round ${attempt + 1} of ${repairCap}`);
+    }
     verify = [];
     for (const v of touched) verify.push(await runVerify(v));
   }

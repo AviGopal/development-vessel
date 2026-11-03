@@ -21,7 +21,8 @@
  *      again until its backoff (backoff_hours * 2^(attempts-1)) has passed, and after max_attempts it is marked
  *      exhausted, so the tick cannot livelock on a gap whose test never lands. CONTROL ARM: by hash(gap id)
  *      parity half the gaps are recorded (gap_check_supply_arm "control") and never sent a goal, so the supply's
- *      effect can be measured against gaps it did not touch.
+ *      effect can be measured against gaps it did not touch. The arm is TIME-BOXED (controlArmStep): a control row
+ *      older than the rhythm's control_expiry_days (default 7) moves to treatment for good, its supply hold cleared.
  *   3. ARM: once new test titles exist in that file, they become a test_suite check. The test must IMPORT the
  *      edit site (the gap's own, the one its summary names, or, with none, an existing src module the test imports:
  *      check-supply-admission.ts checkImportsEditSite, the rule feature_compose's verify applies). The ONE judge
@@ -301,6 +302,34 @@ export function checkSupplyArm(gapId: string, controlFraction: number = HISTORIC
   const b = createHash("sha256").update(gapId).digest()[0]!;
   const position = ((((b & 1) ^ 1) * 128) + (b >> 1)) / 256; // parity 1 (the historical control) falls in [0, 0.5)
   return position < controlFraction ? "control" : "treatment";
+}
+
+/** The control arm's documented default time-box, used only when the rhythm body has no control_expiry_days. */
+export const CONTROL_EXPIRY_DAYS_DEFAULT = 7;
+/** A row's arm as the tick reads it: a row whose control arm EXPIRED is treatment for good (sticky), whatever its hash
+ *  says; every other row is checkSupplyArm's, unchanged. */
+export function checkSupplyRowArm(row: Row, controlFraction: number): "treatment" | "control" {
+  if (nonEmpty(metaOf(row)["gap_check_supply_arm_expired_at"])) return "treatment";
+  return checkSupplyArm(String(row["id"]), controlFraction);
+}
+/**
+ * THE CONTROL ARM IS TIME-BOXED (user ruling). A control row was held (CHECK_SUPPLY_DISPOSITION) forever,
+ * with no arm timestamp, so the hold kept it from every other arming route too. Now a control row carries
+ * gap_check_supply_arm_at; one older than the rhythm's control_expiry_days moves to treatment
+ * (gap_check_supply_arm_expired_at) and its supply hold, and only that disposition, is cleared. A control row with no
+ * stamp is stamped now and not expired: its clock starts at the stamp, so no backlog flips on one tick.
+ */
+export function controlArmStep(row: Row, now: number, expiryMs: number): { kind: "stamp"; meta: Row } | { kind: "expire"; meta: Row; days: number } | null {
+  const meta = metaOf(row);
+  if (meta["gap_check_supply_arm"] !== "control" || nonEmpty(meta["gap_check_supply_arm_expired_at"])) return null;
+  const at = Date.parse(String(meta["gap_check_supply_arm_at"] ?? ""));
+  if (!Number.isFinite(at)) return { kind: "stamp", meta: { gap_check_supply_arm_at: new Date(now).toISOString() } };
+  if (now - at <= expiryMs) return null;
+  return {
+    kind: "expire",
+    days: (now - at) / 86_400_000,
+    meta: { gap_check_supply_arm: "treatment", gap_check_supply_arm_expired_at: new Date(now).toISOString(), ...(meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? { disposition: "" } : {}) },
+  };
 }
 
 const symptomOf = (summary: string, max = 600): string => summary
@@ -1476,6 +1505,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   // The control split, read from the same shaped record; absent or unusable means no control arm.
   const cf = Number(rhythm.body["control_fraction"]);
   const controlFraction = Number.isFinite(cf) && cf >= 0 && cf <= 1 ? cf : 0;
+  // The control arm's time-box and its per-pass write bound (stamps and expiries together), from the same record.
+  const controlExpiryMs = posNum(rhythm.body["control_expiry_days"], CONTROL_EXPIRY_DAYS_DEFAULT) * 86_400_000;
+  const controlExpiryPerTick = Math.floor(posNum(rhythm.body["control_expiry_per_tick"], perTick));
   const windowMs = posNum(rhythm.body["measure_window_days"], 7) * 86_400_000;
   const bounds: OutcomeBounds = outcomeBoundsOf(rhythm.body);
   const maxOutcomeReads = Math.floor(posNum(rhythm.body["max_outcome_reads"], 50));
@@ -2009,7 +2041,29 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       await writeMeta(row, { disposition: "" });
     }
   }
-  const keep = Math.floor(posNum(rhythm.body["settled_attempts_kept"], 200));
+  // THE CONTROL ARM'S TIME-BOX (controlArmStep), on every pass like the release above. Bounded per pass by the
+  // shaped control_expiry_per_tick (default max_per_tick), stamps included: every write rewrites the store. Expiries
+  // first, oldest stamp first. An expired row is touched, so it is supply work from the NEXT pass.
+  const armSteps = open
+    .filter((r) => !touched.has(String(r["id"])))
+    .map((r) => ({ r, s: controlArmStep(r, now, controlExpiryMs) }))
+    .filter((x): x is { r: Row; s: NonNullable<ReturnType<typeof controlArmStep>> } => x.s !== null)
+    .sort((a, b) => (a.s.kind === b.s.kind ? (a.s.kind === "expire" && b.s.kind === "expire" ? b.s.days - a.s.days : 0) : a.s.kind === "expire" ? -1 : 1));
+  const controlStamped: string[] = [];
+  const controlExpired: string[] = [];
+  for (const { r, s } of armSteps.slice(0, controlExpiryPerTick)) {
+    const id = String(r["id"]);
+    if (!pointer.dry_run) {
+      const w = await writeMeta(r, s.meta);
+      if (w.shape === "structuredError") { console.warn(`[check-supply] control arm ${s.kind} not written: ${id}`); continue; }
+    }
+    if (s.kind === "stamp") { controlStamped.push(id); continue; }
+    touched.add(id);
+    controlExpired.push(id);
+    console.log(`[check-supply] control arm expired: ${id} after ${s.days.toFixed(1)} days`);
+  }
+  if (armSteps.length > 0) console.log(`[check-supply] control arm: expired=${controlExpired.length} stamped=${controlStamped.length} pending=${armSteps.length - controlExpired.length - controlStamped.length} per_tick=${controlExpiryPerTick} node=${localNode}`);
+  const keep =Math.floor(posNum(rhythm.body["settled_attempts_kept"], 200));
   const settledKeys = (): Row => (settledNow.length > 0 ? { settled_attempts: [...settledAttemptsOf(rhythm.body), ...settledNow].slice(-keep) } : {});
   const bookkeepingLine = (dispatch: "due" | "undue"): void => {
     const counts = `armed=${armed.length} outcomes=${outcomesSettled} unarmed=${unarmedOwnCheck.length} released=${released}`;
@@ -2030,7 +2084,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // is the conductor's own threshold (1) or the body's due_threshold, whichever is higher, so both read it due.
     const sendable = (r: Row): boolean => {
       const id = String(r["id"]);
-      if (touched.has(id) || checkSupplyDisposition(r) === null || checkSupplyArm(id, controlFraction) === "control") return false;
+      if (touched.has(id) || checkSupplyDisposition(r) === null || checkSupplyRowArm(r, controlFraction) === "control") return false;
       const l = ledgerOf(metaOf(r));
       if (["armed", "exhausted", "goal_dispatched", SEND_PENDING, "no_anchor", "scope_excluded"].includes(String(l.state ?? ""))) return false;
       const n = Number(l.attempts ?? 0);
@@ -2150,11 +2204,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
     const holdable = !nonEmpty(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION;
-    if (checkSupplyArm(id, controlFraction) === "control") {
-      // CONTROL ARM: classified and recorded, never sent a goal.
+    if (checkSupplyRowArm(row, controlFraction) === "control") {
+      // CONTROL ARM: classified and recorded, never sent a goal. The mark carries its stamp (the time-box's clock).
       if (meta["gap_check_supply_arm"] === "control" || controlMarked.length >= perTick) continue;
       controlMarked.push(id);
-      if (!pointer.dry_run) await writeMeta(row, { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "control" });
+      if (!pointer.dry_run) await writeMeta(row, { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "control", gap_check_supply_arm_at: nowIso });
       continue;
     }
     if (dispatched.length >= perTick) continue;

@@ -26,7 +26,10 @@ const CORE = ["src/judge/gap-admission.ts", "src/judge/gap-attempt-credit.ts", "
  *  (an evaluator file and a judge_trust row is the bar for a module whose output a gate reads). */
 // I4a (qa placement ruling 2026-10-16): learning-credit.ts records outcomes the core decided (write-through to the holder);
 // it decides no verdict.
-const RECORDERS = ["src/judge/routing-capture.ts", "src/judge/learning-credit.ts"];
+// realism-audit.ts (USER RULING, ADVISORY): its realismVerdict is logged, carried and traced, and no gate or
+// judge reads it, so it decides nothing; held to (ii) and the pin like a recorder. Promoted to a refusal (the user's call),
+// it moves to CORE with its EVALUATOR_FILES and judge_trust entries.
+const RECORDERS = ["src/judge/routing-capture.ts", "src/judge/learning-credit.ts", "src/judge/realism-audit.ts"];
 /** qa 10.2: CLOSE rulings whose excluded_paths entries rode the opening act. The act landed them in the mirror below
  *  (and in EVALUATOR_FILES / judge_trust), so this list is EMPTY and asserted empty: nothing is closed by promise. */
 const PENDING_CLOSED: string[] = [];

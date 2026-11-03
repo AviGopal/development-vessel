@@ -33,7 +33,7 @@ import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-worksp
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, postConsumerTrace, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { admissionLandOf, composeObserveActive, composeObserveSkip, runComposeObserve, observeComposePointer, observeReportFields, observeJournalLine, observeTraceFields, OBSERVE_DRY_RUN_REASON } from "./compose-observe.js";
 /** Every gap-store write in this file: an observe compose writes none (compose-observe.ts). */
@@ -54,6 +54,7 @@ import { seedDeliveryLesson, seedDeliveryReason, seedDeliveryRefusals, touchesSe
 import { acquireComposeSlot, COMPOSE_CEILING_MS } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { sweepGitOut } from "../judge/gap-check-judge.js";
+import { realismAudit, realismAuditTrace, realismEvidenceText, type RealismFile, type RealismFixFile, type RealismVerdict } from "../judge/realism-audit.js";
 import { composeEligibilitySkipReason, heldLineageAncestor, inheritedOperatorHold, ownCheckBaselineFor, ownCheckVesselOf } from "../judge/gap-eligibility.js";
 import { countLiteral, regionFromProposalText, regionLiteralVerdict, regionOf } from "../lib/region-literal.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, ownCheckStillRed, testExpectCount, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
@@ -6390,7 +6391,7 @@ const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFail
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
 /** The compose used the gap's own-check baseline (own-check-baseline.ts): which reading, and for what. The grading join. */
 export type OwnCheckBaselineConsumed = { dispatch_id: string | null; verdict: OwnCheckBaseline["verdict"]; base_sha: string; used: Array<"call_path" | "parent_run"> };
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; unjudged?: true; output_tail?: string; exit_code?: number; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement; test_writing_red?: TestWritingRed[] };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; unjudged?: true; output_tail?: string; exit_code?: number; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" | "baseline"; call_path?: CallPathEntry[]; own_check_baseline_consumed?: OwnCheckBaselineConsumed }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement; test_writing_red?: TestWritingRed[]; realism?: RealismVerdict };
 /** One failing test of a REFUSED test-writing check's deciding run, for the repair round (testWritingRedOf). */
 export type TestWritingRed = { name: string; cause?: string; error: string | null };
 /** At most this many failing tests, each error at most TEST_WRITING_RED_ERROR chars, reach the repair prompt. */
@@ -6582,6 +6583,9 @@ export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, edi
   // fix must achieve and the failing tests, whether or not the slice shows the gate detail.
   const twField = testWritingRepairField(fv);
   if (twField) fields.push(twField);
+  // THE REALISM AUDIT'S FINDING (advisory, src/judge/realism-audit.ts): named as information, never as the failing stage.
+  const realismField = realismEvidenceText(fv.realism);
+  if (realismField) fields.push(realismField);
   // A check refused for reading a name its module does not export is repaired onto the module's real exports, so the
   // round is told them (check-supply-admission.ts exportedSurface), not left to guess from the reason's first 12 names.
   const surface = fv.test_writing?.exported_surface;
@@ -11249,6 +11253,40 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       }
       const diff = diffParts.join("\n\n");
 
+      // REALISM AUDIT (the user's ruling; ADVISORY, lane core: src/judge/realism-audit.ts). The own check is
+      // green here. The activity realism_audit reads each touched vessel's check(s) and fix for an input or a field
+      // production never sends or returns. It refuses NOTHING: its verdict is logged, carried on the vessel's verify
+      // result (the report, the attempt record and any repair prompt see it), and posted as a gradable trace. The judge
+      // does not read it. Any failure inside reads unknown and the landing goes on exactly as before.
+      for (const v of touched) {
+        try {
+          const vAbs = vesselRoot(v);
+          const relOf = (abs: string): string | null => (abs.startsWith(vAbs + "/") ? abs.slice(vAbs.length + 1) : null);
+          const readRel = (r: string): string | null => { try { return r.split("/").includes("..") ? null : readFileSync(`${vAbs}/${r}`, "utf-8"); } catch { return null; } };
+          const isTestRel = (r: string): boolean => /^test\//.test(r) || /\.(?:test|check)\.[cm]?[jt]sx?$/.test(r);
+          const checks = new Map<string, string>();
+          const fix: RealismFixFile[] = [];
+          for (const abs of [...preEditContent.keys(), ...created]) {
+            const r = relOf(abs);
+            const post = r ? readRel(r) : null;
+            if (!r || post === null) continue;
+            if (isTestRel(r)) checks.set(r, post);
+            else fix.push({ path: r, pre: preEditContent.get(abs) ?? null, post });
+          }
+          const vr = verify.find((x) => x.vessel === v);
+          const ownRef = gapOwnTestSuite((pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, v);
+          for (const r of [vr?.own?.test_file, ownRef?.test_file]) if (r && !checks.has(r)) { const t = readRel(r); if (t !== null) checks.set(r, t); }
+          const realism = await realismAudit({ gap_id: typeof pointer.gap?.id === "string" ? pointer.gap.id : null, vessel: v, checks: [...checks].map(([path, text]): RealismFile => ({ path, text })), fix, read: readRel, root: vAbs });
+          if (vr) vr.realism = realism;
+          console.log(`[fc-realism] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, verdict: realism.verdict, signals: realism.signals.map((x) => `${x.probe}@${x.file}:${x.line}`), probes: realism.probes, planted: `${realism.planted.reproduced}/${realism.planted.of}`, policy: realism.policy, ms: realism.ms, ...(realism.why ? { why: realism.why.slice(0, 200) } : {}), advisory: true })}`);
+          const parent = (pointer as { authoring_execution_id?: unknown }).authoring_execution_id;
+          void postConsumerTrace(realismAuditTrace(realism, { compose_execution_id: typeof parent === "string" ? parent : null, nowIso: new Date().toISOString() }), "fc-realism")
+            .catch((e) => console.warn(`[fc-realism] trace not posted (non-fatal): ${String((e as Error)?.message ?? e).slice(0, 160)}`));
+        } catch (e) {
+          console.warn(`[fc-realism] audit skipped for ${v} (non-fatal, advisory): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        }
+      }
+
       // EXECUTING SHAPE-VOCABULARY GATE (2026-09-01). Run FIRST, before the
       // reachability greps and the LLM judge: a name discovery cannot resolve makes
       // the predicate inert regardless of how reachable or well-argued the code around
@@ -12242,6 +12280,8 @@ const earlyAttempt = await Promise.race([
           apply_failed: applyFailed,
           semantic_addresses: semantic_gate?.addresses ?? null,
           semantic_reason: String(semantic_gate?.reason ?? "").slice(0, 400),
+          // The realism audit's advisory verdict per vessel (src/judge/realism-audit.ts); it decided nothing.
+          realism: verify.filter((v) => v.realism).map((v) => ({ vessel: v.vessel, verdict: v.realism!.verdict, signals: v.realism!.signals.map((x) => x.probe), planted: `${v.realism!.planted.reproduced}/${v.realism!.planted.of}` })),
           hard_fail: semantic_gate?.hard_fail ?? null,
           // Landed over an advisory addresses:false (semanticGateDisposition): landed_unverified until the by-effect check.
           semantic_dissent: semanticDissent !== null,

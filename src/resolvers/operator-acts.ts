@@ -18,13 +18,17 @@
  *   2a′  an operator_<x>_at stamp with no matching _by still counts (holds and releases are only ever operator acts).
  *   3    an operator scope act opening the edit_site, effective from its earliest per-node apply (the caller passes
  *        the effective time it can show; a commit time is earlier than any apply, so it is the conservative stand-in).
- *   -    an operator commit to the edit_site or the check file before the fix.
+ *   -    an operator commit to the edit_site or the check file inside THE WINDOW that is RELATED to the gap: its
+ *        message (trailers included) names the gap's id (or its recommit core), OR it changes lines the system's fix
+ *        changed in that same file (siteCommitRelation reads it). An operator commit to the file that does neither is
+ *        not an act on this gap. A commit whose message or line relation could not be read still counts.
  *   -    an operator-authored check file (the commit that added it was not the lane's).
  *   -    an operator-filed row (source operator:* or human_reported, or filed_by operator:*).
  *   4/4a an in-process or node-self gap write counts as SYSTEM, flagged route-unverifiable while the write event
  *        carries no route (the /resolvers/execute fix has not landed).
  * THE WINDOW is the row's FILING to its close + 24 h (link 5), not the fix: a post-fix re-arm, a hand close, an edit
- * of a deadline or of the evidence, all count. An undated hold flag (operator_hold with no _at), an operator-only row
+ * of a deadline or of the evidence, all count, and so does a RELATED operator commit to the edit_site or the check file
+ * (above), before or after the fix; an unrelated one counts at no point in the window. An undated hold flag (operator_hold with no _at), an operator-only row
  * field (deadline_status, date_status, latest_by), a hand close (closed_by operator:*, close_basis
  * operator_exercised_falsifier), an operator write on an ANCESTOR row, and an operator oracle label on a provenance
  * trace count too. UNKNOWN IS NEVER CLEAN: events that are unread, capped, or do not reach back to the filing, an
@@ -610,8 +614,22 @@ export function classifyOracleLabel(lab: OracleLabelLike, ctx: LabelClassContext
 // ─── the reader ─────────────────────────────────────────────────────────────
 /** An operator scope act: the paths it opened to the lane, effective from `effective_at` (earliest per-node apply). */
 export interface ScopeAct { readonly id: string; readonly opened: readonly string[]; readonly effective_at: string }
-/** A commit touching the edit site or the check file. `lane` is true for the lane's own author. */
-export interface SiteCommit { readonly sha: string; readonly author: string; readonly at: string; readonly lane: boolean; readonly files: readonly string[] }
+/** A commit touching the edit site or the check file. `lane` is true for the lane's own author. `message` is its full
+ *  message (trailers included); `touchesFix` whether it changes lines the system's fix changed in a file both touch
+ *  (a commit before the fix: the fix rewrites lines it wrote; after: it rewrites lines the fix wrote). Either one null
+ *  or absent is unread, and an unread relation is never "unrelated". */
+export interface SiteCommit { readonly sha: string; readonly author: string; readonly at: string; readonly lane: boolean; readonly files: readonly string[]; readonly message?: string | null; readonly touchesFix?: boolean | null }
+/** Is an operator commit to the edit site or the check file RELATED to the gap (the hands rule)? It names the gap
+ *  (`ids`: the row's id and its recommit core) in its message, or it changes the fix's lines. null reason: positively
+ *  read as unrelated (a read message naming neither id, and touchesFix false), so it is not an act. */
+export function siteCommitRelation(c: SiteCommit, ids: readonly string[]): string | null {
+  const msg = typeof c.message === "string" ? c.message : null;
+  if (msg !== null && ids.some((id) => id.length > 0 && msg.includes(id))) return "its message names the gap";
+  if (c.touchesFix === true) return "it changes lines the fix changed";
+  if (msg === null) return "its message is unread (unknown is never unrelated)";
+  if (c.touchesFix !== false) return "whether it changes the fix's lines is unread (unknown is never unrelated)";
+  return null;
+}
 
 /**
  * THE AUTONOMOUS-INTENT RULE, as the auto-revert states it (gap-landing-verdict.ts, autoRevertRegressedLandings guard 2,
@@ -751,8 +769,10 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     if (eff === null) { acts.push({ addendum: "3", at: null, detail: `edit_site opened to the lane by operator scope act ${a.id} (time unparsable; counted)` }); continue; }
     if ((filedMs === null || eff > filedMs) && (untilMs === null || eff <= untilMs)) acts.push({ addendum: "3", at: new Date(eff).toISOString(), detail: `edit_site opened to the lane by operator scope act ${a.id} effective ${new Date(eff).toISOString()}` });
   }
-  // operator commits to the edit site or the check file inside the window (after the fix too)
+  // operator commits to the edit site or the check file inside the window, before or after the fix, that are RELATED
+  // to the gap (siteCommitRelation): one naming the gap, or changing the fix's lines. Unrelated ones are not acts on it.
   if (ctx.siteCommits === null) unread.push("edit-site and check-file commits");
+  const relIds = [...new Set([gid, coreId(gid).core])];
   for (const c of ctx.siteCommits ?? []) {
     if (c.lane) continue;
     const onSite = !!ctx.editSitePath && c.files.includes(ctx.editSitePath);
@@ -760,7 +780,9 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
     if (!onSite && !onCheck) continue;
     const at = isoMs(c.at);
     if (at !== null && !inWindow(at)) continue;
-    acts.push({ addendum: "edit-site-commit", at: at === null ? null : new Date(at).toISOString(), detail: `operator commit ${c.sha.slice(0, 8)} by ${c.author} @ ${at === null ? "unparsable time" : new Date(at).toISOString()} on the ${onSite ? "edit_site" : "check file"}` });
+    const related = siteCommitRelation(c, relIds);
+    if (related === null) continue;
+    acts.push({ addendum: "edit-site-commit", at: at === null ? null : new Date(at).toISOString(), detail: `operator commit ${c.sha.slice(0, 8)} by ${c.author} @ ${at === null ? "unparsable time" : new Date(at).toISOString()} on the ${onSite ? "edit_site" : "check file"} (${related})` });
   }
   // an operator-authored check file
   if (ctx.checkPath) {

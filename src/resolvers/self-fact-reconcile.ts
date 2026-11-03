@@ -861,8 +861,10 @@ export interface JudgementDeps {
   revParse: (dir: string, sha: string) => string | null;
   /** The fix commit in `dir`, with whether origin/dev reaches it; null when unreadable. */
   fixCommit: (dir: string, fullSha: string) => FixCommit | null;
-  /** Commits on origin/dev in `dir` after `sinceIso` touching any of `paths`, or null when unreadable. */
-  siteCommits: (dir: string, paths: string[], sinceIso: string) => SiteCommit[] | null;
+  /** Commits on origin/dev in `dir` after `sinceIso` touching any of `paths`, with their messages, or null when
+   *  unreadable. Given the fix's full sha, each non-lane commit also carries whether it changes the fix's lines
+   *  (fixLineRelations); without one that relation is unread. */
+  siteCommits: (dir: string, paths: string[], sinceIso: string, fixSha?: string | null) => SiteCommit[] | null;
   /** The commit that added `path` on origin/dev in `dir`; undefined when never added; null when unreadable. */
   firstCommit: (dir: string, path: string) => SiteCommit | null | undefined;
   /** Commits on origin/dev after `fullSha` in `dir` whose message says it reverts it, or null when unreadable. */
@@ -898,6 +900,64 @@ const parseCommits = (out: string): SiteCommit[] => out.split("\x1e").map((b) =>
   const [sha, author, at] = (head ?? "").split("\x1f");
   return { sha: sha ?? "", author: author ?? "", at: at ?? "", lane: author === LANE_AUTHOR, files: files.map((f) => f.trim()).filter(Boolean) };
 }).filter((c) => /^[0-9a-f]{40}$/.test(c.sha));
+/** parseCommits for a log whose format ends the header with `%x1f%B%x1d` (the full message, then the names). */
+const parseCommitsWithMessage = (out: string): SiteCommit[] => out.split("\x1e").filter((b) => b.trim()).map((b) => {
+  const cut = b.indexOf("\x1d");
+  const head = cut < 0 ? b : b.slice(0, cut);
+  const [sha, author, at, ...msg] = head.replace(/^\n+/, "").split("\x1f");
+  const files = (cut < 0 ? "" : b.slice(cut + 1)).split("\n").map((f) => f.trim()).filter(Boolean);
+  return { sha: (sha ?? "").trim(), author: author ?? "", at: at ?? "", lane: author === LANE_AUTHOR, files, message: cut < 0 ? null : msg.join("\x1f") };
+}).filter((c) => /^[0-9a-f]{40}$/.test(c.sha));
+/** The OLD-side lines `sha` changes in `path` (from its first parent), as [start, count] with count > 0: the lines it
+ *  rewrites or deletes. A pure insertion rewrites no existing line. null when unreadable (no parent, a git failure). */
+function changedOldLines(dir: string, sha: string, path: string): Array<[number, number]> | null {
+  const o = gitIn(dir, ["diff", "-U0", "--no-color", "--no-ext-diff", `${sha}^`, sha, "--", path]);
+  if (o === null) return null;
+  return [...o.matchAll(/^@@ -(\d+)(?:,(\d+))? /gm)].map((m) => [Number(m[1]), m[2] === undefined ? 1 : Number(m[2])] as [number, number]).filter((r) => r[1] > 0);
+}
+/** The commits `git blame` attributes the given lines of `path` at `rev` to (rev may be a range a..b), or null. */
+function blamedShas(dir: string, rev: string, path: string, lines: Array<[number, number]>): Set<string> | null {
+  if (lines.length === 0) return new Set();
+  const o = gitIn(dir, ["blame", "--porcelain", ...lines.flatMap(([a, n]) => ["-L", `${a},+${n}`]), rev, "--", path]);
+  if (o === null) return null;
+  return new Set([...o.matchAll(/^([0-9a-f]{40}) \d+ \d+/gm)].map((m) => m[1]!));
+}
+/**
+ * THE HANDS RULE'S LINE RELATION: does each non-lane commit change lines the system's fix (`fixSha`) changed, in a file
+ * of `paths` both touch? Read by lineage, not by line numbers (which drift between commits):
+ *  - a commit BEFORE the fix (an ancestor): the fix rewrites or deletes a line `git blame` at the fix's parent
+ *    attributes to that commit;
+ *  - a commit AFTER the fix (a descendant): it rewrites or deletes a line `git blame` at its own parent (from the fix's
+ *    parent on) attributes to the fix.
+ * Neither (a commit on another line of history), or any read failing, leaves touchesFix null (unread). Named limits: a
+ * pure insertion rewrites no existing line, so an insertion beside the other side's lines is not an overlap; a line a
+ * later commit rewrote again is attributed to that later commit.
+ */
+export function fixLineRelations(dir: string, fixSha: string, commits: readonly SiteCommit[], paths: readonly string[]): SiteCommit[] {
+  const anc = (a: string, b: string): boolean | null => { const r = gitRun(dir, ["merge-base", "--is-ancestor", a, b]); return r === null ? null : r.code === 0 ? true : r.code === 1 ? false : null; };
+  const beforeBy = new Map<string, Set<string> | null>();
+  const before = (p: string): Set<string> | null => {
+    if (!beforeBy.has(p)) { const rs = changedOldLines(dir, fixSha, p); beforeBy.set(p, rs === null ? null : blamedShas(dir, `${fixSha}^`, p, rs)); }
+    return beforeBy.get(p)!;
+  };
+  return commits.map((c) => {
+    if (c.lane) return c;
+    if (c.sha === fixSha) return { ...c, touchesFix: true };
+    const files = paths.filter((p) => c.files.includes(p));
+    const isBefore = anc(c.sha, fixSha);
+    const isAfter = isBefore === true ? false : anc(fixSha, c.sha);
+    if (isBefore !== true && isAfter !== true) return { ...c, touchesFix: null };
+    let touches: boolean | null = false;
+    for (const p of files) {
+      let hit: boolean | null;
+      if (isBefore === true) { const s = before(p); hit = s === null ? null : s.has(c.sha); }
+      else { const rs = changedOldLines(dir, c.sha, p); const s = rs === null ? null : blamedShas(dir, `${fixSha}^..${c.sha}^`, p, rs); hit = s === null ? null : s.has(fixSha); }
+      if (hit === true) { touches = true; break; }
+      if (hit === null) touches = null;
+    }
+    return { ...c, touchesFix: touches };
+  });
+}
 /** Operator scope acts from the super-repo's history of the committed scope and this node's pin: a commit (not the
  *  lane's) after which a site is no longer excluded where it was before. Dated by the commit (earlier than any apply).
  *  The history is read ONCE per run (one log, two shows per commit), then every site is tested against it. */
@@ -1112,7 +1172,12 @@ const defaultJudgementDeps: JudgementDeps = {
     const [author, at] = head.trim().split("\x1f");
     return { author: author ?? "", at: at ?? "", files: files.split("\n").map((f) => f.trim()).filter(Boolean), on_origin_dev: onOriginDev(dir, fullSha) };
   },
-  siteCommits: (dir, paths, sinceIso) => { const o = gitIn(dir, ["log", `--since=${sinceIso}`, "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "origin/dev", "--", ...paths]); return o === null ? null : parseCommits(o); },
+  siteCommits: (dir, paths, sinceIso, fixSha) => {
+    const o = gitIn(dir, ["log", `--since=${sinceIso}`, "--format=%x1e%H%x1f%an%x1f%cI%x1f%B%x1d", "--name-only", "origin/dev", "--", ...paths]);
+    if (o === null) return null;
+    const cs = parseCommitsWithMessage(o);
+    return fixSha ? fixLineRelations(dir, fixSha, cs, paths) : cs;
+  },
   firstCommit: (dir, path) => { const o = gitIn(dir, ["log", "--diff-filter=A", "--reverse", "--format=%x1e%H%x1f%an%x1f%cI", "--name-only", "origin/dev", "--", path]); if (o === null) return null; return parseCommits(o)[0]; },
   revertsOf: (dir, fullSha) => {
     const o = gitIn(dir, ["log", "-E", "-i", "--grep", `reverts (\\w+ ){0,4}(commit )?(${fullSha}|${fullSha.slice(0, 12)})`, "--format=%x1e%H%x1f%cI%x1f%B", `${fullSha}..origin/dev`]);
@@ -1960,7 +2025,7 @@ const FACTS: Record<string, FactFn> = {
         siteSource: fixDir && site ? deps.show(fixDir, fullSha, site.path) : null,
         acts: {
           scopeActs: siteRaw ? (scopeBySite ? scopeBySite.get(siteRaw) ?? [] : null) : [],
-          siteCommits: siteDir ? (paths.length > 0 ? deps.siteCommits(siteDir, paths, filed) : []) : null,
+          siteCommits: siteDir ? (paths.length > 0 ? deps.siteCommits(siteDir, paths, filed, fixDir ? fullSha : null) : []) : null,
           checkFirstCommit: check ? (siteDir ? deps.firstCommit(siteDir, check) : null) : undefined,
           events, eventsCapped: capped, eventsFromFiling: fromFiling,
           labels: labelRead ? labelRead.labels : null, labelContext: labelRead ? labelRead.context : null,

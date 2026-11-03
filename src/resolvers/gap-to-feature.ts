@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
 import { attemptEvidenceBlock, explicitLineHint } from "./retry-evidence.js";
@@ -1624,6 +1625,74 @@ export function chronicEscalationFingerprint(row: Record<string, unknown>, why: 
 }
 
 /**
+ * ROW-INPUT FINGERPRINT (S), the parity twin of the gap-goal supply's rowStateFingerprint (boredom-vessel
+ * src/row-state.ts; shared vectors: its src/fixtures/row-state-vectors.json). The investigation damper stamps it as
+ * investigation_declined.row_state, and the supply skips the row while the row's S still equals it. S covers only
+ * fields something OTHER than the investigation writes, so the investigation's own write-back never re-arms the row:
+ *   included: status, category; the falsifier class (lower-cased) plus evidence_resolve, verify_shape and
+ *             predicate_source; the edit site in gapEditSite's order; parent_gap_id; each failure lesson whose class is
+ *             not decomposition_refusal, as [class, reason sliced to 300] (no at).
+ *   excluded: summary (a detector re-emission rewrites it with rolling counts), decomposed_at, decomposition,
+ *             investigated_at, investigation_declined, every key ending in _at at any depth, decomposition_refusal
+ *             lessons, and every lesson's at.
+ * A parent check rewrites evidence_resolve / verify_shape / predicate_source, so it changes S (a new check re-arms).
+ * Serialization: JSON with no whitespace, object keys sorted at every depth (default string sort), undefined values and
+ * _at keys dropped, arrays in order; S is the lowercase hex sha256 of its UTF-8 bytes.
+ */
+export function rowStateInputs(row: unknown): Record<string, unknown> {
+  const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  const r = isRec(row) ? row : {};
+  const meta = isRec(r.classification_metadata) ? r.classification_metadata : isRec(r.metadata) ? r.metadata : {};
+  const raw = meta.falsifier;
+  const falsifier = String((raw && typeof raw === "object" ? (raw as { class?: unknown }).class : raw) ?? "").toLowerCase();
+  let site = "";
+  for (const f of ["edit_site", "file_path", "change_site", "path"]) { const v = meta[f]; if (typeof v === "string" && v.trim()) { site = v.trim(); break; } }
+  if (!site && typeof r.file_path === "string" && r.file_path.trim()) site = r.file_path.trim();
+  const lessons: Array<[string, string]> = [];
+  for (const l of Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) {
+    if (!isRec(l)) continue;
+    const cls = String(l.class ?? "");
+    if (cls === "decomposition_refusal") continue;
+    lessons.push([cls, String(l.reason ?? "").slice(0, 300)]);
+  }
+  return {
+    category: String(r.category ?? ""),
+    edit_site: site,
+    evidence_resolve: meta.evidence_resolve ?? null,
+    failure_lessons: lessons,
+    falsifier,
+    parent_gap_id: String(meta.parent_gap_id ?? r.parent_gap_id ?? ""),
+    predicate_source: meta.predicate_source ?? null,
+    status: String(r.status ?? ""),
+    verify_shape: meta.verify_shape ?? null,
+  };
+}
+
+/** S's canonical serialization (keys emitted in sorted order by hand: JSON.stringify puts integer-like keys first). */
+export function rowStateCanonical(row: unknown): string {
+  const canon = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map((x) => (x === undefined || typeof x === "function" || typeof x === "symbol" ? "null" : canon(x))).join(",")}]`;
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const parts: string[] = [];
+      for (const k of Object.keys(o).sort()) {
+        const x = o[k];
+        if (k.endsWith("_at") || x === undefined || typeof x === "function" || typeof x === "symbol") continue;
+        parts.push(`${JSON.stringify(k)}:${canon(x)}`);
+      }
+      return `{${parts.join(",")}}`;
+    }
+    return JSON.stringify(v) ?? "null";
+  };
+  return canon(rowStateInputs(row));
+}
+
+/** S: lowercase hex sha256 of the canonical serialization's UTF-8 bytes. */
+export function rowStateFingerprint(row: unknown): string {
+  return createHash("sha256").update(rowStateCanonical(row), "utf8").digest("hex");
+}
+
+/**
  * ESCALATE A STUCK GAP: decomposition first, the free-text investigation walk only when no valid step could be
  * produced. Reached when a gap reaches the chronic-failure threshold, and when one region of a gap is refused
  * twice by the no-effect constraint (feature_compose). Reads the autonomous_pick lease and the spend envelope,
@@ -2079,12 +2148,16 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true, ...(observe ? { observe: true } : {}) });
     // ONE INVESTIGATION PER STATE (the investigation damper). A decline for missing information changes nothing the next
     // dispatch reads, so the gap-goal supply sent the same "investigate and decompose" walk about five times a day per
-    // gap, each re-running this decline. The row is stamped with the fingerprint of the inputs it declined on (the
-    // escalation's own chronicEscalationFingerprint, stamped as chronic_escalation is); the supply reads it and skips
-    // the gap while those inputs are unchanged. Keyed on state, never a clock, and no disposition: check-supply's
-    // localizer must keep seeing the row. Observe mode writes nothing.
-    if (!observe && d.written.length === 0 && /^needs_information\b/.test(d.reason)) {
-      try { await persistGapMetaPatch(found, { investigation_declined: { fingerprint: chronicEscalationFingerprint(found, "investigation_declined"), at: new Date().toISOString(), reason: d.reason.slice(0, 300) } }); }
+    // gap, each re-running this decline. The row is stamped with the inputs it declined on: fingerprint is the
+    // escalation's chronicEscalationFingerprint, which the supply's current predicate parses (kept byte for byte), and
+    // row_state is S (rowStateFingerprint, the supply's own row-state twin), which the supply compares when present.
+    // A decomposition whose every step was refused with nothing written ("no valid step: ...") is the same decline: the
+    // next walk re-drafts on the same row and is refused again for a different reason, and S leaves out what the run
+    // itself writes (its refusal lesson, decomposed_at, decomposition), so only a real row change re-arms. Keyed on
+    // state, never a clock, and no disposition: check-supply's localizer must keep seeing the row. Observe mode writes
+    // nothing. TEMPORARY (removal debt): a stopgap damper, retired once the class fix is live and accepted by effect.
+    if (!observe && d.written.length === 0 && /^(?:needs_information\b|no valid step|decomposition_refused)/.test(d.reason)) {
+      try { await persistGapMetaPatch(found, { investigation_declined: { fingerprint: chronicEscalationFingerprint(found, "investigation_declined"), row_state: rowStateFingerprint(found), at: new Date().toISOString(), reason: d.reason.slice(0, 300) } }); }
       catch (e) { console.warn(`[gap-to-feature] investigation-decline stamp for ${decomposeId} not written: ${(e as Error).message}`); }
     }
     return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason, ...(d.raw_len !== undefined ? { raw_len: d.raw_len, raw_tail: d.raw_tail } : {}),

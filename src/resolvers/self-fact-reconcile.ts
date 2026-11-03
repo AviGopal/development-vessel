@@ -549,7 +549,9 @@ export const journal = { read: readJournalLines };
  * derivable subclass of link 2 has no reader here; a scope act is dated by its super-repo commit, earlier than any apply.
  */
 export type RepairVerdict = "counted" | "not_counted" | "pending" | "unjudged";
-export interface RepairLanding { attempt_id: string; gap_id: string; sha: string; repo: string; at: string | null; directed: unknown; authoring_execution_id: string | null; from: "ledger" | "spool" }
+export interface RepairLanding { attempt_id: string; gap_id: string; sha: string; repo: string; at: string | null; directed: unknown; authoring_execution_id: string | null; from: "ledger" | "spool";
+  /** The dispatch id the attempt intent registered (attemptIntent.dispatch_id), when it names one: the S-2 join. */
+  dispatch_id?: string | null }
 export interface CheckHonest { value: true | false | "unjudged"; reason: string }
 /** The fix commit as its clone reads it. on_origin_dev null: the reachability could not be read. */
 export interface FixCommit { author: string; at: string; files: string[]; on_origin_dev: boolean | null }
@@ -573,7 +575,7 @@ export interface RepairInputs {
   fix: FixCommit | null;
   /** The check file's and the edit site's sources AT THE FIX (never HEAD). null: unreadable. */
   checkSource: string | null; siteSource: string | null;
-  acts: Omit<OperatorActsContext, "byId" | "filedAt" | "untilAt" | "editSitePath" | "checkPath" | "directed" | "traceIds">;
+  acts: Omit<OperatorActsContext, "byId" | "filedAt" | "untilAt" | "editSitePath" | "checkPath" | "directed" | "traceIds" | "landingDispatchIds">;
   /** Set by the live reader when the lane landing's authoring execution is known nowhere (its attemptIntent nor
    *  attemptAuthoring): the labels on it cannot be read, so the closure is unattributable. Absent: not asked. */
   authoringUnknown?: boolean;
@@ -653,7 +655,7 @@ export function judgeRepairClosure(inp: RepairInputs): RepairJudgement {
   // LINK 5's window: FILING to close + 24 h; an open closure is read up to now.
   const untilAt = closed ? (closedMs === null ? null : new Date(closedMs + DURABLE_MS).toISOString()) : new Date(inp.nowMs).toISOString();
   const traceIds = landing.authoring_execution_id ? [landing.authoring_execution_id] : [];
-  const acts = operatorActsOf(row, { ...inp.acts, byId: inp.byId, filedAt, untilAt, editSitePath: site?.path ?? null, checkPath: check, directed: landing.directed, traceIds });
+  const acts = operatorActsOf(row, { ...inp.acts, byId: inp.byId, filedAt, untilAt, editSitePath: site?.path ?? null, checkPath: check, directed: landing.directed, traceIds, landingDispatchIds: landing.dispatch_id ? [landing.dispatch_id] : [] });
   const unknown = [...acts.unread];
   if (landedMs === null) unknown.push("the landing's time (unparsable)");
   if (closed && closedMs === null) unknown.push("the close time (closed with no closed_at)");
@@ -822,11 +824,15 @@ export const judgementLine = (j: { fact: string }): string => `[self-fact-judgem
 /** The S-2 inputs of one closure: the dispatch records naming its gap (by id or qualified edit_site, as link 5 names
  *  them), each read with its resolverAnswers, and the resolverRequest record of every request those answers name. An
  *  unread store is unread answers. Whether a record is trusted (it must name a provenance trace) is the reader's. */
-async function s2Inputs(deps: JudgementDeps, store: DispatchStoreEntry[] | null, gapId: string, site: string): Promise<{ resolverDispatches: ResolverDispatchLike[] | null; resolverRequests: Map<string, ResolverRequestLike> }> {
+async function s2Inputs(deps: JudgementDeps, store: DispatchStoreEntry[] | null, gapId: string, site: string, ownDispatchId: string | null = null): Promise<{ resolverDispatches: ResolverDispatchLike[] | null; resolverRequests: Map<string, ResolverRequestLike> }> {
   const requests = new Map<string, ResolverRequestLike>();
   if (store === null) return { resolverDispatches: null, resolverRequests: requests };
   const names = [...new Set([gapId, site, site.startsWith("repos/") ? site.slice("repos/".length) : ""])].filter((n) => n && n.length > 8);
-  const ids = [...new Set(store.filter((e): e is Record<string, unknown> => !!e && typeof e === "object").filter((e) => { const t = JSON.stringify(e) ?? ""; return names.some((n) => t.includes(n)); }).map((e) => String(e["dispatchId"] ?? "")).filter(Boolean))];
+  const entries = store.filter((e): e is Record<string, unknown> => !!e && typeof e === "object");
+  // The text match (gap id or edit-site name anywhere in the entry) is unchanged; the landing's OWN dispatch, when the
+  // store lists it, is read too (operatorActsOf trusts it by its dispatch_id).
+  const ids = [...new Set([...entries.filter((e) => { const t = JSON.stringify(e) ?? ""; return names.some((n) => t.includes(n)); }).map((e) => String(e["dispatchId"] ?? "")),
+    ...(ownDispatchId && entries.some((e) => e["dispatchId"] === ownDispatchId) ? [ownDispatchId] : [])].filter(Boolean))];
   const out: ResolverDispatchLike[] = [];
   for (const id of ids) {
     let d: ResolverDispatchLike | null = null;
@@ -1271,7 +1277,7 @@ export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, si
     const prev = into.get(gapId);
     const prevAt = prev ? isoMs(prev.at) : null;
     if (!prev || (at !== null && (prevAt === null || prevAt <= at))) {
-      into.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: atText, directed: intent["directed"], authoring_execution_id: typeof intent["authoring_execution_id"] === "string" ? intent["authoring_execution_id"] : null, from });
+      into.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: atText, directed: intent["directed"], authoring_execution_id: typeof intent["authoring_execution_id"] === "string" ? intent["authoring_execution_id"] : null, from, dispatch_id: typeof intent["dispatch_id"] === "string" && intent["dispatch_id"] ? intent["dispatch_id"] : null });
     }
   }
   const sorted = (m: Map<string, RepairLanding>) => [...m.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id));
@@ -2062,7 +2068,7 @@ const FACTS: Record<string, FactFn> = {
           events, eventsCapped: capped, eventsFromFiling: fromFiling,
           labels: labelRead ? labelRead.labels : null, labelContext: labelRead ? labelRead.context : null,
           originPresent: false, keymap, peerKeys6: (keymap ?? []).filter((k) => k.owner_kind === "peer").map((k) => k.id.slice(0, 6)),
-          ...(dispatchStore === undefined ? {} : { dispatches: dispatchStore, ...(await s2Inputs(deps, dispatchStore, l.gap_id, siteRaw)) }),
+          ...(dispatchStore === undefined ? {} : { dispatches: dispatchStore, ...(await s2Inputs(deps, dispatchStore, l.gap_id, siteRaw, l.dispatch_id ?? null)) }),
         },
         nowMs,
         authoringUnknown: !l.authoring_execution_id,

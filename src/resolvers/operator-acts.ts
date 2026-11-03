@@ -402,7 +402,9 @@ export interface ResolverRequestLike {
  * the link evidence.
  *
  * Read-path precondition (this reader): a dispatch record's answers are in scope only when the record itself names one
- * of the closure's provenance traces (a dispatch:<id> tag can be caller-supplied); an untrusted or unread record is
+ * of the closure's provenance traces (a dispatch:<id> tag can be caller-supplied), OR its own dispatch_id EQUALS the
+ * dispatch id the landing's attempt intent registered (landingDispatchIds: the compose stores the dispatch id there,
+ * while the record names a synthetic executionId, so the trace match never meets it); an untrusted or unread record is
  * UNATTRIBUTABLE. The operator marker of (a) is a guard: goal-host builds resolverAnswers itself and none carries one.
  */
 export type S2AnswerClass = "SYSTEM" | "UNATTRIBUTABLE" | "OPERATOR";
@@ -690,6 +692,9 @@ export interface OperatorActsContext {
   /** The goal-host dispatch records the provenance traces are tagged with (dispatch:<id>), each with its
    *  resolverAnswers[]. null: unread, so an operator answer cannot be ruled out (said in `unread`); undefined: not asked. */
   readonly resolverDispatches?: ReadonlyArray<ResolverDispatchLike> | null;
+  /** The dispatch id(s) the landing's attempt intent registered (attemptIntent.dispatch_id): a resolverDispatches record
+   *  whose own dispatch_id equals one is the landing's own dispatch, trusted without a trace-id match. */
+  readonly landingDispatchIds?: readonly string[];
   /** goal-host's dispatch store entries (link 5 "who ran it"): parsed records or store texts. null: unread, so link 5
    *  is UNATTRIBUTABLE; undefined: not asked. */
   readonly dispatches?: ReadonlyArray<DispatchStoreEntry> | null;
@@ -827,9 +832,11 @@ export function operatorActsOf(row: GapRow, ctx: OperatorActsContext): OperatorA
   if (ctx.resolverDispatches === null) unattributable.push("S-2 resolver answers: the dispatch records cannot be read");
   const provTraces = new Set<string>(provenanceTraceIds(row, ctx.traceIds ?? []));
   for (const d of ctx.resolverDispatches ?? []) {
-    // A dispatch:<id> tag is not proof: the record itself must name one of this closure's provenance traces.
+    // A dispatch:<id> tag is not proof: the record itself must name one of this closure's provenance traces, or be the
+    // landing's own dispatch (its dispatch_id equals the one the attempt intent registered).
     const names = [d.execution_id, ...(d.trace_ids ?? [])].filter((x): x is string => typeof x === "string" && x.length > 0);
-    if (!names.some((x) => provTraces.has(x))) { unattributable.push(`S-2 dispatch ${d.dispatch_id}: its record names no provenance trace (executionId ${d.execution_id ?? "none"}), so its tag cannot be trusted`); continue; }
+    const ownDispatch = typeof d.dispatch_id === "string" && d.dispatch_id.length > 0 && (ctx.landingDispatchIds ?? []).includes(d.dispatch_id);
+    if (!ownDispatch && !names.some((x) => provTraces.has(x))) { unattributable.push(`S-2 dispatch ${d.dispatch_id}: its record names no provenance trace (executionId ${d.execution_id ?? "none"}), so its tag cannot be trusted`); continue; }
     if (!Array.isArray(d.resolverAnswers)) { unattributable.push(`S-2 resolver answers of dispatch ${d.dispatch_id} cannot be read`); continue; }
     for (const a of d.resolverAnswers) {
       const c = classifyS2Answer(a, ctx.resolverRequests);

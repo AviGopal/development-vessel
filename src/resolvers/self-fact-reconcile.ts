@@ -511,7 +511,10 @@ export const journal = { read: readJournalLines };
  * to the filing, an unparsable time, unread oracle labels, an unreadable fix commit, all read unjudged, never counted.
  *
  *   repair_autonomy        one judgement per gap with a lane landing in the LANDING LEDGER (or its undrained spool) in
- *                          the window (expected, R1-18: never from the gap store this instrument reads). counted only when
+ *                          the window (expected, R1-18: never from the gap store this instrument reads). A CHECK landing
+ *                          (its commit only adds or edits test/checks/<id>.check.ts) is not a repair: it is judged and
+ *                          logged the same way but tallied apart (check_landings), outside expected and checked, so the
+ *                          counted-repair rate is over SOURCE landings only. counted only when
  *                          link 1 the row's source is substrate_detected (unset or anything else is not autonomous;
  *                                 an operator filing reads "origin: operator-filed"), and no lineage ancestor is
  *                                 operator-filed or human_reported (followed to the root, the same reading);
@@ -555,6 +558,8 @@ export interface RepairJudgement {
   arm_writer: string; operator_acts: OperatorActsResult | null; fix_sha: string; fix_repo: string; attempt_id: string;
   check: string | null; check_honest: CheckHonest; landing_verdict: Record<string, unknown>; durable_until: string | null; route_unverifiable: number;
   window: { from: string | null; until: string | null };
+  /** "check" for a check landing (the separate tally, isCheckOnlyCommit), "source" for a repair; absent on a fixture. */
+  landing_kind?: "source" | "check";
 }
 export interface RepairInputs {
   landing: RepairLanding;
@@ -1211,11 +1216,29 @@ export function __setJudgementDepsForTests(d: Partial<JudgementDeps> | null): vo
 
 /** A ledger or spool entry that may be a lane landing but cannot be tied to a gap: counted in expected, judged unjudged. */
 export interface UnjudgeableLanding { key: string; reason: string; attempt_id: string | null; sha: string | null; at: string | null; from: "ledger" | "spool" }
+/** A CHECK LANDING (user ruling, "Separate tally"): a commit whose every file is a check, test/checks/<id>.check.ts,
+ *  added or edited. It lands a gap's check, not its repair. Any other file, or no file read, is not one. The <id> is not
+ *  matched to the gap: a check landed under another gap's attempt is still a check landing, not a repair. */
+export const CHECK_FILE_RE = /^test\/checks\/[^/]+\.check\.ts$/;
+export function isCheckOnlyCommit(files: readonly string[] | null | undefined): boolean {
+  return !!files && files.length > 0 && files.every((f) => CHECK_FILE_RE.test(f));
+}
+/** The kind of one ledger landing, read from its commit in the landing repo's clone (the files the commit changes, as
+ *  link 3 reads them): "check" (isCheckOnlyCommit), "source", or null when the commit cannot be read. */
+export function landingKindIn(deps: Pick<JudgementDeps, "cloneOf" | "revParse" | "fixCommit">, repo: string, sha: string): "check" | "source" | null {
+  const dir = repo ? deps.cloneOf(repo) : null;
+  const full = dir ? deps.revParse(dir, sha) : null;
+  const fc = dir && full ? deps.fixCommit(dir, full) : null;
+  return fc ? (isCheckOnlyCommit(fc.files) ? "check" : "source") : null;
+}
 /** The lane landings in the window, from the ledger AND its undrained spool, newest per gap (expected for
  *  repair_autonomy). A landing whose time cannot be parsed is kept (unknown is never out of the window). An entry that
  *  may be a lane landing but cannot be tied to a gap (a torn spool file; a landing whose attempt has no intent, or whose
- *  intent names no gap) is returned as unjudgeable, never dropped. */
-export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, sinceMs: number): { landings: RepairLanding[]; unjudgeable: UnjudgeableLanding[]; spool_readable: boolean } {
+ *  intent names no gap) is returned as unjudgeable, never dropped.
+ *  Given `kindOf`, a CHECK landing (kindOf "check") is not a repair: it leaves `landings` (the repair denominator) for
+ *  `check_landings`, newest per gap on each side, so a gap's check landing never hides its source landing or the other
+ *  way round. A landing whose kind cannot be read (null) stays a repair: unknown never leaves the denominator. */
+export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, sinceMs: number, kindOf?: (repo: string, sha: string) => "check" | "source" | null): { landings: RepairLanding[]; check_landings: RepairLanding[]; unjudgeable: UnjudgeableLanding[]; spool_readable: boolean } {
   const intents = new Map<string, Record<string, unknown>>();
   for (const r of deps.ledger("attemptIntent")) intents.set(r.key, r.record);
   const ingested = deps.ledger("landingEvent");
@@ -1226,6 +1249,7 @@ export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, si
     ...(spool ?? []).filter((s) => !keys.has(s.key)).map((s) => ({ key: s.key, record: s.record, from: "spool" as const })),
   ];
   const byGap = new Map<string, RepairLanding>();
+  const checkByGap = new Map<string, RepairLanding>();
   const unjudgeable = new Map<string, UnjudgeableLanding>();
   for (const { key, record: e, from } of events) {
     if (e === null) { unjudgeable.set(key, { key, reason: "a torn spool file: it may be a lane landing, so it is expected and cannot be judged", attempt_id: null, sha: null, at: null, from }); continue; }
@@ -1243,13 +1267,15 @@ export function ledgerLandings(deps: Pick<JudgementDeps, "ledger" | "spool">, si
     const gapId = typeof intent["gap_id"] === "string" ? intent["gap_id"] : "";
     if (!gapId) { unjudgeable.set(att, { key: att, reason: `the landing's attempt ${att} names no gap, so no closure can be judged`, attempt_id: att, sha, at: atText, from }); continue; }
     const repo = String(e["repo"] ?? "").split("/").filter(Boolean).pop() ?? "";
-    const prev = byGap.get(gapId);
+    const into = kindOf && kindOf(repo, sha) === "check" ? checkByGap : byGap;
+    const prev = into.get(gapId);
     const prevAt = prev ? isoMs(prev.at) : null;
     if (!prev || (at !== null && (prevAt === null || prevAt <= at))) {
-      byGap.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: atText, directed: intent["directed"], authoring_execution_id: typeof intent["authoring_execution_id"] === "string" ? intent["authoring_execution_id"] : null, from });
+      into.set(gapId, { attempt_id: att, gap_id: gapId, sha, repo, at: atText, directed: intent["directed"], authoring_execution_id: typeof intent["authoring_execution_id"] === "string" ? intent["authoring_execution_id"] : null, from });
     }
   }
-  return { landings: [...byGap.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id)), unjudgeable: [...unjudgeable.values()].sort((a, b) => a.key.localeCompare(b.key)), spool_readable: spool !== null };
+  const sorted = (m: Map<string, RepairLanding>) => [...m.values()].sort((a, b) => a.gap_id.localeCompare(b.gap_id));
+  return { landings: sorted(byGap), check_landings: sorted(checkByGap), unjudgeable: [...unjudgeable.values()].sort((a, b) => a.key.localeCompare(b.key)), spool_readable: spool !== null };
 }
 /** Every regressed settlement in the ledger, by key (the window is applied by the caller). */
 export function ledgerRegressedSettlements(deps: Pick<JudgementDeps, "ledger">): Map<string, RegressedSettlement> {
@@ -1944,7 +1970,8 @@ const FACTS: Record<string, FactFn> = {
     return { fact: "lane_coverage", source_read: true, copies_read: copies, divergences: out, note: `${vessels} vessel(s) with a tsconfig` };
   },  /**
    * REPAIR AUTONOMY (§14 #3): one judgement per gap with a lane landing in the landing ledger (or its spool) over the
-   * row's window (see "repair_autonomy and lane_revert_within_1h" above). The finding filed is the ledger landings the
+   * row's window (see "repair_autonomy and lane_revert_within_1h" above); check landings are the separate tally, and the
+   * note reports both. The finding filed is the ledger landings the
    * instrument could not judge; the counts are the measurement. An absent ledger file or spool is UNOBSERVED, never an
    * empty ledger. Must-fail control: an operator-armed gap with a verified landing, judged by the same function, reads
    * not_counted (failing_link operator_act:arm) while its system-armed twin counts.
@@ -1960,12 +1987,14 @@ const FACTS: Record<string, FactFn> = {
     const absent = (["attemptIntent", "landingEvent", "attemptSettlement"] as const).filter((k) => !deps.ledgerPresent(k));
     if (absent.length > 0) return unread(`landing ledger file(s) absent: ${absent.join(", ")} (unknown is never an empty ledger)`);
     let landings: RepairLanding[];
+    let checkLandings: RepairLanding[];
     let unjudgeable: UnjudgeableLanding[];
     let settlements: LedgerRow[];
     try {
-      const l = ledgerLandings(deps, nowMs - hours * 3600_000);
+      // A check landing (a commit that only adds or edits test/checks/<id>.check.ts) is tallied apart, never a repair.
+      const l = ledgerLandings(deps, nowMs - hours * 3600_000, (repo, sha) => landingKindIn(deps, repo, sha));
       if (!l.spool_readable) return unread("the landing spool is unreadable, so landings not yet ingested cannot be counted");
-      landings = l.landings; unjudgeable = l.unjudgeable; settlements = deps.ledger("attemptSettlement");
+      landings = l.landings; checkLandings = l.check_landings; unjudgeable = l.unjudgeable; settlements = deps.ledger("attemptSettlement");
     } catch (err) { noteReadError("landing ledger for repair_autonomy", err); return unread("landing ledger unreadable"); }
     let gaps: GapRow[];
     try { gaps = await deps.readGaps(); } catch (err) { noteReadError("gap store for repair_autonomy", err); return unread("gap store unreadable"); }
@@ -1976,10 +2005,13 @@ const FACTS: Record<string, FactFn> = {
     let keymap: KeyMapEntry[] | null = null;
     try { keymap = await deps.keymap(); } catch { keymap = null; }
     // The scope history is read once for every edit site this run judges.
-    const sites = [...new Set(landings.map((l) => String(metaRec(byId.get(l.gap_id) ?? null)["edit_site"] ?? "")).filter((x) => x.length > 0))];
+    const sites = [...new Set([...landings, ...checkLandings].map((l) => String(metaRec(byId.get(l.gap_id) ?? null)["edit_site"] ?? "")).filter((x) => x.length > 0))];
     const scopeBySite = sites.length > 0 ? await deps.scopeActs(sites) : new Map<string, ScopeAct[]>();
     const judgements: RepairJudgement[] = [];
-    for (const l0 of landings) {
+    // Check landings are judged and logged the same way (their journal line says landing_kind "check"), but they are the
+    // separate tally (aggregate check_landings): they never enter expected, checked, the verdict counts or judgements.
+    const checkJudgements: RepairJudgement[] = [];
+    for (const [l0, kind] of [...landings.map((x) => [x, "source"] as const), ...checkLandings.map((x) => [x, "check"] as const)]) {
       // The authoring execution: the intent's, else the one the compose wrote later (attemptAuthoring.jsonl, through
       // attempt-register's reader). Still unknown: the closure is unattributable (judgeRepairClosure).
       let authoring = l0.authoring_execution_id;
@@ -2035,8 +2067,9 @@ const FACTS: Record<string, FactFn> = {
         nowMs,
         authoringUnknown: !l.authoring_execution_id,
       });
-      judgements.push(j);
-      deps.log(judgementLine(j));
+      const jk: RepairJudgement = { ...j, landing_kind: kind };
+      (kind === "check" ? checkJudgements : judgements).push(jk);
+      deps.log(judgementLine(jk));
     }
     // Entries that may be landings but name no gap: expected, and unjudged (C).
     for (const u of unjudgeable) {
@@ -2046,7 +2079,7 @@ const FACTS: Record<string, FactFn> = {
     }
     const expectedN = landings.length + unjudgeable.length;
     const n = (v: RepairVerdict) => judgements.filter((j) => j.verdict === v).length;
-    const aggregate: Record<string, unknown> = { observed: true, checked: n("counted"), expected: expectedN, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
+    const aggregate: Record<string, unknown> = { observed: true, checked: n("counted"), expected: expectedN, judged: judgements.length - n("unjudged"), counted: n("counted"), not_counted: n("not_counted"), pending: n("pending"), unjudged: n("unjudged"), check_landings: checkJudgements.length, window_hours: hours, keymap: keymap === null ? "none served (key-principal writes unattributable)" : `${keymap.length} key(s)` };
     if (n("unjudged") > 0) {
       const which = judgements.filter((j) => j.verdict === "unjudged");
       out.push({ fact, key: "unjudged-landings", source: "landing ledger (lane landings in the window)", copy: "repair_autonomy judgements", detail: `${which.length} of ${expectedN} ledger landing(s) over ${hours}h could not be judged, so checked == expected cannot be read for them: ${which.slice(0, 4).map((j) => `${j.gap_id.slice(0, 60)} (${j.reason.slice(0, 100)})`).join("; ")}`, canary: false });
@@ -2064,7 +2097,7 @@ const FACTS: Record<string, FactFn> = {
     }
     const trend = rowTrend(deps, fact, nowMs, out);
     return { fact, source_read: true, copies_read: expectedN, divergences: out, judgements, aggregate, controls, trend,
-      note: `${expectedN} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${expectedN}` };
+      note: `${expectedN} ledger landing(s) over ${hours}h: counted=${n("counted")} not_counted=${n("not_counted")} pending=${n("pending")} unjudged=${n("unjudged")}; checked ${n("counted")} of expected ${expectedN} (source landings); check landings=${checkJudgements.length} (a separate tally: commits that only add or edit test/checks/<id>.check.ts, never repairs)` };
   },
   /**
    * LANE REVERT WITHIN 1 H (§14 #6, §7 step 5 exit): one judgement per regressed settlement in the landing ledger over

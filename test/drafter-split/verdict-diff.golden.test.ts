@@ -10,7 +10,9 @@
 // the floor's prompt bytes and every gate, write and fetch around it. The open module's own rendering is pinned by
 // the open data golden under src/drafter/golden/ (a review instrument the lane updates with each open change); this
 // file changes only by an operator/qa act. The split's own journal lines ("[drafter] ", "[fc-drafter] ") did not
-// exist before it and are set aside before the comparison.
+// exist before it and are set aside before the comparison. So is the realism audit's advisory line ("[fc-realism] "):
+// it did not exist on the base tree, it decides nothing (src/judge/realism-audit.ts refuses no landing), and it carries
+// its own wall time, so it can never be byte-identical. Every other line, write, fetch and prompt is still compared.
 // Re-baselined once, adding only the drafter key on the attempt record: USER RULING 2026-10-22 "Re-baseline, drafter key only (Recommended)" (via qa).
 import { afterAll, describe, expect, it, mock } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -27,6 +29,7 @@ const DRAFTER = "../../src/drafter/index.ts";
 // A spread snapshot: mock.module re-points the namespace's own bindings, so restoring from it would restore the stand-in.
 const realDrafter = await import(DRAFTER).then((m) => ({ ...m })).catch(() => null);
 const SPLIT_LINE = /^\[(?:fc-)?drafter\] /;
+const ADVISORY_LINE = /^\[fc-realism\] /;
 
 afterAll(() => {
   if (realDrafter) mock.module(DRAFTER, () => realDrafter);
@@ -48,7 +51,7 @@ describe("F5(b) verdict-diff golden: the floor path and every gate are byte-iden
     for (const fx of CORPUS) {
       const fc = await import(`../../src/resolvers/feature-compose.ts?drafter-golden=${++seq}`);
       const r = await H.run(fc, fx);
-      r.console = r.console.filter((l) => !SPLIT_LINE.test(l));
+      r.console = r.console.filter((l) => !SPLIT_LINE.test(l) && !ADVISORY_LINE.test(l));
       recs.push(r);
     }
     const actual = JSON.stringify(recs, null, 1) + "\n";

@@ -65,21 +65,54 @@ export async function resolveDispatchLatestAutoDraft(
       { headers: authHeaders(), signal: AbortSignal.timeout(10_000) },
     );
     if (r.ok) {
-      const j = (await r.json()) as { templates?: Array<{ id?: unknown; deprecated?: boolean; retired?: boolean }> };
+      const j = (await r.json()) as {
+        templates?: Array<{
+          id?: unknown;
+          deprecated?: boolean;
+          retired?: boolean;
+          body?: string;
+          template?: { write_target?: string };
+        }>;
+      };
+
+      // Collect signatures (body, write_target) of retired gap-closing arms.
+      const retiredSignatures = new Set<string>();
+      // Pre-filter live, non-deprecated, gap-closing arms.
+      const liveCandidateTemplates: Array<{ id: string; body?: string; writeTarget?: string }> = [];
+
       for (const t of j.templates ?? []) {
         const id = unwrapId(t.id);
-        // V30 (2026-06-09): (a) accept ANY gap-closing: prefix, not just auto- —
-        // V25 substrate-authored variants from the V26 scenario-rotation chain
-        // have prefixes like gap-closing:activity-lifecycle-unload-* /
-        // gap-closing:responsibility-* and were being filtered out, leaving
-        // dispatch firing only the deprecated pre-V25 auto- variants. (b) Skip
-        // deprecated templates so the operator-driven Thompson-evidenced
-        // deprecation actually takes effect at dispatch time, not just on
-        // recommend. (c) Skip retired templates too: posterior retirement sets
-        // `retired`, not `deprecated`, and the ?q= listing (full-text path)
-        // returns retired rows, so a retired arm was dispatched by id every tick.
-        if (id && id.startsWith("gap-closing:") && !t.deprecated && !t.retired) templates.push({ id });
+        if (!id || !id.startsWith("gap-closing:")) {
+          continue;
+        }
+
+        const body = t.body;
+        const writeTarget = t.template?.write_target;
+
+        if (t.retired) {
+          if (body) {
+            retiredSignatures.add(body);
+          }
+          if (writeTarget) {
+            retiredSignatures.add(writeTarget);
+          }
+        } else if (!t.deprecated) {
+          liveCandidateTemplates.push({ id, body, writeTarget });
+        }
       }
+
+      // Filter out live candidates that share a signature with a retired arm.
+      templates = liveCandidateTemplates
+        .filter((t) => {
+          if (t.body && retiredSignatures.has(t.body)) {
+            return false;
+          }
+          if (t.writeTarget && retiredSignatures.has(t.writeTarget)) {
+            return false;
+          }
+          return true;
+        })
+        .map((t) => ({ id: t.id }));
     }
   } catch (err) {
     return { shape: "autoDraftDispatchResult", body: { error: `templates fetch failed: ${(err as Error).message}` } };

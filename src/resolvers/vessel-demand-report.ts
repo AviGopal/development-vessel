@@ -229,7 +229,7 @@ export async function resolveVesselDemandReport(
   // The capability filter excludes domain entities (goal, trace, error, …) that
   // are not resolver outputs — they're operator-level concepts the substrate
   // already models, not gaps a new vessel should fill.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10); // kept for potential future use
   const entries: DemandEntry[] = [];
   const entries_filtered_as_domain: { shape: string; template_count: number }[] = [];
   for (const [shape, templateIds] of demand.entries()) {
@@ -243,7 +243,7 @@ export async function resolveVesselDemandReport(
       shape,
       template_count: templateIds.size,
       sample_template_ids: Array.from(templateIds).slice(0, 5),
-      gap_id: `vessel-demand-${shape}-${today}`,
+      gap_id: `vessel-demand-${shape}`,
       posted: false,
     });
   }

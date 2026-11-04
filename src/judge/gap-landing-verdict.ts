@@ -25,7 +25,7 @@ import type { ResolverResult } from "../resolvers/types.js";
 import { resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER } from "../resolvers/feature-compose.js";
 import type { GoalVerificationLabel } from "../resolvers/feature-compose.js";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, birthCheckRepo } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, closeAbsentDetectorRows, birthCheckRepo } from "../resolvers/substrate-gap.js";
 import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readOperatorHold } from "../lib/operator-hold.js";
 import { armingOnlyLanding } from "../resolvers/check-supply-admission.js";
@@ -1940,7 +1940,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0, partial_reopened: 0, partial_reclose_suppressed: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, detector_absent_closed: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0, partial_reopened: 0, partial_reclose_suppressed: 0 };
   try {
     // RE-OPEN TERMINAL PARTIAL CLOSES (partialReopenCandidate) before the open read, so this pass examines them. Bounded.
     try {
@@ -1999,6 +1999,8 @@ for (const g of gaps) { try { await recordOperatorRegression(g); } catch { /* be
 // BIRTH RE-EVALUATION (qa R1): unknown, or pending past the hour, re-taken BIRTH_REEVAL_PER_TICK per tick,
 // oldest first, on the same birth chain and judge as a write's (substrate-gap reevaluateBirthVerdicts).
 try { tally.birth_retaken = (await reevaluateBirthVerdicts(gaps)).length; } catch (err) { console.warn(`[gap-sweep] birth re-evaluation skipped: ${String(err).slice(0, 200)}`); }
+// A detector row whose own reading read absent at birth is closed, never as a fix (substrate-gap closeAbsentDetectorRows).
+try { tally.detector_absent_closed = (await closeAbsentDetectorRows(gaps)).length; } catch (err) { console.warn(`[gap-sweep] born-absent detector closes skipped: ${String(err).slice(0, 200)}`); }
 
 // LANDED BUT NOT CLOSED (proposeLandedCloses): an open row whose edit_site a commit moved since detection gets its check
 // re-run on the clone HEAD; a pass proposes the close (never makes it). Before the pending slice, which it never feeds.

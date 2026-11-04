@@ -1026,8 +1026,9 @@ export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: C
  *     detector_reading, and no human or operator mark beside it (operator_hold, operator_routing, an auto-revert
  *     escalation or hold, a released landing): those are a human's to lift, and are never drained;
  *   - its check is CONFIRMED: falsifier class2 and a birth verdict of "present" taken on this very check
- *     (predicate_birth_key equals class2PredicateKey). Pending, unknown, absent, or a verdict on another check leaves
- *     it parked, and its exclusion names what it awaits.
+ *     (predicate_birth_key equals class2PredicateKey). Pending, unknown, or a verdict on another check leaves it
+ *     parked, and its exclusion names what it awaits. An absent is not drained here either: the birth sweep closes
+ *     that row, never as a fix (substrate-gap closeAbsentDetectorRows), since its own reading re-read is the honest one.
  * Lifting writes disposition "" (the store carries an omitted key forward) beside a needs_information_drained record,
  * through the seam, open rows only. The predicate then judges the row as it stands in the same pass: a sited row is
  * admitted now; a siteless one is excluded no_edit_site, which is the input gap-check-supply's localizer takes.

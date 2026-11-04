@@ -1839,6 +1839,10 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
 // RE-EVALUATION is the pending-land sweep's (reevaluateBirthVerdicts, below): an 'unknown' or a 'pending'
 // whose evaluation died is re-taken there, BIRTH_REEVAL_PER_TICK per tick, oldest first. A write of the same
 // check carries its verdict forward unchanged (there is no second, write-triggered retry path).
+//
+// A DETECTOR ROW (evidence_resolve_from detector_reading) is the one exception to "absent closes nothing": its check is
+// the detector's own reading re-read, so an 'absent' on its current check is the honest reading, and the same sweep
+// closes the row, never as a fix, with the reason its detector's shape names (closeAbsentDetectorRows, below).
 // ─────────────────────────────────────────────────────────────────────────────
 export type BirthVerdict = "pending" | "present" | "absent" | "unknown";
 /** The one judge. `opts.onReport` observes the check's own report (what ran, what failed) without changing the verdict. */
@@ -2324,6 +2328,79 @@ export async function reevaluateBirthVerdicts(gaps: Array<Record<string, unknown
     taken.push(id);
   }
   return taken;
+}
+
+/**
+ * Detector rows the birth sweep closes per tick (closeAbsentDetectorRows). A named constant, like
+ * BIRTH_REEVAL_PER_TICK beside it; each close is one seam write and runs no check, so the bound is the drain's size.
+ */
+export const DETECTOR_ABSENT_CLOSE_PER_TICK = 20;
+/** The system closer a born-absent detector row's close names (closeEvidenceOf reads closed_by). */
+export const DETECTOR_BIRTH_ABSENT_CLOSER = "detector_birth_absent";
+type DetectorAbsentClose = { closed_reason: string; close_basis: string; cause_gap?: string };
+/** The close a born-absent detector row gets, by its reading's shape; any shape not listed closes condition_gone. */
+const DETECTOR_ABSENT_CLOSE_DEFAULT: DetectorAbsentClose = { closed_reason: "condition_gone", close_basis: "birth_absent" };
+export const DETECTOR_ABSENT_CLOSE_BY_SHAPE: Readonly<Record<string, DetectorAbsentClose>> = {
+  // concept-db's filtered search cannot return principles, so the audit's filing read is unconfirmable (not degraded by an outage); the birth re-read is the honest one.
+  vector_space_orthogonality_audit: { closed_reason: "detector_false_positive", close_basis: "unconfirmable_filing_read", cause_gap: "the-orthogonality-audit-files-a-cluster-its-own-birth-check-reads-absent-seconds-later-because-a-failed-principle-lookup-scores-as-zero-similarity" },
+};
+/** A human or operator mark on a row: the twin of gap-admission parkHumanMarked (same keys, same truthiness), kept
+ *  local so this file does not import the admission judge. A marked row is a human's to move, never this sweep's. */
+function detectorRowHumanMarked(meta: Record<string, unknown>): boolean {
+  const marked = (v: unknown): boolean => v !== undefined && v !== null && v !== "" && v !== false;
+  return meta["operator_hold"] === true || marked((meta["operator_routing"] as { files?: unknown } | undefined)?.files) || marked(meta["auto_revert_escalation"]) || marked(meta["auto_revert_hold"]) || marked(meta["pending_released"]);
+}
+/** An open, unmarked detector row whose check (its own reading, re-read) read absent at birth on this very check. */
+function detectorRowBornAbsent(g: Record<string, unknown>): boolean {
+  const m = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+  if (String(g["status"] ?? "open") !== "open" || m["evidence_resolve_from"] !== DETECTOR_READING_FIELD) return false;
+  const f = m["falsifier"] as unknown;
+  if (String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase() !== "class2") return false;
+  return m["predicate_birth_verdict"] === "absent" && m["predicate_birth_key"] === class2PredicateKey(m) && !birthTreeMoved(m) && !detectorRowHumanMarked(m);
+}
+/** Seconds from the row's detection to its birth verdict, to 0.1 s; null when either time is missing or unreadable. */
+function birthLagSeconds(detectedAt: unknown, birthAt: unknown): number | null {
+  const d = typeof detectedAt === "string" ? Date.parse(detectedAt) : NaN;
+  const b = typeof birthAt === "string" ? Date.parse(birthAt) : NaN;
+  return Number.isFinite(d) && Number.isFinite(b) ? Math.round((b - d) / 100) / 10 : null;
+}
+
+/**
+ * A DETECTOR ROW BORN ABSENT IS CLOSED, run from the pending-land sweep's tick beside the re-evaluation. A detector
+ * row's class2 check is the detector's own reading re-read (evidence_resolve_from detector_reading), and the judge
+ * answers 'absent' only on a measured healthy reading, so an absent birth verdict on its current check is the honest
+ * reading. Nothing else moves such a row: the re-evaluation re-takes only unknown and dead pending verdicts, and the
+ * park drain lifts only present. So it is closed through the seam: counts_as_fix false (nothing was fixed), closed_by
+ * the named system closer, the park cleared, its birth reading recorded as the falsifier_exercise, and the reason its
+ * reading's shape names in DETECTOR_ABSENT_CLOSE_BY_SHAPE (condition_gone for any shape not listed). One verdict
+ * suffices (no re-check, window or count). An ordinary row (a check not taken from a reading) is never closed here:
+ * there an absent at birth means a suspect check. A tree-moved verdict, a verdict on another check, or a human or
+ * operator mark leaves the row alone. Oldest birth first, at most `limit` per call, each re-decided on the row as stored
+ * now; only where the store is HELD. Returns the closed ids.
+ */
+export async function closeAbsentDetectorRows(gaps: Array<Record<string, unknown>>, limit = DETECTOR_ABSENT_CLOSE_PER_TICK): Promise<string[]> {
+  if (process.env["GAP_STORE_ENDPOINT"] || limit <= 0) return [];
+  const at = (g: Record<string, unknown>): number => { const t = Date.parse(String(((g["classification_metadata"] ?? {}) as Record<string, unknown>)["predicate_birth_at"] ?? "")); return Number.isFinite(t) ? t : 0; };
+  const picks = gaps.filter(detectorRowBornAbsent).sort((a, b) => at(a) - at(b)).slice(0, limit);
+  const closed: string[] = [];
+  for (const g of picks) {
+    const id = String(g["id"] ?? "");
+    const fresh = (await loadGaps()).find((r) => r.id === id) as unknown as Record<string, unknown> | undefined;
+    if (!fresh || !detectorRowBornAbsent(fresh)) continue; // changed since the sweep read it
+    const m0 = (fresh["classification_metadata"] ?? {}) as Record<string, unknown>;
+    const readingShape = String(((m0[DETECTOR_READING_FIELD] ?? {}) as { shape?: unknown }).shape ?? ((m0["evidence_resolve"] ?? {}) as { shape?: unknown }).shape ?? "");
+    const why = Object.prototype.hasOwnProperty.call(DETECTOR_ABSENT_CLOSE_BY_SHAPE, readingShape) ? DETECTOR_ABSENT_CLOSE_BY_SHAPE[readingShape]! : DETECTOR_ABSENT_CLOSE_DEFAULT;
+    const sha = shaOf(m0["predicate_birth_sha"]);
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "closed", classification_metadata: { ...m0,
+      closed_reason: why.closed_reason, close_basis: why.close_basis, ...(why.cause_gap ? { cause_gap: why.cause_gap } : {}),
+      counts_as_fix: false, closed_by: DETECTOR_BIRTH_ABSENT_CLOSER, closed_at: new Date().toISOString(), disposition: "",
+      falsifier_exercise: { detector: readingShape, verdict: "absent", passed: true, ran_at: m0["predicate_birth_at"] ?? null, ...(sha ? { commit: sha } : {}),
+        key: m0["predicate_birth_key"], birth_lag_s: birthLagSeconds(fresh["detected_at"], m0["predicate_birth_at"]) } } } } as never);
+    if (w?.shape === "structuredError" || (w?.body as { action?: unknown } | undefined)?.action === "skipped") continue;
+    console.log(`[gap-birth] ${id}: detector row closed ${why.closed_reason} by the sweep (its own reading ${readingShape || "?"} read absent at birth; not a fix)`);
+    closed.push(id);
+  }
+  return closed;
 }
 
 /**

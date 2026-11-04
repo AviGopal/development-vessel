@@ -701,6 +701,16 @@ export function checkSupplySite(row: Row, vessel: string): string | null {
     if (isTestSourcePath(rel)) continue;
     if (existsSync(join(clonesRoot(), vessel, rel))) return `repos/${vessel}/${rel}`;
   }
+  // An explicit call-path source can be the intended edit site even before it exists.
+  const callPath = row["call_path"];
+  if (typeof callPath === "string") {
+    for (const m of callPath.matchAll(/(?:repos\/([A-Za-z0-9_.-]+)\/)?(src\/[A-Za-z0-9_./-]+\.ts)\b/g)) {
+      if (m[1] && m[1] !== vessel) continue;
+      const rel = normalize(m[2] ?? "");
+      if (!rel.startsWith("src/") || rel.includes("..") || isTestSourcePath(rel)) continue;
+      return `repos/${vessel}/${rel}`;
+    }
+  }
   return null;
 }
 

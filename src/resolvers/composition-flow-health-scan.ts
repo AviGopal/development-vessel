@@ -46,7 +46,7 @@ async function flowSql(query: string): Promise<Array<Record<string, unknown>>> {
 export async function resolveCompositionFlowHealthScan(
   pointer: CompositionFlowHealthScanPointer,
 ): Promise<ResolverResult> {
-  const edgeLimit = pointer.edgeLimit ?? 10000;
+  const edgeLimit = Math.min(pointer.edgeLimit ?? 10000, 50000);
   const dryRun = pointer.dry_run === true;
   const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   const edges = await flowSql(`SELECT parent_activity_id, child_activity_id, genuine FROM activity_composition_graph LIMIT ${edgeLimit}`);

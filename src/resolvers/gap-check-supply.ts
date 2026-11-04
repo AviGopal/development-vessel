@@ -614,7 +614,7 @@ export function priorAttemptSentence(prior: readonly Row[]): string {
   const titles = (Array.isArray(last["titles"]) ? (last["titles"] as unknown[]) : []).filter((t): t is string => typeof t === "string" && t.length > 0);
   const named = titles.length ? titles.map((t) => JSON.stringify(t)).join(", ") : "the previous check";
   if (last["state"] === "green_at_head")
-    return "";
+    return `An earlier attempt wrote ${named}, which already PASSES at HEAD, so it does not reproduce the defect: write a different test whose assertion fails because of the defect. Tests already in the file do not count. `;
   const reason = String(last["reason"] ?? "");
   const sym = new RegExp(`${MISSING_EXPORT_STAGE}:[\\w$]+`).exec(reason);
   return `An earlier attempt wrote ${named}, which was not accepted (${reason.slice(0, Math.max(160, sym ? sym.index + sym[0].length : 0))}): write a different test that avoids that. `;

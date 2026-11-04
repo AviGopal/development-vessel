@@ -46,7 +46,18 @@ async function flowSql(query: string): Promise<Array<Record<string, unknown>>> {
 export async function resolveCompositionFlowHealthScan(
   pointer: CompositionFlowHealthScanPointer,
 ): Promise<ResolverResult> {
-  const edgeLimit = Math.min(pointer.edgeLimit ?? 10000, 50000);
+  // Defined maximum for the caller-supplied edgeLimit. The value is spliced
+  // unquoted into SurrealQL (LIMIT ${edgeLimit}), so it is coerced to a finite
+  // positive integer and then checked against this bound before use: NaN /
+  // Infinity / negative / fractional inputs from a caller must never reach the
+  // query (LIMIT NaN silently returned no rows and the scan read as no_genuine_edges).
+  const EDGE_LIMIT_MAX = 50_000;
+  const EDGE_LIMIT_DEFAULT = 10_000;
+  const requestedEdgeLimit =
+    typeof pointer.edgeLimit === "number" && Number.isFinite(pointer.edgeLimit)
+      ? Math.max(1, Math.floor(pointer.edgeLimit))
+      : EDGE_LIMIT_DEFAULT;
+  const edgeLimit = Math.min(requestedEdgeLimit, EDGE_LIMIT_MAX);
   const dryRun = pointer.dry_run === true;
   const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   const edges = await flowSql(`SELECT parent_activity_id, child_activity_id, genuine FROM activity_composition_graph LIMIT ${edgeLimit}`);

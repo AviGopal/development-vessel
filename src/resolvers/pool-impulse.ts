@@ -155,7 +155,11 @@ export function resolvePoolImpulse(pointer: {
 //   forged or lane-written row could switch the gate to report, so it is the same operator-only record, and the
 //   daemon honours a row only when this node's read marks it attested_verified by 'operator' (ias-executor-ts
 //   src/hosts/vessel-daemon.ts daemonAuthModeFromPoolResponse).
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter', 'fedIngressAuthPolicy', 'daemonAuthPolicy']);
+// activityVariantMask: which variant of an activity runs, and when ({activity_id, active_variant, from, until, reason,
+//   lift, by}; learning-credit.ts reachGradeVariant reads it at every grade). A row any key could write would let the
+//   autonomous lane, or a peer, choose which variant of its own grading or of discovery's peer fan-out runs, so only an
+//   operator writes it. An unreadable or absent mask means variant-0, so a refused write leaves the control running.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter', 'fedIngressAuthPolicy', 'daemonAuthPolicy', 'activityVariantMask']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */

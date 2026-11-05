@@ -1,5 +1,6 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 import { LEARNING_TRANSFER_GAP_TICK_TEMPLATE } from "./learning-transfer-gap-tick.js";
+import { GAP_CLOSE_VERIFY_TEMPLATE } from "./gap-close-verify.js";
 import { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 import { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
 import { RELEASE_CHANGE_TEMPLATE } from "./release-change.js";
@@ -291,6 +292,7 @@ export { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 export { TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE } from "./trace-store-health-observer.js";
 export { REMEDY_EFFECTIVENESS_OBSERVER_TICK_TEMPLATE } from "./remedy-effectiveness-observer.js";
 export { TRACE_STORE_RECONCILE_TEMPLATE } from "./trace-store-reconcile.js";
+export { GAP_CLOSE_VERIFY_TEMPLATE } from "./gap-close-verify.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
@@ -656,4 +658,6 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // re-dispatch + target-metric movement) and escalates green-but-aborting
   // remedies as remedy_livelock gaps.
   REMEDY_EFFECTIVENESS_OBSERVER_TICK_TEMPLATE,
+  // run in process by both gap closers; graded by a later reader at its horizon (gap-close-verify.ts)
+  GAP_CLOSE_VERIFY_TEMPLATE,
 ];

@@ -25,7 +25,7 @@ import type { ResolverResult } from "../resolvers/types.js";
 import { resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER } from "../resolvers/feature-compose.js";
 import type { GoalVerificationLabel } from "../resolvers/feature-compose.js";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, closeAbsentDetectorRows, birthCheckRepo } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, closeAbsentDetectorRows, birthCheckRepo, postConsumerTrace } from "../resolvers/substrate-gap.js";
 import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readOperatorHold } from "../lib/operator-hold.js";
 import { armingOnlyLanding } from "../resolvers/check-supply-admission.js";
@@ -91,6 +91,113 @@ export function genuineLandSignal(composeBody: Record<string, unknown>, landRequ
     }
   }
   return none;
+}
+
+/**
+ * THE CLOSE STEP IS AN ACTIVITY (USER: "Yes, build step 2 in parallel"). Both closers, closeLandedGap and the
+ * pending-land sweep, decide that a landing resolved a gap; each close is now traced as
+ * `development-vessel:gap-close-verify` (variant-0: the decision exactly as it is made today; no alternative yet), with
+ * output gapCloseDecision {gap_id, sha, path, closed_reason, close_basis}. Its grade is decided by a later reader, never
+ * at the close: at least GAP_CLOSE_CREDIT_HORIZON_MS after closed_at, a sweep tick re-runs the gap's own check FRESH
+ * (evaluateGapCheck, never a stored verdict) and posts `development-vessel:gap-close-verify-credit`: reached = the row
+ * is still closed AND its check reads absent. A row re-opened by then is reached:false; a row whose check cannot be
+ * re-run is ungraded (logged, no credit). The close carries close_trace_id so the reader finds its producer, and
+ * close_credit records the grade once. The trace posts never change, delay or reorder a close: they follow every
+ * write, credit and landing grade the close already made.
+ */
+export const GAP_CLOSE_VERIFY_ACTIVITY = "development-vessel:gap-close-verify";
+export const GAP_CLOSE_VERIFY_CREDIT_ACTIVITY = "development-vessel:gap-close-verify-credit";
+export const GAP_CLOSE_CREDIT_HORIZON_MS = 72 * 3_600_000;
+type GapCloseVerifyDeps = { postTrace?: (trace: Record<string, unknown>) => Promise<number | null>; nowMs?: () => number };
+let gapCloseVerifyDeps: GapCloseVerifyDeps = {};
+/** Tests only: the seams the close traces use. */
+export function __setGapCloseVerifyDepsForTests(d: GapCloseVerifyDeps | null): void { gapCloseVerifyDeps = d ?? {}; }
+const closeTraceIdPart = (s: string): string => s.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 60);
+/** The close's own trace id, stamped on the close as close_trace_id before it is written. */
+export function gapCloseTraceId(gapId: string, sha: string, nowIso: string): string {
+  return `gap-close-verify-${closeTraceIdPart(gapId)}-${sha.slice(0, 12)}-${Date.parse(nowIso) || Date.now()}`;
+}
+/** The close's own trace: one deterministic task, substrateGap + the landing in, gapCloseDecision out. */
+export function gapCloseDecisionTrace(d: { executionId: string; gapId: string; sha: string; path: "inline" | "sweep"; closed_reason: unknown; close_basis: unknown; nowIso: string }): Record<string, unknown> {
+  const impulse = `gapCloseDecision:${d.executionId}`;
+  return {
+    execution_id: d.executionId, template_id: GAP_CLOSE_VERIFY_ACTIVITY, activity_id: GAP_CLOSE_VERIFY_ACTIVITY, activity_variant_id: GAP_CLOSE_VERIFY_ACTIVITY,
+    status: "completed", success: true, started_at: d.nowIso, duration_ms: 0,
+    input_shapes: ["substrateGap", "cutoverApplied"], output_shapes: ["gapCloseDecision"],
+    tasks: [{ id: "close", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [impulse] }],
+    tags: ["gap_close_verify_variant:0", `gap_close_path:${d.path}`],
+    metadata: { gapCloseDecision: { gap_id: d.gapId, sha: d.sha, path: d.path, decision: "closed", closed_reason: d.closed_reason ?? null, close_basis: d.close_basis ?? null, variant: 0 } },
+  };
+}
+/** The consumer trace that grades a close at its horizon. */
+export function gapCloseCreditTrace(producerId: string, reached: boolean, why: string, nowIso: string): Record<string, unknown> {
+  const impulse = `gapCloseDecision:${producerId}`;
+  return {
+    execution_id: `gap-close-verify-credit-${producerId.replace(/^gap-close-verify-/, "")}`,
+    template_id: GAP_CLOSE_VERIFY_CREDIT_ACTIVITY, activity_id: GAP_CLOSE_VERIFY_CREDIT_ACTIVITY, activity_variant_id: GAP_CLOSE_VERIFY_CREDIT_ACTIVITY,
+    status: reached ? "completed" : "failed", success: reached,
+    ...(reached ? {} : { failure_mode: { type: "verifier_negative", reason: why } }),
+    started_at: nowIso, duration_ms: 0, composition_chain: [producerId],
+    tasks: [{ id: "recheck-at-horizon", resolver_id: "deterministic", resolver_tier: "deterministic", success: reached, input_impulse_ids: [impulse], output_impulse_ids: [],
+      consumed_provenance: [{ impulse_id: impulse, producer_execution_id: producerId, origin: "ancestor" }] }],
+    tags: [reached ? "reached:true" : "reached:false", "gap_close_verify_variant:0"],
+    metadata: { producer_execution_id: producerId, why },
+  };
+}
+async function postGapCloseTrace(trace: Record<string, unknown>, what: string): Promise<boolean> {
+  try {
+    const st = await (gapCloseVerifyDeps.postTrace ?? ((t: Record<string, unknown>) => postConsumerTrace(t, "gap-close-verify")))(trace);
+    if (st === null || st < 200 || st >= 300) { console.warn(`[gap-close-verify] ${what} not posted (http=${st ?? "none"})`); return false; }
+    return true;
+  } catch (err) {
+    console.warn(`[gap-close-verify] ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+    return false;
+  }
+}
+/** Best effort, after the close: its own trace. Never throws. */
+async function emitGapCloseDecision(d: Parameters<typeof gapCloseDecisionTrace>[0]): Promise<void> {
+  await postGapCloseTrace(gapCloseDecisionTrace(d), `own trace of ${d.gapId}`);
+}
+/**
+ * THE CLOSE'S GRADE AT ITS HORIZON. For each row that carries close_trace_id and no close_credit, closed at least the
+ * horizon ago: still closed and its own check re-run now reads absent -> reached; re-opened, or the check reads present
+ * -> not reached; a check that cannot be re-run (pending/unknown) -> ungraded. Bounded per tick. Never throws.
+ */
+async function creditGapClosesAtHorizon(rows: readonly Record<string, unknown>[], limit: number): Promise<{ credited: number; ungraded: number }> {
+  const out = { credited: 0, ungraded: 0 };
+  const nowMs = gapCloseVerifyDeps.nowMs?.() ?? Date.now();
+  const due = rows.filter((r) => {
+    const m = (r.classification_metadata ?? {}) as Record<string, unknown>;
+    const at = Date.parse(String(m.closed_at ?? ""));
+    return typeof m.close_trace_id === "string" && m.close_trace_id && !m.close_credit && Number.isFinite(at) && nowMs - at >= GAP_CLOSE_CREDIT_HORIZON_MS;
+  }).slice(0, limit);
+  for (const r0 of due) {
+    try {
+      const r = (await readGapFresh(String(r0.id ?? ""))) ?? r0;
+      const m = (r.classification_metadata ?? {}) as Record<string, unknown>;
+      if (typeof m.close_trace_id !== "string" || m.close_credit) continue;
+      const nowIso = new Date(nowMs).toISOString();
+      let reached: boolean | null;
+      let why: string;
+      if (String(r.status ?? "") !== "closed") { reached = false; why = `re-opened (status ${String(r.status ?? "?")}) before the horizon`; }
+      else {
+        let v: string;
+        try { v = await evaluateGapCheck(r); } catch { v = "unknown"; }
+        if (v === "absent") { reached = true; why = "still closed; its own check re-run at the horizon reads absent"; }
+        else if (v === "present") { reached = false; why = "still closed, but its own check re-run at the horizon reads present"; }
+        else { reached = null; why = `its own check could not be re-run at the horizon (${v})`; }
+      }
+      if (reached === null) {
+        out.ungraded += 1;
+        console.log(`[gap-close-verify] ${String(r.id)}: ungraded (${why})`);
+      } else if (await postGapCloseTrace(gapCloseCreditTrace(m.close_trace_id, reached, why, nowIso), `credit of ${String(r.id)}`)) out.credited += 1;
+      else continue;
+      await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: String(r.status ?? "open"), gap: { id: String(r.id), category: r.category, source: r.source, summary: r.summary, detected_at: r.detected_at, status: r.status, classification_metadata: { ...m, close_credit: { at: nowIso, reached, why } } } } as never);
+    } catch (err) {
+      console.warn(`[gap-close-verify] horizon credit of ${String(r0.id)} skipped: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+    }
+  }
+  return out;
 }
 
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
@@ -230,7 +337,9 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     }
     const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: landedCloseReason((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>, land.commit_sha, literalOnlyClose), ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
-    const meta = closedMeta;
+    const closeNowIso = new Date().toISOString();
+    const closeTraceId = gapCloseTraceId(id, String(land.commit_sha ?? "unknown"), closeNowIso);
+    const meta: Record<string, unknown> = { ...closedMeta, close_trace_id: closeTraceId, close_credit: null };
     const landRef = await landingDecisionRef(land.commit_sha ?? "", ref.decision_id);
     // ONE CREDIT PER (gap, landing), as the sweep guards it (68e93860): a re-close on a landing already credited is
     // recorded, but the class posterior and the detector's closure credit are not paid twice.
@@ -252,6 +361,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     if (landedCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
     if (credited) updateClassPosterior(gapClassOf(gap), true, { gap_id: id, event_id: land.commit_sha ? `sha:${land.commit_sha}` : null, ...(land.vessel ? { repo: land.vessel } : {}) });
+    if (landedCloseWrite?.shape !== "structuredError") await emitGapCloseDecision({ executionId: closeTraceId, gapId: id, sha: String(land.commit_sha ?? "unknown"), path: "inline", closed_reason: meta.closed_reason, close_basis: meta.close_basis, nowIso: closeNowIso });
     // The filing detector is credited by the close itself: the gap writer posts the gap's outcome as a consumer of the
     // execution that filed it (substrate-gap.ts GAP OUTCOME CREDIT), on every close and reject path, not only a landing.
     return { closed: true };
@@ -1945,8 +2055,10 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, detector_absent_closed: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0, landed_close_proposed: 0, landed_close_still_red: 0, landed_close_prose_only: 0, landed_close_examined: 0, orphan_siblings: 0, needs_predicate: 0, needs_predicate_held: 0, partial_reopened: 0, partial_reclose_suppressed: 0 };
   try {
     // RE-OPEN TERMINAL PARTIAL CLOSES (partialReopenCandidate) before the open read, so this pass examines them. Bounded.
+    let closedRows: Record<string, unknown>[] = [];
     try {
       const closedRead = await resolveSubstrateGap({ type: "substrateGap", status: "closed", limit: Number.MAX_SAFE_INTEGER, exclude_categories: [...DECISION_LOG_GAP_CATEGORIES], include_held: true } as never);
+      closedRows = ((closedRead?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
       const pass = `gap-sweep:${new Date().toISOString()}`;
       for (const c of (((closedRead?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? []).filter(partialReopenCandidate).slice(0, PENDING_VERIFY_SWEEP_LIMIT)) {
         const row = partialReopenRow(await readGapFresh(String(c.id ?? "")), pass, new Date().toISOString());
@@ -1969,6 +2081,9 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
       include_held: true,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
+    // The closes due their grade (gap-close-verify): closed rows and rows re-opened since, before this pass changes any.
+    const horizon = await creditGapClosesAtHorizon([...closedRows, ...gaps], PENDING_VERIFY_SWEEP_LIMIT);
+    if (horizon.credited + horizon.ungraded > 0) console.log(`[gap-close-verify] horizon: credited=${horizon.credited} ungraded=${horizon.ungraded}`);
     // First, stamp lineage-linked commits as pending verification for gaps with predicates but no stamp
 for (const g of gaps) {
   const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
@@ -2244,6 +2359,9 @@ const pending = candidates.unheld
           : `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
         closed_at: new Date().toISOString(),
       };
+      const sweepCloseTraceId = gapCloseTraceId(String(g.id), sha, String(sweepClosedMeta.closed_at));
+      sweepClosedMeta.close_trace_id = sweepCloseTraceId;
+      sweepClosedMeta.close_credit = null;
       const sweepCloseWrite = await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -2265,6 +2383,8 @@ const pending = candidates.unheld
       if (credited && sweepCloseWrite?.shape !== "structuredError" && sweepClosedMeta.closed_reason === "landed_verified") await gradeLandingExecution(meta, sha, true, `landed_verified gap ${String(g.id)}`, undefined, String(g.id));
       // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.
       if (sweepCloseWrite?.shape !== "structuredError") await resolveDissentOutcome(String(g.id), { result: "passed" }).catch(dissentOutcomeUnwritten(String(g.id), "passed"));
+      // The close's own trace, last: after every write, credit and landing grade above (gap-close-verify).
+      if (sweepCloseWrite?.shape !== "structuredError") await emitGapCloseDecision({ executionId: sweepCloseTraceId, gapId: String(g.id), sha, path: "sweep", closed_reason: sweepClosedMeta.closed_reason, close_basis: sweepClosedMeta.close_basis, nowIso: String(sweepClosedMeta.closed_at) });
       out.closed += 1;
     }
   } catch (err) {

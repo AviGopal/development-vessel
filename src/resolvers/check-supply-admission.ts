@@ -2114,14 +2114,30 @@ let editSiteMutationDeps: EditSiteMutationDeps = {};
 /** Tests only: the seams editSiteMutationGate uses. */
 export function __setEditSiteMutationDepsForTests(d: EditSiteMutationDeps | null): void { editSiteMutationDeps = d ?? {}; }
 const defaultReadMasks = (): MaskRow[] => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as MaskRow[];
+// THE MASK READ'S LOG LINES, in the form every mask reader prints (discovery-vessel's peer-set-source the first): the
+// activity id as the prefix; `pool_read shape=activityVariantMask ok=<bool>` at a read (at most one per 30 s); and
+// `mask_unread (<reason>): variant-0` on EVERY failed read, never rate-limited, so a fallback is counted, not hidden.
+const ESMG_LOG = `[${EDIT_SITE_MUTATION_ACTIVITY}]`;
+const POOL_READ_LOG_EVERY_MS = 30_000;
+let lastPoolReadLogMs = -Infinity;
+function logPoolRead(ok: boolean): void {
+  const now = Date.now();
+  if (now - lastPoolReadLogMs < POOL_READ_LOG_EVERY_MS) return;
+  lastPoolReadLogMs = now;
+  console.log(`${ESMG_LOG} pool_read shape=activityVariantMask ok=${ok}`);
+}
+/** Tests only: the pool_read line's rate limit starts over. */
+export function __resetMaskReadLogForTests(): void { lastPoolReadLogMs = -Infinity; }
 /** The variant in force at `nowIso`: the newest open mask row for this activity with now in [from, until). Never throws. */
 export function editSiteMutationVariant(nowIso: string, readMasks: () => MaskRow[]): { variant: number; why: string } {
   let rows: MaskRow[];
   try { rows = readMasks(); } catch (err) {
+    logPoolRead(false);
     const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
-    console.warn(`[edit-site-mutation-gate] mask_unread: ${why}`);
+    console.warn(`${ESMG_LOG} ${why}`);
     return { variant: 0, why };
   }
+  logPoolRead(true);
   const now = Date.parse(nowIso);
   for (const r of rows) {
     const b = (r?.body ?? {}) as Record<string, unknown>;
@@ -2204,7 +2220,7 @@ export async function editSiteMutationGate(a: { vessel: string; siteRel: string;
   if (!outcome || outcome.kind === "wait") return outcome;
   const plan = held.plan;
   outcome.record = { ...outcome.record, variant: mask.variant, mask: mask.why };
-  console.log(`[edit-site-mutation-gate] variant=${mask.variant} (${mask.why}) ${a.siteRel} decided=${outcome.kind} aimed=${Array.isArray(outcome.record["aimed_picks"]) ? (outcome.record["aimed_picks"] as unknown[]).length : 0}`);
+  console.log(`${ESMG_LOG} variant=${mask.variant} (${mask.why}) ${a.siteRel} decided=${outcome.kind} aimed=${Array.isArray(outcome.record["aimed_picks"]) ? (outcome.record["aimed_picks"] as unknown[]).length : 0}`);
   await emitEditSiteMutationTraces(a, outcome, mask.variant, plan, nowIso, Date.now() - t0, deps);
   return outcome;
 }
@@ -2308,12 +2324,12 @@ async function emitEditSiteMutationTraces(a: { siteRel: string; testFile: string
   try {
     const own = editSiteMutationTrace(a, outcome, variant, nowIso, durationMs);
     const s1 = await send(own);
-    if (s1 === null || s1 < 200 || s1 >= 300) { console.warn(`[edit-site-mutation-gate] own trace not posted (http=${s1 ?? "none"}); its credit is not posted either`); return; }
-    if (!plan?.declaration) { console.log(`[edit-site-mutation-gate] ${a.siteRel}: ungraded (${plan ? plan.why : "no literal region"}): no credit trace`); return; }
+    if (s1 === null || s1 < 200 || s1 >= 300) { console.warn(`${ESMG_LOG} own trace not posted (http=${s1 ?? "none"}); its credit is not posted either`); return; }
+    if (!plan?.declaration) { console.log(`${ESMG_LOG} ${a.siteRel}: ungraded (${plan ? plan.why : "no literal region"}): no credit trace`); return; }
     const s2 = await send(editSiteMutationCreditTrace(own, outcome.record, variant, nowIso));
-    if (s2 === null || s2 < 200 || s2 >= 300) console.warn(`[edit-site-mutation-gate] credit trace not posted (http=${s2 ?? "none"})`);
+    if (s2 === null || s2 < 200 || s2 >= 300) console.warn(`${ESMG_LOG} credit trace not posted (http=${s2 ?? "none"})`);
   } catch (err) {
-    console.warn(`[edit-site-mutation-gate] traces not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+    console.warn(`${ESMG_LOG} traces not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
   }
 }
 

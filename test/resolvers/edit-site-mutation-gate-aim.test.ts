@@ -261,3 +261,33 @@ describe("the mask selects the variant", () => {
     expect(csa.editSiteMutationVariant(at, () => rows)).toMatchObject({ variant: 1 });
   });
 });
+
+describe("the mask read's log lines are the form every mask reader prints", () => {
+  const capture = () => {
+    const lines: string[] = [];
+    const log = console.log, warn = console.warn;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    console.warn = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    return { lines, restore: () => { console.log = log; console.warn = warn; } };
+  };
+  const P = "[development-vessel:edit-site-mutation-gate]";
+  it("[MUST-FAIL] every failed read prints mask_unread (never rate-limited); pool_read prints ok=false then ok=true, at most once per 30 s", () => {
+    csa.__resetMaskReadLogForTests?.();
+    const c = capture();
+    try {
+      const at = new Date().toISOString();
+      csa.editSiteMutationVariant(at, () => { throw new Error("pool down"); });
+      csa.editSiteMutationVariant(at, () => { throw new Error("pool down"); });
+      csa.__resetMaskReadLogForTests?.();
+      csa.editSiteMutationVariant(at, () => []);
+      csa.editSiteMutationVariant(at, () => []);
+    } finally { c.restore(); }
+    expect(c.lines.filter((l) => l.startsWith(`${P} mask_unread`))).toEqual([`${P} mask_unread (pool down): variant-0`, `${P} mask_unread (pool down): variant-0`]);
+    expect(c.lines.filter((l) => l.includes("pool_read"))).toEqual([`${P} pool_read shape=activityVariantMask ok=false`, `${P} pool_read shape=activityVariantMask ok=true`]);
+  });
+  it("[MUST-FAIL] the gate's selection line carries the activity id as its prefix", async () => {
+    const c = capture();
+    try { await runGate(SMALL_SITE, "small", { moves: () => false }); } finally { c.restore(); }
+    expect(c.lines.some((l) => l.startsWith(`${P} variant=0 (no mask in force: variant-0) ${SITE_REL} decided=`))).toBe(true);
+  }, 120_000);
+});

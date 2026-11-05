@@ -661,6 +661,30 @@ function loadTs(): TsModule | null {
  */
 export function selectMutants(src: string, k: number, ts: TsModule | null = loadTs()): Mutant[] {
   if (!ts) return [];
+  const sites = operatorSitesByOperator(src, ts);
+  const ops = OPERATORS.filter((o) => sites[o].length > 0);
+  if (ops.length === 0) return [];
+  const want = Math.min(MAX_MUTANTS, Math.max(1, Math.floor(k)));
+  const quota: Record<string, number> = {};
+  let left = want;
+  while (left > 0 && ops.some((o) => (quota[o] ?? 0) < sites[o].length)) {
+    for (const o of ops) if (left > 0 && (quota[o] ?? 0) < sites[o].length) { quota[o] = (quota[o] ?? 0) + 1; left -= 1; }
+  }
+  const out: Mutant[] = [];
+  for (const o of ops) {
+    const n = sites[o].length, q = quota[o] ?? 0;
+    for (let i = 0; i < q; i += 1) out.push(sites[o][Math.min(n - 1, Math.floor(((i + 0.5) * n) / q))]!);
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+/** Every operator mutant site of a source, in source order (the sites selectMutants picks from, unpicked). The
+ *  check-supply edit-site gate's aimed picks choose among them by distance to the gap's region. */
+export function operatorSites(src: string, ts: TsModule | null = loadTs()): Mutant[] {
+  if (!ts) return [];
+  const sites = operatorSitesByOperator(src, ts);
+  return OPERATORS.flatMap((o) => sites[o]).sort((a, b) => a.start - b.start);
+}
+function operatorSitesByOperator(src: string, ts: TsModule): Record<Mutant["operator"], Mutant[]> {
   const sf = ts.createSourceFile("m.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const sites: Record<Mutant["operator"], Mutant[]> = { negate_condition: [], empty_body: [], flip_boolean: [], flip_comparison: [], replace_statement: [] };
   const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1;
@@ -682,20 +706,7 @@ export function selectMutants(src: string, k: number, ts: TsModule | null = load
     ts.forEachChild(n, visit);
   };
   visit(sf);
-  const ops = OPERATORS.filter((o) => sites[o].length > 0);
-  if (ops.length === 0) return [];
-  const want = Math.min(MAX_MUTANTS, Math.max(1, Math.floor(k)));
-  const quota: Record<string, number> = {};
-  let left = want;
-  while (left > 0 && ops.some((o) => (quota[o] ?? 0) < sites[o].length)) {
-    for (const o of ops) if (left > 0 && (quota[o] ?? 0) < sites[o].length) { quota[o] = (quota[o] ?? 0) + 1; left -= 1; }
-  }
-  const out: Mutant[] = [];
-  for (const o of ops) {
-    const n = sites[o].length, q = quota[o] ?? 0;
-    for (let i = 0; i < q; i += 1) out.push(sites[o][Math.min(n - 1, Math.floor(((i + 0.5) * n) / q))]!);
-  }
-  return out.sort((a, b) => a.start - b.start);
+  return sites;
 }
 
 /**

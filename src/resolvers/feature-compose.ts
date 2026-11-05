@@ -6455,7 +6455,7 @@ export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoo
   const report = base.body as Record<string, unknown>;
   const split = supply.splitRedGreen(report, titles);
   const redTitles = split.red.length > 0 ? split.red : titles;
-  const mutation = await supply.editSiteMutationGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, checkSrc, titles: redTitles, baseline: report, k: a.k });
+  const mutation = await supply.editSiteMutationGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, checkSrc, titles: redTitles, baseline: report, k: a.k, region: regionOf(a.meta) });
   const region = regionOf(a.meta);
   let regionSite: string | null = null;
   if (region) { try { regionSite = readFileSync(`${a.vesselRoot}/${a.siteRel}`, "utf8"); } catch { regionSite = null; } }

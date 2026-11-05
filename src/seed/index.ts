@@ -168,6 +168,7 @@ import { SELF_FACT_RECONCILE_TICK_TEMPLATE } from "./self-fact-reconcile-tick.js
 import { GAP_CHECK_SUPPLY_TICK_TEMPLATE } from "./gap-check-supply-tick.js";
 import { OWN_CHECK_BASELINE_TEMPLATE } from "./own-check-baseline.js";
 import { REACH_GRADE_TEMPLATE } from "./reach-grade.js";
+import { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE } from "./edit-site-mutation-gate.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -252,6 +253,7 @@ export { SELF_FACT_RECONCILE_TICK_TEMPLATE } from "./self-fact-reconcile-tick.js
 export { GAP_CHECK_SUPPLY_TICK_TEMPLATE } from "./gap-check-supply-tick.js";
 export { OWN_CHECK_BASELINE_TEMPLATE } from "./own-check-baseline.js";
 export { REACH_GRADE_TEMPLATE } from "./reach-grade.js";
+export { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE } from "./edit-site-mutation-gate.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -621,6 +623,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   OWN_CHECK_BASELINE_TEMPLATE,
   // run in process by the landing-verdict judge; graded by its consumer (reach-grade.ts)
   REACH_GRADE_TEMPLATE,
+  // run in process by the check-supply arm step and the test-writing verify; graded by its consumer (edit-site-mutation-gate.ts)
+  EDIT_SITE_MUTATION_GATE_TEMPLATE,
+  EDIT_SITE_MUTATION_GATE_V1_TEMPLATE,
   SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,

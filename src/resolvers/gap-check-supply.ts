@@ -1728,7 +1728,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     const gateReason = verdict === "present" ? redForTheRightReason(report, redTitles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) ?? contractMismatchRefusal(src, ledger.test_file, redReason, vesselReader)?.reason ?? castCalleeRefusal(src, ledger.test_file, vesselReader)?.reason ?? (site.ok ? inventedLiteralRefusal(src, vesselReader.read(site.edit_site), gapText)?.reason : null) ?? null : null;
     // Last, as the costliest: is the red about the edit site at all (EDIT-SITE MUTATION GATE)?
     const mutation = verdict === "present" && !gateReason && site.ok
-      ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles: redTitles, baseline: report, k: coverageKnobs(rhythm.body).k })
+      ? await editSiteMutationGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, checkSrc: src, titles: redTitles, baseline: report, k: coverageKnobs(rhythm.body).k, region: regionOf(meta) })
       : null;
     // Then, on a row with no literal region, the region derived from the evidence (regionMutantGate). It also runs when
     // the edit-site gate refused: the region mutant is a mutant of the site, so a red it moves does depend on the site,

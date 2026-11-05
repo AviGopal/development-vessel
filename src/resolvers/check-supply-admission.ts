@@ -26,9 +26,10 @@ import { planPathProblem, underVesselRoot, vesselRelativePath, VESSEL_TEST_FILE_
 import { join } from "node:path";
 import { testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
-import { regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
-import { gapStoreIsLocal } from "./substrate-gap.js";
-import { resolveTestSuite } from "./test-suite.js";
+import { operatorSites, regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
+import { gapStoreIsLocal, postConsumerTrace } from "./substrate-gap.js";
+import { MUTATE_EDIT_MAX, resolveTestSuite } from "./test-suite.js";
+import { resolvePoolImpulse } from "./pool-impulse.js";
 import { METABOB_API_KEY } from "../config.js";
 import { gapCheckTimeoutMs } from "../judge/gap-check-judge.js";
 
@@ -1928,6 +1929,52 @@ export function mutationGateVerdict(baseline: Row | null, runs: Array<{ mutant: 
   return { measured, changed, unmeasured };
 }
 /**
+ * HOW A MEASURED RUN CHANGED (USER: "Build it now, together"). The rule above counts any different signature as the red
+ * moving. A mutant that suppresses the call under test changes the signature too: the check fails on a different
+ * assertion ("no compose was sent") instead of the one that measures the defect, so any check that merely runs through
+ * the site is admitted, honest or not (the gap-id writer probe: toBe(gap id) became toBeGreaterThan(0), Received 0).
+ *   - green: a named test now passes;
+ *   - same_assertion: a named test fails on the SAME assertion (matcher line and check frame) with a different Expected
+ *     or Received: the value the check measures moved;
+ *   - path_only: the signature differs, but every named test that still fails, fails on a different assertion or frame:
+ *     the mutant reaches the check's path (like a throw), it does not move what the check measures;
+ *   - unchanged / unmeasured as mutationGateVerdict counts them.
+ * The edit-site gate's variant-1 counts only green and same_assertion as changed; variant-0 counts all three, as before.
+ */
+export type RunChangeKind = "green" | "same_assertion" | "path_only" | "unchanged" | "unmeasured";
+function redFailureRows(report: Row | null, titles: string[]): Array<unknown[]> | null {
+  const sig = redSignature(report, titles);
+  return sig === null ? null : (JSON.parse(sig) as Array<unknown[]>);
+}
+export function runChangeKind(baseline: Row | null, report: Row | null, titles: string[]): RunChangeKind {
+  const applied = ((report?.["mutation"] ?? null) as Row | null)?.["applied"] === true;
+  const green = applied && report?.["ran"] === true && report?.["requested_not_passing"] === 0;
+  const base = redFailureRows(baseline, titles);
+  const run = applied ? redFailureRows(report, titles) : null;
+  if (!applied || (!green && run === null) || base === null) return "unmeasured";
+  if (green) return "green";
+  if (JSON.stringify(run) === JSON.stringify(base)) return "unchanged";
+  let same = false;
+  for (let i = 0; i < titles.length; i += 1) {
+    const b = base[i]!, r = run![i]!;
+    if (r[1] === "pass" && b[1] !== "pass") return "green";
+    // [title, error line, expected, received, check frame]
+    if (b.length === 5 && r.length === 5 && b[1] === r[1] && b[4] === r[4] && (b[2] !== r[2] || b[3] !== r[3])) same = true;
+  }
+  return same ? "same_assertion" : "path_only";
+}
+/** The variant-1 verdict: mutationGateVerdict with path_only runs measured but not changed. */
+export function assertionGateVerdict(baseline: Row | null, runs: Array<{ mutant: Mutant; report: Row | null }>, titles: string[]): { measured: number; changed: number; unmeasured: number } {
+  let measured = 0, changed = 0, unmeasured = 0;
+  for (const { report } of runs) {
+    const kind = runChangeKind(baseline, report, titles);
+    if (kind === "unmeasured") { unmeasured += 1; continue; }
+    measured += 1;
+    if (kind === "green" || kind === "same_assertion") changed += 1;
+  }
+  return { measured, changed, unmeasured };
+}
+/**
  * THE PART OF THE SITE THE CHECK EXERCISES. Operator mutants spread over a whole file land mostly in code a check never
  * reaches (one function of a large module), so a genuine check would read as unmoved and be refused. The mutants are
  * taken from the site's top-level declarations the check names (`ns.x` on any namespace import, or a named import) and
@@ -2025,27 +2072,249 @@ export async function mutantRun(a: { vessel: string; siteRel: string; testFile: 
   if (!held.report && /unreachable|HTTP/.test(held.detail)) return { wait: `the mutant runs could not be read at the holder (${held.detail})` };
   return { report: held.report };
 }
-export async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number; root?: string }): Promise<MutationGateOutcome> {
+/**
+ * THE GATE IS AN ACTIVITY (USER: "Build it now"). The k operator mutants above are spread evenly over every
+ * declaration the check reaches, so on a large site they can all miss the gap's code: goal-host src/index.ts's door
+ * (handleRunGoal) reaches ~16.7k lines, its six picks landed thousands of lines from the region, and every check through
+ * it was refused red_independent_of_edit_site whatever it tested. The region gate (regionMutantGate) cancels such a
+ * refusal only for a row with NO literal region; a row whose literal region occurs in the site got no aimed mutant.
+ *   - variant-0 (`development-vessel:edit-site-mutation-gate`, the control): the k evenly spaced picks, exactly as before.
+ *   - variant-1 (`…-v1`): when the row's literal region occurs exactly once in the site (countLiteral, the rule grounding
+ *     and the arming gate use), floor(k/2) (at least 1) of the k are AIMED: the region's own statement replaced
+ *     (regionStatementMutant), then operator mutants of the region's enclosing top-level declaration, one per line,
+ *     alternating the nearest to the region and the declaration's own evenly spaced picks. A literal region is often
+ *     the line a missing fix goes next to (why the region gate exempts literals), so replacing it alone need not move a
+ *     correct check; the declaration around it is where the fix's behaviour runs. And a run counts as moving the red
+ *     only when what the check asserts moved (runChangeKind green or same_assertion): a mutant that only makes another
+ *     assertion fail (the call under test suppressed) shows the check is on the site's path, not that it tests it.
+ *     Only edits test_suite accepts (MUTATE_EDIT_MAX). The rest are the evenly spaced picks. Aimed run first. Aiming can
+ *     only add a mutant that moves the red: it never adds a refusal. No literal once: no aim, the k picks as variant-0.
+ * Which variant runs is the activityVariantMask pool impulse for this activity, read fresh at every call (no row in
+ * force: variant-0; an unreadable pool: variant-0, logged mask_unread). The record names the variant, the aimed and the
+ * sampled picks. Each decided verdict (pass or refuse; a wait decides nothing) emits the variant's own trace (output
+ * editSiteMutationVerdict) and, when the region resolves to a declaration, the consumer trace
+ * `development-vessel:edit-site-mutation-gate-credit`: reached = at least one mutant that MEASURED lies inside that
+ * declaration, i.e. the verdict the arm step or the verify acts on was measured on the gap's code. The same rule grades
+ * both variants (variant-0's evenly spaced picks count when they land there). Trace posts are best effort and never
+ * change or block the verdict. The variant reader is this module's own: the lane-core closure may not import
+ * learning-credit.ts (arm-predicates-lane-core [PIN]); pool-impulse.ts, which owns the mask shape, is an evaluator file.
+ */
+export const EDIT_SITE_MUTATION_ACTIVITY = "development-vessel:edit-site-mutation-gate";
+export const EDIT_SITE_MUTATION_CREDIT_ACTIVITY = "development-vessel:edit-site-mutation-gate-credit";
+export const editSiteMutationVariantId = (variant: number): string => (variant === 0 ? EDIT_SITE_MUTATION_ACTIVITY : `${EDIT_SITE_MUTATION_ACTIVITY}-v${variant}`);
+const EDIT_SITE_MUTATION_VARIANTS = [0, 1] as const;
+type MaskRow = { id?: string; body?: unknown };
+export type EditSiteMutationDeps = {
+  /** The open activityVariantMask rows, newest first. Throws when the pool cannot be read. */
+  readMasks?: () => MaskRow[];
+  postTrace?: (trace: Record<string, unknown>) => Promise<number | null>;
+  nowIso?: string;
+};
+let editSiteMutationDeps: EditSiteMutationDeps = {};
+/** Tests only: the seams editSiteMutationGate uses. */
+export function __setEditSiteMutationDepsForTests(d: EditSiteMutationDeps | null): void { editSiteMutationDeps = d ?? {}; }
+const defaultReadMasks = (): MaskRow[] => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as MaskRow[];
+/** The variant in force at `nowIso`: the newest open mask row for this activity with now in [from, until). Never throws. */
+export function editSiteMutationVariant(nowIso: string, readMasks: () => MaskRow[]): { variant: number; why: string } {
+  let rows: MaskRow[];
+  try { rows = readMasks(); } catch (err) {
+    const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
+    console.warn(`[edit-site-mutation-gate] mask_unread: ${why}`);
+    return { variant: 0, why };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== EDIT_SITE_MUTATION_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (typeof v !== "number" || !(EDIT_SITE_MUTATION_VARIANTS as readonly number[]).includes(v)) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+/** How many of the declaration's own evenly spaced picks the aim chooses among (selectMutants' cap). */
+const MAX_SPREAD_PICKS = 20;
+export type AimPlan = {
+  aimed: Mutant[];
+  why: string;
+  declaration: { name: string | null; start: number; end: number; line_from: number; line_to: number } | null;
+  region_line: number | null;
+};
+/** The aimed mutants of `src` for a literal region: its statement, then its enclosing top-level declaration's operator
+ *  mutants (one per line, nearest and evenly spaced in turn), at most `n`, each an edit test_suite accepts. No region,
+ *  or one not occurring once: none, and why. */
+export function aimedMutants(src: string, siteRel: string, regionLiteral: string, n: number): AimPlan {
+  const none = (why: string, declaration: AimPlan["declaration"] = null, region_line: number | null = null): AimPlan => ({ aimed: [], why, declaration, region_line });
+  const r = regionLiteral.trim();
+  if (!r) return none("no literal region");
+  const count = countLiteral(src, r);
+  if (count !== 1) return none(`the region occurs ${count} time(s) in ${siteRel}`);
+  let ts: typeof import("typescript");
+  try { ts = createRequire(import.meta.url)("typescript") as typeof import("typescript"); } catch { return none("no TypeScript parser"); }
+  const at = src.indexOf(r), end = at + r.length;
+  const site = ts.createSourceFile("s.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const lineOf = (pos: number) => site.getLineAndCharacterOfPosition(pos).line + 1;
+  const top = site.statements.find((st) => st.getStart(site) <= at && st.getEnd() >= end);
+  if (!top) return none("the region is in no top-level statement", null, lineOf(at));
+  const name = (ts.isFunctionDeclaration(top) || ts.isClassDeclaration(top)) && top.name ? top.name.text
+    : ts.isVariableStatement(top) ? top.declarationList.declarations.map((d) => (ts.isIdentifier(d.name) ? d.name.text : "?")).join(", ")
+    : null;
+  const declaration = { name, start: top.getStart(site), end: top.getEnd(), line_from: lineOf(top.getStart(site)), line_to: lineOf(top.getEnd()) };
+  const fits = (m: Mutant) => m.original.length + m.replacement.length <= MUTATE_EDIT_MAX;
+  const aimed: Mutant[] = [];
+  const own = regionStatementMutant(src, at, end, siteRel);
+  if (own && fits(own)) aimed.push(own);
+  // Distance to the region: outside it, the gap between; inside it, 0; a mutant that contains it (an enclosing body or
+  // condition), its size beyond the region's, so the tightest enclosing constructs come before a whole function's body.
+  const dist = (m: Mutant) => (m.end <= at ? at - m.end : m.start >= end ? m.start - end : m.start >= at && m.end <= end ? 0 : (m.end - m.start) - (end - at));
+  // SPREAD, NOT STACKED. A mutant inside the replaced statement is already covered by it, and two on one line probe the
+  // same code: every further pick is on a line no pick has yet. The literal is an anchor, not the defect: the code an
+  // honest check exercises can be the statements next to it, or anywhere on the declaration's path (a field the fix
+  // must add reads the same whatever the anchor line does). So the further picks alternate: the nearest mutant to the
+  // region, then one of the declaration's own evenly spaced picks (selectMutants over the declaration alone).
+  const usable = (m: Mutant) => m.start >= declaration.start && m.end <= declaration.end && fits(m) && !(own && aimed.includes(own) && m.start >= own.start && m.end <= own.end);
+  const near = operatorSites(src).filter(usable).sort((x, y) => dist(x) - dist(y) || x.start - y.start);
+  const declOnly = src.split("").map((ch, i) => (i >= declaration.start && i < declaration.end) || ch === "\n" || ch === "\r" ? ch : " ").join("");
+  const spread = selectMutants(declOnly, MAX_SPREAD_PICKS).filter(usable);
+  const lines = new Set(aimed.map((m) => m.line));
+  const take = (from: Mutant[]): boolean => {
+    const m = from.find((x) => !lines.has(x.line));
+    if (!m) return false;
+    lines.add(m.line);
+    aimed.push(m);
+    return true;
+  };
+  for (let turn = 0; aimed.length < n; turn += 1) {
+    const first = turn % 2 === 0 ? near : spread, second = turn % 2 === 0 ? spread : near;
+    if (!take(first) && !take(second)) break;
+  }
+  return { aimed, why: aimed.length > 0 ? "" : "no mutable construct in the region's declaration that test_suite accepts", declaration, region_line: lineOf(at) };
+}
+const mutantLabel = (m: Mutant) => `${m.operator}@${m.line}`;
+export async function editSiteMutationGate(a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[]; baseline: Row | null; k: number; region?: string; root?: string }): Promise<MutationGateOutcome> {
+  const deps = editSiteMutationDeps;
+  const nowIso = deps.nowIso ?? new Date().toISOString();
+  const mask = editSiteMutationVariant(nowIso, deps.readMasks ?? defaultReadMasks);
+  const t0 = Date.now();
+  const held: { plan: AimPlan | null } = { plan: null };
+  const outcome = await editSiteMutationGateRun(a, mask.variant, held);
+  // A run that answers nothing decided (a wait, or no outcome at all) is passed through exactly as it came.
+  if (!outcome || outcome.kind === "wait") return outcome;
+  const plan = held.plan;
+  outcome.record = { ...outcome.record, variant: mask.variant, mask: mask.why };
+  console.log(`[edit-site-mutation-gate] variant=${mask.variant} (${mask.why}) ${a.siteRel} decided=${outcome.kind} aimed=${Array.isArray(outcome.record["aimed_picks"]) ? (outcome.record["aimed_picks"] as unknown[]).length : 0}`);
+  await emitEditSiteMutationTraces(a, outcome, mask.variant, plan, nowIso, Date.now() - t0, deps);
+  return outcome;
+}
+async function editSiteMutationGateRun(a: Parameters<typeof editSiteMutationGate>[0], variant: number, held: { plan: AimPlan | null }): Promise<MutationGateOutcome> {
   let src: string | null = null;
   try { src = readFileSync(a.root ? join(a.root, a.siteRel) : join(clonesRoot(), a.vessel, a.siteRel), "utf-8"); } catch { src = null; }
   if (src === null) return { kind: "refuse", reason: `red_independent_of_edit_site: the edit site ${a.siteRel} is not readable here, so no change to it can be shown to move the check`, record: { mutants: 0, site: a.siteRel } };
   const region = siteRegionSource(src, a.checkSrc);
-  const mutants = selectMutants(region, a.k).map((m) => ({ ...m, original: src!.slice(m.start, m.end) }));
-  const record: Row = { site: a.siteRel, k: a.k, selected: mutants.length, region: region === src ? "file" : "declarations_the_check_names" };
-  if (mutants.length === 0) return { kind: "pass", record: { ...record, decided: "nothing: the edit site has no mutable construct" } };
+  // The region's declaration is resolved for both variants (the credit grades both by it); only variant-1 aims.
+  const plan = a.region ? aimedMutants(src, a.siteRel, a.region, Math.max(1, Math.floor(a.k / 2))) : null;
+  held.plan = plan;
+  const aimed = variant === 1 && plan ? plan.aimed : [];
+  const sampled = aimed.length === 0 ? selectMutants(region, a.k)
+    : (a.k - aimed.length > 0 ? selectMutants(region, a.k - aimed.length) : []).filter((m) => !aimed.some((o) => o.start === m.start && o.end === m.end));
+  const mutants = [...aimed, ...sampled].map((m) => ({ ...m, original: src!.slice(m.start, m.end) }));
+  const isAimed = new Set(aimed.map((m) => `${m.start}:${m.end}`));
+  const inDeclaration = (m: Mutant) => plan?.declaration ? m.start >= plan.declaration.start && m.end <= plan.declaration.end : false;
+  const record: Row = {
+    site: a.siteRel, k: a.k, selected: mutants.length, region: region === src ? "file" : "declarations_the_check_names",
+    sampled_picks: sampled.map(mutantLabel),
+    ...(variant === 1 ? { aimed_picks: aimed.map(mutantLabel), aim: plan ? { why: plan.why || null, region_line: plan.region_line, declaration: plan.declaration ? { name: plan.declaration.name, lines: [plan.declaration.line_from, plan.declaration.line_to] } : null } : { why: "no literal region" } } : {}),
+  };
+  const measuredIn = (runs: Array<{ mutant: Mutant; report: Row | null }>) => ({
+    changed_kinds: runs.map((r) => runChangeKind(a.baseline, r.report, a.titles)),
+    ...(plan?.declaration ? { declaration_measured: runs.filter((r) => inDeclaration(r.mutant) && mutationGateVerdict(a.baseline, [r], a.titles).measured > 0).length } : {}),
+  });
+  // Variant-0 decides by the signature rule as before; variant-1 counts a path_only run as measured, not changed.
+  const verdict = variant === 1 ? assertionGateVerdict : mutationGateVerdict;
+  if (mutants.length === 0) return { kind: "pass", record: { ...record, ...measuredIn([]), decided: "nothing: the edit site has no mutable construct" } };
   const runs: Array<{ mutant: Mutant; report: Row | null }> = [];
   for (const m of mutants) {
     const run = await mutantRun(a, m);
     if ("wait" in run) return { kind: "wait", detail: run.wait };
     const report = run.report;
     runs.push({ mutant: m, report });
-    const v = mutationGateVerdict(a.baseline, runs, a.titles);
-    if (v.changed > 0) return { kind: "pass", record: { ...record, ran: runs.length, ...v, changed_by: { operator: m.operator, line: m.line } } };
+    const v = verdict(a.baseline, runs, a.titles);
+    if (v.changed > 0) return { kind: "pass", record: { ...record, ran: runs.length, ...v, ...measuredIn(runs), changed_by: { operator: m.operator, line: m.line, aimed: isAimed.has(`${m.start}:${m.end}`) } } };
   }
-  const v = mutationGateVerdict(a.baseline, runs, a.titles);
-  const out = { ...record, ran: runs.length, ...v };
+  const v = verdict(a.baseline, runs, a.titles);
+  const out = { ...record, ran: runs.length, ...v, ...measuredIn(runs) };
   if (v.measured === 0) return { kind: "pass", record: { ...out, decided: "nothing: no mutant run measured the check" } };
-  return { kind: "refuse", reason: `red_independent_of_edit_site: the named test(s) fail the same way under all ${v.measured} measured mutant(s) of ${a.siteRel} (${mutants.map((m) => `${m.operator}@${m.line}`).join(", ")}), so no change to the site moves the check`, record: out };
+  const pathOnly = variant === 1 ? (out["changed_kinds"] as RunChangeKind[]).filter((k) => k === "path_only").length : 0;
+  const why = pathOnly > 0
+    ? `no mutant of ${a.siteRel} (${mutants.map(mutantLabel).join(", ")}) moves what the named test(s) assert: ${pathOnly} of ${v.measured} measured mutant(s) only made a different assertion fail (they reach the check's path, they do not move its measured value), the rest left the red unchanged`
+    : `the named test(s) fail the same way under all ${v.measured} measured mutant(s) of ${a.siteRel} (${mutants.map(mutantLabel).join(", ")}), so no change to the site moves the check`;
+  return { kind: "refuse", reason: `red_independent_of_edit_site: ${why}`, record: out };
+}
+let traceSeq = 0;
+const traceIdPart = (s: string): string => s.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 60);
+/** The variant's own trace: one deterministic task producing editSiteMutationVerdict. */
+export function editSiteMutationTrace(a: { siteRel: string; testFile: string; vessel: string }, outcome: Exclude<MutationGateOutcome, { kind: "wait" }>, variant: number, nowIso: string, durationMs: number): Record<string, unknown> {
+  const id = editSiteMutationVariantId(variant);
+  const executionId = `edit-site-mutation-gate-${traceIdPart(a.testFile.split("/").pop() ?? a.testFile)}-${Date.parse(nowIso) || Date.now()}-${++traceSeq}`;
+  return {
+    execution_id: executionId,
+    template_id: id,
+    activity_id: id,
+    activity_variant_id: id,
+    status: "completed",
+    success: true,
+    started_at: nowIso,
+    duration_ms: durationMs,
+    input_shapes: ["test_suite"],
+    output_shapes: ["editSiteMutationVerdict"],
+    tasks: [{ id: "mutant-runs", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`editSiteMutationVerdict:${executionId}`] }],
+    tags: [`edit_site_mutation_variant:${variant}`, `edit_site_mutation_decided:${outcome.kind}`],
+    metadata: { vessel: a.vessel, site: a.siteRel, test_file: a.testFile, decided: outcome.kind, editSiteMutationVerdict: outcome.record },
+  };
+}
+/** The consumer trace that grades a gate execution: reached = a mutant that measured lies in the region's declaration. */
+export function editSiteMutationCreditTrace(own: Record<string, unknown>, record: Row, variant: number, nowIso: string): Record<string, unknown> {
+  const producer = String(own["execution_id"]);
+  const impulse = `editSiteMutationVerdict:${producer}`;
+  const reached = Number(record["declaration_measured"] ?? 0) > 0;
+  return {
+    execution_id: `edit-site-mutation-gate-credit-${producer.replace(/^edit-site-mutation-gate-/, "")}`,
+    template_id: EDIT_SITE_MUTATION_CREDIT_ACTIVITY,
+    activity_id: EDIT_SITE_MUTATION_CREDIT_ACTIVITY,
+    activity_variant_id: EDIT_SITE_MUTATION_CREDIT_ACTIVITY,
+    status: reached ? "completed" : "failed",
+    success: reached,
+    ...(reached ? {} : { failure_mode: { type: "verifier_negative", reason: "no mutant that measured the check lies in the gap region's declaration, so the verdict was not measured on the gap's code" } }),
+    started_at: nowIso,
+    duration_ms: 0,
+    composition_chain: [producer],
+    tasks: [{
+      id: "judge-region-measured",
+      resolver_id: "deterministic",
+      resolver_tier: "deterministic",
+      success: reached,
+      input_impulse_ids: [impulse],
+      output_impulse_ids: [],
+      consumed_provenance: [{ impulse_id: impulse, producer_execution_id: producer, origin: "ancestor" }],
+    }],
+    tags: [reached ? "reached:true" : "reached:false", `edit_site_mutation_variant:${variant}`],
+    metadata: { producer_execution_id: producer, variant, declaration_measured: Number(record["declaration_measured"] ?? 0), decided: own["metadata"] && (own["metadata"] as Row)["decided"] },
+  };
+}
+async function emitEditSiteMutationTraces(a: { siteRel: string; testFile: string; vessel: string }, outcome: Exclude<MutationGateOutcome, { kind: "wait" }>, variant: number, plan: AimPlan | null, nowIso: string, durationMs: number, deps: EditSiteMutationDeps): Promise<void> {
+  const send = deps.postTrace ?? ((t: Record<string, unknown>) => postConsumerTrace(t, "edit-site-mutation-gate"));
+  try {
+    const own = editSiteMutationTrace(a, outcome, variant, nowIso, durationMs);
+    const s1 = await send(own);
+    if (s1 === null || s1 < 200 || s1 >= 300) { console.warn(`[edit-site-mutation-gate] own trace not posted (http=${s1 ?? "none"}); its credit is not posted either`); return; }
+    if (!plan?.declaration) { console.log(`[edit-site-mutation-gate] ${a.siteRel}: ungraded (${plan ? plan.why : "no literal region"}): no credit trace`); return; }
+    const s2 = await send(editSiteMutationCreditTrace(own, outcome.record, variant, nowIso));
+    if (s2 === null || s2 < 200 || s2 >= 300) console.warn(`[edit-site-mutation-gate] credit trace not posted (http=${s2 ?? "none"})`);
+  } catch (err) {
+    console.warn(`[edit-site-mutation-gate] traces not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+  }
 }
 
 /**

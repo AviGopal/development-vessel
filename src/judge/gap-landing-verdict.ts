@@ -37,7 +37,7 @@ export type Ask = (pointer: Record<string, unknown>) => Promise<unknown>;
 /** The chronic-failure escalation (gap-to-feature escalateToDecomposition), handed in per call as in gap-attempt-credit. */
 export type Escalate = (gap: Record<string, unknown>, why: string) => Promise<unknown>;
 import { learningTableSource, landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, heldLearningTable, type CreditRef, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
-import { creditLearning, postReach } from "./learning-credit.js";
+import { creditLearning, reachGrade } from "./learning-credit.js";
 
 /** I4a: a compose failure's class-credit reference. The pick's decision when there was one; otherwise the failed_attempts
  *  value its own bump wrote (attempt:<gap>#<n>, unique per failure and durable on the row); null only when the bump wrote
@@ -1336,13 +1336,15 @@ async function landingAuthoringExecution(sha: string, attemptId?: string): Promi
   } catch { return ""; }
 }
 /** Exported for tests. Grade the landing's executions (landing trace, authoring compose) with its landing verdict. */
-export async function gradeLandingExecution(meta: Record<string, unknown>, sha: string, reached: boolean, why: string, attemptId?: string): Promise<Array<{ execution_id: string; updated: number | null }>> {
+export async function gradeLandingExecution(meta: Record<string, unknown>, sha: string, reached: boolean, why: string, attemptId?: string, gapId?: string): Promise<Array<{ execution_id: string; updated: number | null }>> {
   const out: Array<{ execution_id: string; updated: number | null }> = [];
   const lt = meta.landing_trace as { execution_id?: unknown; sha?: unknown } | undefined;
   const traceId = lt && typeof lt.execution_id === "string" && typeof lt.sha === "string" && lt.sha.length >= 7 && (sha.startsWith(lt.sha) || lt.sha.startsWith(sha)) ? lt.execution_id : "";
   const authoring = await landingAuthoringExecution(sha, attemptId);
-  if (traceId) out.push({ execution_id: traceId, updated: (await postReach({ execution_id: traceId, reached, completion_shapes: ["cutoverApplied"] }, `${why}; landing trace of ${sha.slice(0, 12)}`)).updated });
-  if (authoring && authoring !== traceId) out.push({ execution_id: authoring, updated: (await postReach({ execution_id: authoring, reached }, `${why}; authoring execution of ${sha.slice(0, 12)}`)).updated });
+  // Through the reach-grade activity (learning-credit.ts reachGrade): `seen` grades each resolved id once per landing.
+  const seen = new Map<string, boolean>();
+  if (traceId) out.push({ execution_id: traceId, updated: (await reachGrade({ execution_id: traceId, reached, completion_shapes: ["cutoverApplied"] }, { source: "landing", why: `${why}; landing trace of ${sha.slice(0, 12)}`, gap_id: gapId, sha, seen }))?.updated ?? null });
+  if (authoring && authoring !== traceId) out.push({ execution_id: authoring, updated: (await reachGrade({ execution_id: authoring, reached }, { source: "authoring", why: `${why}; authoring execution of ${sha.slice(0, 12)}`, gap_id: gapId, sha, seen }))?.updated ?? null });
   if (out.length === 0) console.log(`[gap-sweep] landing ${sha.slice(0, 12)}: no landing trace or authoring execution to grade reached=${reached} (${why})`);
   return out;
 }
@@ -1382,7 +1384,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, ...(intent.drafter ? { drafter: intent.drafter } : {}), verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
-    await gradeLandingExecution(meta, sha, false, `falsified_after_restart gap ${String(g.id)}`, attemptId);
+    await gradeLandingExecution(meta, sha, false, `falsified_after_restart gap ${String(g.id)}`, attemptId, String(g.id));
   }
   console.warn(`[gap-sweep] FALSIFIED autonomous landing gap=${String(g.id)} sha=${sha.slice(0, 12)} vessel=${vessel} attempt=${attemptId} — its predicate still reports the defect after ${vessel} restarted onto it; recorded regressed_by, held from re-pick until reverted`);
   return "recorded";
@@ -1409,7 +1411,7 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
     joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id, gap_id: String(g.id) } : {});
     updateClassPosterior(gapClassOf(g), false, { gap_id: String(g.id), event_id: sha ? `sha:${sha}` : null });
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, ...(regIntent.drafter ? { drafter: regIntent.drafter } : {}), verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
-    await gradeLandingExecution(meta, sha, false, `operator_revert gap ${String(g.id)}`, attemptId);
+    await gradeLandingExecution(meta, sha, false, `operator_revert gap ${String(g.id)}`, attemptId, String(g.id));
   }
   const lessons = Array.isArray(meta.failure_lessons) ? [...(meta.failure_lessons as unknown[])] : [];
   if (!lessons.some((l) => (l as { attempt_id?: unknown; class?: unknown }).attempt_id === attemptId && (l as { class?: unknown }).class === "attempt_consequence")) {
@@ -2260,7 +2262,7 @@ const pending = candidates.unheld
       if (credited) updateClassPosterior(gapClassOf(g), true, { gap_id: String(g.id), event_id: `sha:${sha}` });
       // THE LANDING VERDICT GRADES THE LANDING'S EXECUTIONS (gradeLandingExecution), once, on the credit guard above, and
       // only for a verified close: a partial close under dissent is not a reach.
-      if (credited && sweepCloseWrite?.shape !== "structuredError" && sweepClosedMeta.closed_reason === "landed_verified") await gradeLandingExecution(meta, sha, true, `landed_verified gap ${String(g.id)}`);
+      if (credited && sweepCloseWrite?.shape !== "structuredError" && sweepClosedMeta.closed_reason === "landed_verified") await gradeLandingExecution(meta, sha, true, `landed_verified gap ${String(g.id)}`, undefined, String(g.id));
       // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.
       if (sweepCloseWrite?.shape !== "structuredError") await resolveDissentOutcome(String(g.id), { result: "passed" }).catch(dissentOutcomeUnwritten(String(g.id), "passed"));
       out.closed += 1;

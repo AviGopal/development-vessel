@@ -26,7 +26,8 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sweepGitOut } from "./gap-check-judge.js";
 import { vesselsCloneRoot } from "./gap-policy.js";
-import { resolveSubstrateGap, forwardToGapStore, gapStoreIsLocal, baselineEarnedRecordFromStore, BASELINE_ARM } from "../resolvers/substrate-gap.js";
+import { resolveSubstrateGap, forwardToGapStore, gapStoreIsLocal, baselineEarnedRecordFromStore, BASELINE_ARM, postConsumerTrace } from "../resolvers/substrate-gap.js";
+import { resolvePoolImpulse } from "../resolvers/pool-impulse.js";
 
 export type LearningTable = "class_posteriors" | "close_oracle" | "detector_credit" | "priority_weights";
 export type LearningOutcome = "landed" | "failed" | "close" | "false_close" | "operator_engaged" | "closure";
@@ -267,8 +268,8 @@ export async function resolveGapLearningCreditWrite(pointer: Record<string, unkn
  * e.g. a gap-lane landing composed under this vessel's own execution id) is a normal answer, reported and not retried.
  */
 export type ReachVerdict = { execution_id: string; reached: boolean; completion_shapes?: string[]; learning_mode?: "observe" };
-export async function postReach(v: ReachVerdict, why: string): Promise<{ sent: boolean; status: number | null; updated: number | null }> {
-  if (!v.execution_id) return { sent: false, status: null, updated: null };
+export async function postReach(v: ReachVerdict, why: string): Promise<{ sent: boolean; status: number | null; updated: number | null; idempotent: boolean }> {
+  if (!v.execution_id) return { sent: false, status: null, updated: null, idempotent: false };
   const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
   const key = process.env["METABOB_API_KEY"] ?? "";
   try {
@@ -278,13 +279,215 @@ export async function postReach(v: ReachVerdict, why: string): Promise<{ sent: b
       body: JSON.stringify({ execution_id: v.execution_id, reached: v.reached, ...(v.completion_shapes ? { completion_shapes: v.completion_shapes } : {}), ...(v.learning_mode ? { learning_mode: v.learning_mode } : {}) }),
       signal: AbortSignal.timeout(5_000),
     });
-    const j = (await res.json().catch(() => null)) as { updated?: unknown } | null;
+    const j = (await res.json().catch(() => null)) as { updated?: unknown; idempotent?: unknown } | null;
     const updated = typeof j?.updated === "number" ? j.updated : null;
-    console.log(`[reach-post] execution=${v.execution_id} reached=${v.reached} status=${res.status} updated=${updated ?? "?"} (${why})`);
-    return { sent: true, status: res.status, updated };
+    // `idempotent: true`: the row already held this verdict, so `updated` counts it without the grade moving.
+    const idempotent = j?.idempotent === true;
+    console.log(`[reach-post] execution=${v.execution_id} reached=${v.reached} status=${res.status} updated=${updated ?? "?"}${idempotent ? " idempotent" : ""} (${why})`);
+    return { sent: true, status: res.status, updated, idempotent };
   } catch (err) {
     console.warn(`[reach-post] execution=${v.execution_id} reached=${v.reached} NOT delivered (${why}): ${String((err as Error)?.message ?? err).slice(0, 160)}`);
-    return { sent: false, status: null, updated: null };
+    return { sent: false, status: null, updated: null, idempotent: false };
+  }
+}
+
+// ── THE REACH GRADE, AS AN ACTIVITY (development-vessel:reach-grade) ──────────────────────────────────────────────────
+/**
+ * Every grade above goes through reachGrade, so the delivery of a verdict is itself an activity the loop can grade
+ * (seed/reach-grade.ts). It decides no verdict: the caller's verdict is delivered, and what happened to it is recorded.
+ *   - variant-0 (control, `development-vessel:reach-grade`): post the id as given (postReach, unchanged).
+ *   - variant-1 (`development-vessel:reach-grade-v1`): post the id as given; ONLY when that holds no row (updated 0),
+ *     read it as a goal-host dispatch id, map it to the dispatch's trace id (GET /executions/:id executionId) and post
+ *     that. An id that maps to nothing stays `unresolved`, never invented.
+ * Which variant runs is the `activityVariantMask` pool impulse {activity_id, active_variant, from, until, reason, lift,
+ * by}, read FRESH on every grade: a row for this activity is in force while now is in [from, until), the newest such row
+ * wins. No row in force: variant-0. A pool that cannot be read: variant-0, logged `mask_unread` (never silent).
+ * Delivery is judged from /reach's own reply: delivered = updated >= 1 (an execution row now holds the verdict); moved =
+ * delivered && !idempotent (the row did not already hold it). One landing grades each RESOLVED id at most once (the
+ * caller's `seen` map, shared across the landing's posts).
+ * Each grade emits the variant's own trace (output executionReachResult) and a consumer trace
+ * `development-vessel:reach-grade-credit` whose composition_chain is that trace, reached = delivered: the variant's
+ * grade is the delivery, not its exit. Both posts are best effort and never block or fail the grade.
+ */
+export const REACH_GRADE_ACTIVITY = "development-vessel:reach-grade";
+export const REACH_GRADE_CREDIT_ACTIVITY = "development-vessel:reach-grade-credit";
+/** A variant's activity id: variant-0 is the template itself, variant-n its child template `<id>-v<n>`. */
+export const reachGradeVariantId = (variant: number): string => (variant === 0 ? REACH_GRADE_ACTIVITY : `${REACH_GRADE_ACTIVITY}-v${variant}`);
+const REACH_GRADE_VARIANTS = [0, 1] as const;
+export const VARIANT_MASK_SHAPE = "activityVariantMask";
+
+export type ReachSource = "landing" | "authoring" | "compose_exit";
+export type ExecutionReachResult = {
+  posted_id: string;
+  resolved_id: string | null;
+  resolution: "as_given" | "dispatch_mapped" | "unresolved";
+  reached: boolean;
+  delivered: boolean;
+  moved: boolean;
+  idempotent: boolean;
+  updated: number | null;
+  variant: number;
+  source: ReachSource;
+  why: string;
+};
+type MaskRow = { id?: string; body?: unknown };
+export type ReachGradeDeps = {
+  post?: typeof postReach;
+  /** goal-host's dispatch record's executionId, or null when it has none or none is read. */
+  executionIdOf?: (dispatchId: string) => Promise<string | null>;
+  /** The open activityVariantMask rows, newest first. Throws when the pool cannot be read. */
+  readMasks?: () => MaskRow[];
+  postTrace?: (trace: Record<string, unknown>) => Promise<number | null>;
+  nowIso?: string;
+};
+export type ReachGradeContext = {
+  source: ReachSource;
+  why: string;
+  gap_id?: string;
+  sha?: string;
+  /** Resolved id -> delivered, shared across one landing's posts (dedupe). */
+  seen?: Map<string, boolean>;
+};
+
+let reachGradeDeps: ReachGradeDeps = {};
+/** Tests only: the seams reachGrade uses when the call passes none. */
+export function __setReachGradeDepsForTests(d: ReachGradeDeps | null): void { reachGradeDeps = d ?? {}; }
+
+const defaultReadMasks = (): MaskRow[] => resolvePoolImpulse({ type: "poolImpulse", shape: VARIANT_MASK_SHAPE, status: "open" }).body.impulses;
+/** goal-host's dispatch record's executionId (GET /executions/:dispatchId). The same read as own-check-baseline-credit.ts
+ *  dispatchExecutionId, which this closed module may not import (its import set is closed). */
+async function goalHostDispatchExecutionId(dispatchId: string): Promise<string | null> {
+  const ep = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+  const key = process.env["METABOB_API_KEY"] ?? "";
+  try {
+    const r = await fetch(`${ep}/executions/${encodeURIComponent(dispatchId)}`, { headers: key ? { Authorization: `ApiKey ${key}` } : {}, signal: AbortSignal.timeout(5_000) });
+    if (r.status !== 200) { try { await r.body?.cancel(); } catch { /* swallow */ } return null; }
+    const j = (await r.json().catch(() => ({}))) as { executionId?: unknown };
+    return typeof j.executionId === "string" && j.executionId.length > 0 ? j.executionId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The variant in force for `activityId` at `nowIso`, from the mask rows. Never throws. */
+export function reachGradeVariant(activityId: string, nowIso: string, readMasks: () => MaskRow[]): { variant: number; why: string; unread: boolean } {
+  let rows: MaskRow[];
+  try { rows = readMasks(); } catch (err) {
+    const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
+    console.warn(`[reach-grade] mask_unread ${activityId}: ${why}`);
+    return { variant: 0, why, unread: true };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== activityId) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (typeof v !== "number" || !(REACH_GRADE_VARIANTS as readonly number[]).includes(v)) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0`, unread: false };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}`, unread: false };
+  }
+  return { variant: 0, why: "no mask in force: variant-0", unread: false };
+}
+
+const traceIdPart = (s: string): string => s.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60);
+/** The reach-grade variant's own trace: one deterministic task producing executionReachResult. */
+export function reachGradeTrace(r: ExecutionReachResult, meta: { gap_id?: string; sha?: string; verdict: boolean }, nowIso: string): Record<string, unknown> {
+  const id = reachGradeVariantId(r.variant);
+  const impulse = `executionReachResult:${r.posted_id}`;
+  return {
+    execution_id: `reach-grade-${r.source}-${traceIdPart(r.posted_id)}-${Date.parse(nowIso) || Date.now()}`,
+    template_id: id,
+    activity_id: id,
+    activity_variant_id: id,
+    status: "completed",
+    success: true,
+    started_at: nowIso,
+    duration_ms: 0,
+    output_shapes: ["executionReachResult"],
+    tasks: [{ id: "post-reach", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [impulse] }],
+    tags: [`reach_grade_variant:${r.variant}`, `reach_grade_source:${r.source}`, `reach_grade_resolution:${r.resolution}`],
+    metadata: { gap_id: meta.gap_id ?? null, sha: meta.sha ?? null, verdict: meta.verdict, executionReachResult: r },
+  };
+}
+/** The consumer trace that grades a reach-grade execution: reached = the verdict was delivered to a row. */
+export function reachGradeCreditTrace(r: ExecutionReachResult, reachGradeExecutionId: string, nowIso: string): Record<string, unknown> {
+  const impulse = `executionReachResult:${r.posted_id}`;
+  return {
+    execution_id: `reach-grade-credit-${r.source}-${traceIdPart(r.posted_id)}-${Date.parse(nowIso) || Date.now()}`,
+    template_id: REACH_GRADE_CREDIT_ACTIVITY,
+    activity_id: REACH_GRADE_CREDIT_ACTIVITY,
+    activity_variant_id: REACH_GRADE_CREDIT_ACTIVITY,
+    status: r.delivered ? "completed" : "failed",
+    success: r.delivered,
+    ...(r.delivered ? {} : { failure_mode: { type: "verifier_negative", reason: `the reach verdict was not delivered to a trace row (${r.resolution}): ${r.why}` } }),
+    started_at: nowIso,
+    duration_ms: 0,
+    composition_chain: [reachGradeExecutionId],
+    tasks: [{
+      id: "judge-delivery",
+      resolver_id: "deterministic",
+      resolver_tier: "deterministic",
+      success: r.delivered,
+      input_impulse_ids: [impulse],
+      output_impulse_ids: [],
+      consumed_provenance: [{ impulse_id: impulse, producer_execution_id: reachGradeExecutionId, origin: "ancestor" }],
+    }],
+    tags: [r.delivered ? "reached:true" : "reached:false", `reach_grade_variant:${r.variant}`, `reach_grade_moved:${r.moved}`],
+    metadata: { producer_execution_id: reachGradeExecutionId, variant: r.variant, resolution: r.resolution, delivered: r.delivered, moved: r.moved, idempotent: r.idempotent },
+  };
+}
+
+/**
+ * Deliver `v` through the reach-grade variant in force. Returns the executionReachResult (plus `sent`: a post left this
+ * node), or null when the landing already graded this id (no post, no trace). Never throws.
+ */
+export async function reachGrade(v: ReachVerdict, ctx: ReachGradeContext, deps: ReachGradeDeps = reachGradeDeps): Promise<(ExecutionReachResult & { sent: boolean }) | null> {
+  if (!v.execution_id) return null;
+  const seen = ctx.seen ?? new Map<string, boolean>();
+  if (seen.has(v.execution_id)) return null;
+  const nowIso = deps.nowIso ?? new Date().toISOString();
+  const post = deps.post ?? postReach;
+  const mask = reachGradeVariant(REACH_GRADE_ACTIVITY, nowIso, deps.readMasks ?? defaultReadMasks);
+  const base = { posted_id: v.execution_id, reached: v.reached, variant: mask.variant, source: ctx.source };
+  let r: ExecutionReachResult & { sent: boolean };
+  try {
+    const first = await post(v, ctx.why);
+    const hit = (first.updated ?? 0) >= 1;
+    seen.set(v.execution_id, hit);
+    if (hit) r = { ...base, resolved_id: v.execution_id, resolution: "as_given", delivered: true, moved: !first.idempotent, idempotent: first.idempotent, updated: first.updated, sent: first.sent, why: "the id as given holds a row" };
+    else if (mask.variant !== 1) r = { ...base, resolved_id: null, resolution: "unresolved", delivered: false, moved: false, idempotent: false, updated: first.updated, sent: first.sent, why: first.sent ? "the id as given holds no row (control: not mapped)" : "the post was not delivered" };
+    else {
+      const mapped = await (deps.executionIdOf ?? goalHostDispatchExecutionId)(v.execution_id);
+      if (!mapped || mapped === v.execution_id) r = { ...base, resolved_id: null, resolution: "unresolved", delivered: false, moved: false, idempotent: false, updated: first.updated, sent: first.sent, why: mapped ? "the dispatch maps to the id as given, which holds no row" : "the id as given holds no row and maps to no dispatch execution" };
+      else if (seen.has(mapped)) r = { ...base, resolved_id: mapped, resolution: "dispatch_mapped", delivered: seen.get(mapped) === true, moved: false, idempotent: false, updated: first.updated, sent: first.sent, why: `mapped to ${mapped}, already graded for this landing (not posted again)` };
+      else {
+        const second = await post({ ...v, execution_id: mapped }, `${ctx.why}; dispatch ${v.execution_id} mapped`);
+        const ok = (second.updated ?? 0) >= 1;
+        seen.set(mapped, ok);
+        r = ok
+          ? { ...base, resolved_id: mapped, resolution: "dispatch_mapped", delivered: true, moved: !second.idempotent, idempotent: second.idempotent, updated: second.updated, sent: second.sent, why: `the id as given holds no row; its dispatch's execution ${mapped} does` }
+          : { ...base, resolved_id: null, resolution: "unresolved", delivered: false, moved: false, idempotent: false, updated: second.updated, sent: second.sent, why: `neither the id as given nor its dispatch's execution ${mapped} holds a row` };
+      }
+    }
+  } catch (err) {
+    r = { ...base, resolved_id: null, resolution: "unresolved", delivered: false, moved: false, idempotent: false, updated: null, sent: false, why: `not graded: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
+  }
+  console.log(`[reach-grade] variant=${r.variant} (${mask.why}) source=${r.source} posted=${r.posted_id} resolved=${r.resolved_id ?? "-"} ${r.resolution} delivered=${r.delivered} moved=${r.moved}`);
+  await emitReachGradeTraces(r, { gap_id: ctx.gap_id, sha: ctx.sha, verdict: v.reached }, nowIso, deps);
+  return r;
+}
+async function emitReachGradeTraces(r: ExecutionReachResult & { sent?: boolean }, meta: { gap_id?: string; sha?: string; verdict: boolean }, nowIso: string, deps: ReachGradeDeps): Promise<void> {
+  const send = deps.postTrace ?? ((t: Record<string, unknown>) => postConsumerTrace(t, "reach-grade"));
+  try {
+    const { sent: _sent, ...body } = r;
+    const own = reachGradeTrace(body, meta, nowIso);
+    const s1 = await send(own);
+    if (s1 === null || s1 < 200 || s1 >= 300) { console.warn(`[reach-grade] own trace not posted (http=${s1 ?? "none"}); its credit is not posted either`); return; }
+    const s2 = await send(reachGradeCreditTrace(body, String(own["execution_id"]), nowIso));
+    if (s2 === null || s2 < 200 || s2 >= 300) console.warn(`[reach-grade] credit trace not posted (http=${s2 ?? "none"})`);
+  } catch (err) {
+    console.warn(`[reach-grade] traces not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
   }
 }
 
@@ -301,6 +504,6 @@ export async function composeExitReach(cb: Record<string, unknown>): Promise<{ p
     console.log(`[reach-post] execution=${id} awaiting_landing_verdict: an ok compose is graded by its landing verdict, not its exit (no reach posted)`);
     return { posted: false, awaiting_landing_verdict: true };
   }
-  const r = await postReach({ execution_id: id, reached: false, ...(cb["observe"] === true ? { learning_mode: "observe" as const } : {}) }, "compose did not come back ok");
-  return { posted: r.sent, awaiting_landing_verdict: false };
+  const r = await reachGrade({ execution_id: id, reached: false, ...(cb["observe"] === true ? { learning_mode: "observe" as const } : {}) }, { source: "compose_exit", why: "compose did not come back ok" });
+  return { posted: r?.sent === true, awaiting_landing_verdict: false };
 }

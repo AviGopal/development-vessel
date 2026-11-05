@@ -59,6 +59,7 @@ import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 import { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
 import { DETECT_OBSIDIAN_VESSEL_HEALTH_TEMPLATE } from "./detect-obsidian-vessel-health.js";
+import { FAILURE_RECALL_TEMPLATE, FAILURE_RECALL_V1_TEMPLATE } from "./failure-recall.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
@@ -222,6 +223,7 @@ export { GOAL_SHAPE_PRE_CHECK_TEMPLATE, GOAL_SHAPE_PRE_CHECK_V6_TEMPLATE } from 
 export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
+export { FAILURE_RECALL_TEMPLATE, FAILURE_RECALL_V1_TEMPLATE } from "./failure-recall.js";
 export { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 export { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
 export { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
@@ -475,6 +477,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // need, drafts a parallel-track fix, and produces a vesselMitosisInitiated
   // artifact as a side effect of normal operation.
   SCAFFOLD_MITOSIS_TRACK_TEMPLATE,
+  // run in process by goal-host at a dispatch's first recall; graded by the consuming dispatch (failure-recall.ts)
+  FAILURE_RECALL_TEMPLATE,
+  FAILURE_RECALL_V1_TEMPLATE,
   // Durability (iter 2026-06-03): backend-snapshot-to-git dumps SurrealDB
   // tables to /workspace/snapshots/<TS>/ (bind-mounted, survives container
   // destruction) and commits a small manifest to git. Goal[14] dispatches

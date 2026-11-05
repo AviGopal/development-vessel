@@ -176,6 +176,159 @@ import { codeContract } from "./code-introspect.js";
 import { srcReaderAt } from "./check-supply-admission.js";
 // The arm step's predicates, statically from lane core (user ruling, arm pre-check option i): never from gap-check-supply.
 import * as armPredicates from "./check-supply-admission.js";
+import { hostname as callerCutHost } from "node:os";
+import { resolvePoolImpulse as callerCutPool } from "./pool-impulse.js";
+
+/**
+ * THE CALLER WHO STOPPED WAITING (USER: "Operator: fix 1"). goal-host waits a bounded time for a compose and, when it
+ * gives up, drops the connection; the compose ran on regardless (index.ts rebuilds a long-running body's Request with
+ * a signal that never aborts, so a compose outlives its caller), holding a compose slot for a median 1249 s after the
+ * cut, and goals dispatched meanwhile were refused BUSY. The caller leaving is a STRUCTURED fact the HTTP layer
+ * already has: the inbound Request's own AbortSignal fires when the client drops the connection.
+ *   - index.ts binds that signal for a feature_compose body only (bindCallerGone), never when this process is draining
+ *     (its own server.stop is not a caller leaving), and runs the request under it (runWithCallerGone). The rebuilt
+ *     Request still carries no signal: no outbound call is cut, and a short resolve is unchanged.
+ *   - The compose reads it at three cooperative checkpoints, never mid-operation: before the first draft, at the top of
+ *     every repair round, and before the cutover (log only: a compose past its verify lands, it is not discarded).
+ *   - variant-0 (`development-vessel:compose-caller-cut`, the control): a checkpoint that sees the caller gone logs it
+ *     and traces it, and the compose goes on exactly as before.
+ *   - variant-1 (`…-v1`): the compose of a goal-host dispatch (authoring_execution_id present) stops at that checkpoint
+ *     with the structured verdict CALLER_GONE, through the normal exit: the workspace, the slot and the landing lease
+ *     are released as for any refusal. A compose with no dispatch id (in-process, the lane) is never stopped.
+ * Which variant runs is the activityVariantMask pool impulse, read once per compose. Each observed cut emits its own
+ * trace (output composeCallerCut). Its consumer grade is decided by the NEXT compose acquire of the same slot class on
+ * this node within 30 min: admitted -> reached, refused BUSY -> not reached, none -> ungraded. One acquire settles every
+ * cut pending in its class, each credit naming it (settled_by).
+ */
+export const COMPOSE_CALLER_CUT_ACTIVITY = "development-vessel:compose-caller-cut";
+export const COMPOSE_CALLER_CUT_CREDIT_ACTIVITY = "development-vessel:compose-caller-cut-credit";
+export const composeCallerCutVariantId = (variant: number): string => (variant === 0 ? COMPOSE_CALLER_CUT_ACTIVITY : `${COMPOSE_CALLER_CUT_ACTIVITY}-v${variant}`);
+const CCC_LOG = `[${COMPOSE_CALLER_CUT_ACTIVITY}]`;
+const CALLER_CUT_CREDIT_WINDOW_MS = 30 * 60_000;
+const callerGoneStore = new AsyncLocalStorage<AbortSignal>();
+/** Run `fn` with `signal` as the caller-gone signal of the request it serves (no signal: run as-is). */
+export function runWithCallerGone<T>(signal: AbortSignal | undefined, fn: () => T): T {
+  return signal ? callerGoneStore.run(signal, fn) : fn();
+}
+/** A signal that aborts when `request` does (the client dropped the connection), unless this process is draining. The
+ *  reason carries the time the caller left. */
+export function bindCallerGone(request: AbortSignal, draining: () => boolean): AbortSignal {
+  const ac = new AbortController();
+  const left = () => { if (!draining()) ac.abort({ at: new Date().toISOString() }); };
+  if (request.aborted) left(); else request.addEventListener("abort", left, { once: true });
+  return ac.signal;
+}
+type CallerCutMaskRow = { id?: string; body?: unknown };
+export type CallerCutDeps = { readMasks?: () => CallerCutMaskRow[]; postTrace?: (t: Record<string, unknown>) => Promise<number | null>; nowMs?: () => number };
+let callerCutDeps: CallerCutDeps = {};
+/** Tests only: the seams the caller-cut checkpoints use. */
+export function __setCallerCutDepsForTests(d: CallerCutDeps | null): void { callerCutDeps = d ?? {}; pendingCallerCuts.length = 0; lastCallerCutPoolLog = -Infinity; }
+let lastCallerCutPoolLog = -Infinity;
+/** The variant in force for this activity (the newest open mask row whose [from, until) holds now). Never throws. */
+export function composeCallerCutVariant(nowIso: string): { variant: number; why: string } {
+  let rows: CallerCutMaskRow[];
+  try {
+    rows = (callerCutDeps.readMasks ?? (() => callerCutPool({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as CallerCutMaskRow[]))();
+  } catch (err) {
+    if (Date.now() - lastCallerCutPoolLog >= 30_000) { lastCallerCutPoolLog = Date.now(); console.log(`${CCC_LOG} pool_read shape=activityVariantMask ok=false`); }
+    const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
+    console.warn(`${CCC_LOG} ${why}`);
+    return { variant: 0, why };
+  }
+  if (Date.now() - lastCallerCutPoolLog >= 30_000) { lastCallerCutPoolLog = Date.now(); console.log(`${CCC_LOG} pool_read shape=activityVariantMask ok=true`); }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== COMPOSE_CALLER_CUT_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+/** One compose's caller-cut state, entered around its run (resolveFeatureCompose). */
+export type ComposeCutState = { variant?: number; why?: string; gapId: string; dispatchId: string | null; directed: boolean; observed?: { stage: string; at: string; cutAt: string; traceId: string }; landingLogged?: boolean; stopped?: { stage: string; at: string } };
+/** The key one compose's caller-cut state rides under on its pointer: a symbol, so it is copied by every spread of the
+ *  pointer (observeComposePointer, the run's own copies) and never serialised. */
+export const COMPOSE_CUT_STATE: unique symbol = Symbol("composeCutState");
+const cutStateOf = (pointer: unknown): ComposeCutState | undefined => (pointer && typeof pointer === "object" ? (pointer as Record<symbol, ComposeCutState | undefined>)[COMPOSE_CUT_STATE] : undefined);
+type PendingCallerCut = { traceId: string; cutAtMs: number; directed: boolean; variant: number };
+const pendingCallerCuts: PendingCallerCut[] = [];
+let callerCutSeq = 0;
+const cccNowMs = () => callerCutDeps.nowMs?.() ?? Date.now();
+const cccPost = (t: Record<string, unknown>, what: string): void => {
+  void (callerCutDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "compose-caller-cut")))(t)
+    .then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${CCC_LOG} ${what} not posted (http=${st ?? "none"})`); })
+    .catch((err) => console.warn(`${CCC_LOG} ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+};
+/**
+ * A CHECKPOINT. null: go on (no caller gone, variant-0, a compose with no dispatch id, or the stage that lands). A
+ * report: variant-1 stops this goal-host compose here. The first checkpoint that sees the caller gone logs the decision
+ * line, posts the cut's own trace and leaves its credit pending. Never throws.
+ */
+export function callerCutCheckpoint(stage: "before_draft" | "repair_round" | "before_cutover", pointer: unknown): ResolverResult | null {
+  try {
+    const st = cutStateOf(pointer);
+    const sig = callerGoneStore.getStore();
+    if (!st || !sig || !sig.aborted) return null;
+    const nowIso = new Date(cccNowMs()).toISOString();
+    // The variant is read once per compose, at the first checkpoint that sees its caller gone: a compose whose caller
+    // stays reads no mask and logs nothing, exactly as before.
+    if (st.variant === undefined) { const m = composeCallerCutVariant(nowIso); st.variant = m.variant; st.why = m.why; }
+    if (!st.observed) {
+      const cutAt = typeof (sig.reason as { at?: unknown } | undefined)?.at === "string" ? String((sig.reason as { at: string }).at) : nowIso;
+      const traceId = `compose-caller-cut-${st.gapId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 60)}-${Date.parse(nowIso) || Date.now()}-${process.pid}-${++callerCutSeq}`;
+      st.observed = { stage, at: nowIso, cutAt, traceId };
+      console.log(`${CCC_LOG} cut observed dispatch=${st.dispatchId ?? "none"} gap=${st.gapId} variant=${st.variant} (${st.why}) node=${callerCutHost()} stage=${stage} lane=${st.directed ? "directed" : "undirected"} cut_at=${cutAt} observed_at=${nowIso}`);
+      const id = composeCallerCutVariantId(st.variant);
+      cccPost({
+        execution_id: traceId, template_id: id, activity_id: id, activity_variant_id: id, status: "completed", success: true, started_at: nowIso, duration_ms: 0,
+        input_shapes: ["featureComposeReport"], output_shapes: ["composeCallerCut"],
+        tasks: [{ id: "observe-cut", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`composeCallerCut:${traceId}`] }],
+        tags: [`compose_caller_cut_variant:${st.variant}`, `dispatch:${st.dispatchId ?? "none"}`],
+        metadata: { composeCallerCut: { gap_id: st.gapId, dispatch_id: st.dispatchId, variant: st.variant, stage, lane: st.directed ? "directed" : "undirected", cut_at: cutAt, observed_at: nowIso } },
+      }, `own trace of ${st.gapId}`);
+      pendingCallerCuts.push({ traceId, cutAtMs: Date.parse(cutAt) || cccNowMs(), directed: st.directed, variant: st.variant });
+    }
+    if (stage === "before_cutover") {
+      if (!st.landingLogged) { st.landingLogged = true; console.log(`${CCC_LOG} cut observed, landing gap=${st.gapId} stopped=false reason=past_verify`); }
+      return null;
+    }
+    if (st.variant !== 1 || st.dispatchId === null || st.stopped) return null;
+    st.stopped = { stage, at: nowIso };
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "CALLER_GONE", stage, error: `the caller stopped waiting (cut at ${st.observed.cutAt}); the compose stopped at its ${stage} checkpoint and released its slot` } };
+  } catch { return null; }
+}
+/** The next acquire of a slot class settles the cuts pending in that class: admitted -> reached, refused -> not. Older
+ *  than the window: ungraded (logged). Never throws. */
+export function settleCallerCutCredits(directed: boolean, admitted: boolean, acquireId: string): number {
+  let settled = 0;
+  try {
+    const now = cccNowMs();
+    for (let i = pendingCallerCuts.length - 1; i >= 0; i -= 1) {
+      const p = pendingCallerCuts[i]!;
+      if (now - p.cutAtMs > CALLER_CUT_CREDIT_WINDOW_MS) { pendingCallerCuts.splice(i, 1); console.log(`${CCC_LOG} ungraded ${p.traceId}: no compose acquire of its class within 30 min`); continue; }
+      if (p.directed !== directed || p.traceId.length === 0) continue;
+      pendingCallerCuts.splice(i, 1);
+      settled += 1;
+      const impulse = `composeCallerCut:${p.traceId}`;
+      cccPost({
+        execution_id: `compose-caller-cut-credit-${p.traceId.replace(/^compose-caller-cut-/, "")}`,
+        template_id: COMPOSE_CALLER_CUT_CREDIT_ACTIVITY, activity_id: COMPOSE_CALLER_CUT_CREDIT_ACTIVITY, activity_variant_id: COMPOSE_CALLER_CUT_CREDIT_ACTIVITY,
+        status: admitted ? "completed" : "failed", success: admitted,
+        ...(admitted ? {} : { failure_mode: { type: "verifier_negative", reason: "the next compose of this slot class after the cut was refused BUSY" } }),
+        started_at: new Date(now).toISOString(), duration_ms: 0, composition_chain: [p.traceId],
+        tasks: [{ id: "next-acquire", resolver_id: "deterministic", resolver_tier: "deterministic", success: admitted, input_impulse_ids: [impulse], output_impulse_ids: [],
+          consumed_provenance: [{ impulse_id: impulse, producer_execution_id: p.traceId, origin: "ancestor" }] }],
+        tags: [admitted ? "reached:true" : "reached:false", `compose_caller_cut_variant:${p.variant}`],
+        metadata: { producer_execution_id: p.traceId, variant: p.variant, settled_by: acquireId, lane: directed ? "directed" : "undirected" },
+      }, `credit of ${p.traceId}`);
+    }
+  } catch { /* the credit never changes an acquire */ }
+  return settled;
+}
 
 // COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
 // returns `usage` on every completion and llmCall used to drop it, so every compose report
@@ -7184,6 +7337,8 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
     inFlightLandingLeases.set(slotId, landingLease);
   }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot, armed: composeArmed });
+  // This acquire is the consumer of the caller cuts pending in its slot class (compose-caller-cut credit).
+  settleCallerCutCredits(isDirected, slot.granted, slotId);
   if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
   if (!slot.granted && slot.duplicateOf) {
     admittedCapture?.(false);
@@ -7227,6 +7382,10 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
   }
   let leaseOutcome: ResolverResult | null = null;
   admittedCapture?.(true);
+  // This compose's caller-cut state; the run's checkpoints read it and resolve its variant at a cut (compose-caller-cut).
+  const _cutAuthoring = (pointer as { authoring_execution_id?: unknown }).authoring_execution_id;
+  const cutState: ComposeCutState = { gapId: _gapIdForSlot ?? "adhoc", dispatchId: typeof _cutAuthoring === "string" && _cutAuthoring.length > 0 ? _cutAuthoring : null, directed: isDirected };
+  (pointer as unknown as Record<symbol, ComposeCutState>)[COMPOSE_CUT_STATE] = cutState;
   try {
     const outcome = await resolveFeatureComposeUncapped(observeComposePointer(pointer)); // OBSERVE: land:false, skip_push:true
     try {
@@ -7277,6 +7436,7 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
   } finally {
     await slot.release();
     await releaseOrKeepLandingLease(landingLease, leaseOutcome);
+    if (cutState.stopped) console.log(`${CCC_LOG} stopped gap=${cutState.gapId} dispatch=${cutState.dispatchId ?? "none"} at=${cutState.stopped.at} stage=${cutState.stopped.stage} slot_released=true lease_released=${landingLease ? "true" : "none_held"}`);
   }
 }
 
@@ -8800,6 +8960,8 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       refine: refineSpecPrompt(spec, c.grounding, c.composeLessons),
     });
     const variantChoice = drafterVariantChoice(pointer.drafter_variant);
+    // CALLER-CUT CHECKPOINT (compose-caller-cut): variant-1 stops a goal-host compose whose caller left, before drafting.
+    { const _callerGone = callerCutCheckpoint("before_draft", pointer); if (_callerGone) return _callerGone; }
     const drafted = await draftContextThroughOpenModule({
       facts,
       scope: { verifyVessels: [...verifyVessels], targets: [...targetFiles], checkPaths },
@@ -10858,6 +11020,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // the plan stage's one re-plan has no repair-round twin; the draft's own verify failure is graded as before.
   let regionRepairRefused: string | null = null;
   for (let attempt = 0; attempt < repairCap && !applyFailed && !terminalRefusal && !regionRepairRefused && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
+    // CALLER-CUT CHECKPOINT (compose-caller-cut): variant-1 stops a goal-host compose whose caller left, before a repair round.
+    { const _callerGone = callerCutCheckpoint("repair_round", pointer); if (_callerGone) return _callerGone; }
     let anyFixed = false;
     for (const fv of verify.filter((v) => !v.ok)) {
       const errText = (fv.output || "").trim();
@@ -11929,6 +12093,8 @@ const earlyAttempt = await Promise.race([
         try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
         continue;
       }
+      // CALLER-CUT CHECKPOINT (compose-caller-cut): a compose past its verify lands; the cut is only recorded here.
+      callerCutCheckpoint("before_cutover", pointer);
       const cut = await resolveVesselMitosisCutover({
         type: "vessel_mitosis_cutover",
         vessel_name: vessel,

@@ -45,15 +45,19 @@ export const LONG_RUNNING_TYPES: ReadonlySet<string> = new Set([
 
 /** Accepts both envelope spellings this vessel serves: `{impulse:{pointer}}` and bare `{pointer}`. */
 export function isLongRunningBody(raw: string): boolean {
-  if (typeof raw !== "string" || raw.length === 0) return false;
+  return longRunningType(raw) !== null;
+}
+/** The pointer type of a long-running body (one of LONG_RUNNING_TYPES), or null: the same reading as isLongRunningBody. */
+export function longRunningType(raw: string): string | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
   try {
     const b = JSON.parse(raw) as {
       impulse?: { pointer?: { type?: unknown }; type?: unknown };
       pointer?: { type?: unknown };
     };
     const t = b?.impulse?.pointer?.type ?? b?.pointer?.type ?? b?.impulse?.type;
-    return typeof t === "string" && LONG_RUNNING_TYPES.has(t);
+    return typeof t === "string" && LONG_RUNNING_TYPES.has(t) ? t : null;
   } catch {
-    return false;
+    return null;
   }
 }

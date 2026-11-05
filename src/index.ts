@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { isLongRunningBody } from "./long-running.js";
+import { isLongRunningBody, longRunningType } from "./long-running.js";
+import { bindCallerGone, runWithCallerGone } from "./resolvers/feature-compose.js";
 import { impulsesRouter } from "./routes/impulses.js";
 import { config, DISCOVERY_SHAPES } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
@@ -238,6 +239,8 @@ const server = Bun.serve({
     // consuming the stream here would leave the handler with an empty body.
         let counted = false;
     let startRec: InFlightRecord | null = null;
+    // A feature_compose's caller leaving (feature-compose.ts compose-caller-cut): the client dropping the connection, not this process draining.
+    let callerGone: AbortSignal | undefined;
     let forwarded = req;
     try {
       if (req.method === "POST") {
@@ -275,6 +278,7 @@ const server = Bun.serve({
           counted = true;
           inFlightRequests++;
           startRec = admitInFlight();
+          if (longRunningType(raw) === "feature_compose") callerGone = bindCallerGone(req.signal, () => devDraining);
         }
         // The remote address for the gap-write audit (routes/impulses.ts): stamped from the socket after
         // deleting any inbound copy, so a client cannot name its own address. The rebuilt Request has no
@@ -292,7 +296,7 @@ const server = Bun.serve({
       forwarded = req; // unreadable body → forward untouched, never count
     }
     try {
-      return await (startRec ? runInFlight(startRec, () => app.fetch(forwarded, srv)) : app.fetch(forwarded, srv));
+      return await runWithCallerGone(callerGone, () => (startRec ? runInFlight(startRec, () => app.fetch(forwarded, srv)) : app.fetch(forwarded, srv)));
     } finally {
       if (counted) inFlightRequests--;
       releaseInFlight(startRec);

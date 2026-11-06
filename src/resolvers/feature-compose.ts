@@ -6722,16 +6722,18 @@ export async function testWritingArmStaticRefusal(a: { vessel: string; vesselRoo
  * arm step combines them: a site refusal stands unless the region mutant moved the red. A root test_suite will not
  * accept (a non-isolated compose) or a run that measured nothing decides nothing. The refusal, or null.
  */
-export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoot: string; checkFile: string; siteRel: string | null; meta: Record<string, unknown>; summary: string; k: number }): Promise<{ stage: string; reason: string } | null> {
-  if (!a.siteRel) return null;
+export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoot: string; checkFile: string; siteRel: string | null; meta: Record<string, unknown>; summary: string; k: number; observe?: Record<string, unknown> }): Promise<{ stage: string; reason: string } | null> {
+  // What each gate decided, for the arm-parity record (testWritingArmPrecheck); filled whatever the outcome.
+  const seen = a.observe ?? {};
+  if (!a.siteRel) { seen.mutation = "not_run: no edit site"; return null; }
   let checkSrc: string;
-  try { checkSrc = readFileSync(`${a.vesselRoot}/${a.checkFile}`, "utf8"); } catch { return null; }
+  try { checkSrc = readFileSync(`${a.vesselRoot}/${a.checkFile}`, "utf8"); } catch { seen.mutation = "not_run: the check file is not readable"; return null; }
   const supply = armPredicates;
   const { resolveTestSuite } = await import("./test-suite.js");
   const name = a.vessel.replace(/^repos\//, "");
   const titles = supply.declaredTestTitles(checkSrc);
   const base = await resolveTestSuite({ type: "test_suite", vessel: `repos/${name}`, test_file: a.checkFile, only_tests: titles, root: a.vesselRoot });
-  if (base.shape !== "test_suite") { console.log(`[fc-test-writing-check] mutant gates not applied: ${JSON.stringify(base.body).slice(0, 200)}`); return null; }
+  if (base.shape !== "test_suite") { seen.mutation = "not_run: test_suite refused the root"; console.log(`[fc-test-writing-check] mutant gates not applied: ${JSON.stringify(base.body).slice(0, 200)}`); return null; }
   const report = base.body as Record<string, unknown>;
   const split = supply.splitRedGreen(report, titles);
   const redTitles = split.red.length > 0 ? split.red : titles;
@@ -6743,6 +6745,11 @@ export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoo
     ? await supply.regionMutantGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, titles: redTitles, baseline: report, evidence: a.summary, spec: typeof a.meta["falsifier_spec"] === "string" ? String(a.meta["falsifier_spec"]) : "", more: { must_fail: typeof a.meta["must_fail"] === "string" ? String(a.meta["must_fail"]) : undefined, control: typeof a.meta["control"] === "string" ? String(a.meta["control"]) : undefined } })
     : null;
   const regionMoved = regionGate?.kind === "pass" && Number(regionGate.record["changed"] ?? 0) > 0;
+  seen.mutation = mutation.kind === "refuse" ? `refuse: ${mutation.reason.slice(0, 200)}` : mutation.kind === "wait" ? `wait: ${mutation.detail.slice(0, 200)}` : `pass: ${String(mutation.record["decided"] ?? `changed ${String(mutation.record["changed"] ?? "?")}`)}`;
+  seen.region = regionGate === null ? "not_run" : regionGate.kind === "wait" ? `wait: ${regionGate.detail.slice(0, 200)}`
+    : regionGate.kind === "refuse" ? `refuse: ${regionGate.reason.slice(0, 200)}`
+    : String(regionGate.record["decided"] ?? `measured: changed ${String(regionGate.record["changed"] ?? 0)} anchor ${JSON.stringify(String(regionGate.record["anchor"] ?? "").slice(0, 120))}`);
+  seen.region_cancelled_refusal = mutation.kind === "refuse" && regionMoved;
   const reason = mutation.kind === "refuse" && !regionMoved ? mutation.reason : regionGate?.kind === "refuse" ? regionGate.reason : null;
   return reason ? { stage: reason.slice(0, Math.max(0, reason.indexOf(":"))) || "arm_mutant_gate", reason } : null;
 }
@@ -6752,20 +6759,149 @@ export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoo
  * The control rule follows the arm rhythm's require_control, failing closed when the rhythm cannot be read; the mutant
  * gates take k from the arm rhythm's coverage knobs, as the arm step does. Kept out
  * of the verify's body so its call site stays one line.
+ *
+ * WHICH INPUTS IT JUDGES BY is the activity development-vessel:test-writing-arm-parity. The arm step reads the gap row
+ * from the store (its summary is the region gate's evidence; its classification_metadata the region, falsifier_spec,
+ * must_fail and control); this verify was handed the caller's summary and a meta merged over the caller's copy, so the
+ * two can derive different regions: d6c5320 was refused by the edit-site mutation gate here, the region gate cancelled
+ * that refusal, it landed, and the arm step, finding no region in the row, refused it after it was public. Variant-0
+ * judges by the caller's inputs as before; variant-1 by the store row's own (the caller's when the row cannot be read).
+ * Both read the row and record, per run, which inputs differ and what each gate decided (armParityDecision).
  */
 async function testWritingArmPrecheck(tw: TestWritingVerdict, a: { vessel: string; vesselRoot: string; meta: Parameters<typeof regionOf>[0]; gap?: { id?: unknown; summary?: unknown } | null }): Promise<TestWritingVerdict> {
   if (!tw.ok) return tw;
   const { readFamilyRhythm } = await import("./rhythm-conductor-tick.js");
   const armRhythm = await readFamilyRhythm("gap-check-supply").catch(() => null);
+  const nowIso = new Date().toISOString();
+  const gapId = typeof a.gap?.id === "string" ? a.gap.id : "";
+  const caller: ArmInputs = { summary: String(a.gap?.summary ?? ""), meta: (a.meta ?? {}) as Record<string, unknown> };
+  const row = await readArmRow(gapId);
+  const m = testWritingArmParityVariant(nowIso);
+  const use = m.variant === 1 && row.inputs ? row.inputs : caller;
   // In the arm step's order: the static predicates, then the mutant gates at this compose worktree, then the control.
   const armIn = { vessel: a.vessel, vesselRoot: a.vesselRoot, checkFile: tw.check_file, siteRel: tw.edit_site, red: tw.runs[0]?.red ?? [] };
   const { coverageKnobs } = await import("./scope-earn-in.js");
-  const arm = await testWritingArmStaticRefusal({ ...armIn, region: regionOf(a.meta), requireControl: false })
-    ?? await testWritingArmMutantRefusal({ ...armIn, meta: a.meta as Record<string, unknown>, summary: String(a.gap?.summary ?? ""), k: coverageKnobs((armRhythm?.body ?? {}) as never).k })
+  const seen: Record<string, unknown> = {};
+  const arm = await testWritingArmStaticRefusal({ ...armIn, region: regionOf(use.meta), requireControl: false })
+    ?? await testWritingArmMutantRefusal({ ...armIn, meta: use.meta, summary: use.summary, k: coverageKnobs((armRhythm?.body ?? {}) as never).k, observe: seen })
     ?? await testWritingArmStaticRefusal({ ...armIn, region: "", requireControl: armRhythm?.body?.["require_control"] !== false });
+  armParityDecision({ gap_id: gapId, vessel: a.vessel, check_file: tw.check_file, edit_site: tw.edit_site, variant: m, row_read: row.read, caller, row: row.inputs, siteSrc: readSiteText(a.vesselRoot, tw.edit_site), gates: seen, refused: arm ? arm.stage : null, nowIso });
   if (!arm) return tw;
   console.log(`[fc-test-writing-check] ${String(a.gap?.id ?? "-")}: the arm step's ${arm.stage} would refuse this check after it lands; refused at the verify instead`);
   return { ...tw, ok: false, stage: arm.stage as TestWritingVerdict["stage"], reason: arm.reason };
+}
+
+// ── development-vessel:test-writing-arm-parity ──────────────────────────────────────────────────────────────────────
+export const TEST_WRITING_ARM_PARITY_ACTIVITY = "development-vessel:test-writing-arm-parity";
+export const testWritingArmParityVariantId = (variant: number): string => (variant === 0 ? TEST_WRITING_ARM_PARITY_ACTIVITY : `${TEST_WRITING_ARM_PARITY_ACTIVITY}-v${variant}`);
+const TWAP_LOG = `[${TEST_WRITING_ARM_PARITY_ACTIVITY}]`;
+export type ArmInputs = { summary: string; meta: Record<string, unknown> };
+type TwapMaskRow = { id?: string; body?: unknown };
+export type TestWritingArmParityDeps = {
+  readMasks?: () => TwapMaskRow[];
+  postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
+  readRows?: (id: string) => Promise<Array<Record<string, unknown>> | null>;
+};
+const ARM_ROW_READ_MS = 5000;
+let twapDeps: TestWritingArmParityDeps = {};
+let twapSeq = 0;
+/** Tests only: the seams the arm-parity activity uses. null restores the real ones. */
+export function __setTestWritingArmParityDepsForTests(d: TestWritingArmParityDeps | null): void { twapDeps = d ?? {}; }
+/** The variant in force for the arm parity at `nowIso`. None, an unknown variant or an unreadable pool: variant-0. */
+export function testWritingArmParityVariant(nowIso: string): { variant: number; why: string } {
+  let rows: TwapMaskRow[];
+  try {
+    rows = (twapDeps.readMasks ?? (() => callerCutPool({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as TwapMaskRow[]))();
+  } catch (err) {
+    return { variant: 0, why: `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0` };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== TEST_WRITING_ARM_PARITY_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+/** The gap row's own inputs to the arm gates, as the arm step reads them: its summary and classification_metadata. */
+async function readArmRow(gapId: string): Promise<{ read: "ok" | "no_gap_id" | "unreadable" | "missing"; inputs: ArmInputs | null }> {
+  if (!gapId) return { read: "no_gap_id", inputs: null };
+  let rows: Array<Record<string, unknown>> | null;
+  // Bounded: a slow store must not hold the verify; it is then judged by the caller's inputs, as variant-0 is.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    rows = await Promise.race([(twapDeps.readRows ?? readComposeGapRows)(gapId), new Promise<null>((r) => { timer = setTimeout(() => r(null), ARM_ROW_READ_MS); })]);
+  } catch { rows = null; } finally { if (timer) clearTimeout(timer); }
+  if (!Array.isArray(rows)) return { read: "unreadable", inputs: null };
+  const row = rows.find((r) => String(r["id"]) === gapId);
+  if (!row) return { read: "missing", inputs: null };
+  const meta = row["classification_metadata"];
+  return { read: "ok", inputs: { summary: typeof row["summary"] === "string" ? row["summary"] : "", meta: meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {} } };
+}
+function readSiteText(root: string, siteRel: string | null): string | null {
+  if (!siteRel) return null;
+  try { return readFileSync(`${root}/${siteRel}`, "utf8"); } catch { return null; }
+}
+/** The inputs the arm gates read that differ between the caller's copy and the row's own. Pure. */
+export function armInputsDiffer(caller: ArmInputs, row: ArmInputs): string[] {
+  const out: string[] = [];
+  if (caller.summary !== row.summary) out.push("summary");
+  for (const k of ["region", "falsifier_spec", "must_fail", "control"]) {
+    if (JSON.stringify(caller.meta[k] ?? null) !== JSON.stringify(row.meta[k] ?? null)) out.push(k);
+  }
+  const site = (x: ArmInputs) => JSON.stringify(((x.meta["check_supply"] ?? {}) as { edit_site?: unknown }).edit_site ?? null);
+  if (site(caller) !== site(row)) out.push("check_supply.edit_site");
+  return out;
+}
+/** The region the region gate would derive from `inp` on `siteSrc` (its anchor), or null with why. Pure, runs nothing. */
+export function armRegionOf(siteSrc: string | null, siteRel: string | null, inp: ArmInputs): { anchor: string | null; why: string } {
+  if (siteSrc === null || !siteRel) return { anchor: null, why: "the edit site is not readable here" };
+  const spec = typeof inp.meta["falsifier_spec"] === "string" ? String(inp.meta["falsifier_spec"]) : "";
+  const more = { must_fail: typeof inp.meta["must_fail"] === "string" ? String(inp.meta["must_fail"]) : undefined, control: typeof inp.meta["control"] === "string" ? String(inp.meta["control"]) : undefined };
+  const e = armPredicates.explainedTextRegion(siteSrc, siteRel, inp.summary, spec, more);
+  return e.region ? { anchor: e.region.anchor.slice(0, 120), why: e.why } : { anchor: null, why: e.why };
+}
+/**
+ * THE DECISION RECORD of one arm precheck: the variant and whose inputs it judged by, whether the row could be read,
+ * which inputs differ, the region each side derives, what each gate decided, and the verify's call. One log line and,
+ * under either variant, one trace (output testWritingArmParity) so the record is readable on the run, not only in a log.
+ * Its grade is its consumer's: the arm step's verdict on the same check after it lands (armed agrees, arm_refused does
+ * not), joined by the gap id. Never throws.
+ */
+export function armParityDecision(a: { gap_id: string; vessel: string; check_file: string; edit_site: string | null; variant: { variant: number; why: string }; row_read: string; caller: ArmInputs; row: ArmInputs | null; siteSrc: string | null; gates: Record<string, unknown>; refused: string | null; nowIso: string }): Record<string, unknown> | null {
+  try {
+    const differs = a.row ? armInputsDiffer(a.caller, a.row) : [];
+    const callerRegion = armRegionOf(a.siteSrc, a.edit_site, a.caller);
+    const rowRegion = a.row ? armRegionOf(a.siteSrc, a.edit_site, a.row) : null;
+    const judgedBy = a.variant.variant === 1 && a.row ? "row" : "caller";
+    const regionsDiffer = rowRegion !== null && callerRegion.anchor !== rowRegion.anchor;
+    const decisionId = `test-writing-arm-parity-${(a.gap_id || "no-gap").replace(/[^a-zA-Z0-9]+/g, "-").slice(0, 80)}-${Date.parse(a.nowIso)}-${process.pid}-${++twapSeq}`;
+    const record: Record<string, unknown> = {
+      gap_id: a.gap_id || null, vessel: a.vessel, check_file: a.check_file, edit_site: a.edit_site, variant: a.variant.variant, judged_by: judgedBy,
+      row_read: a.row_read, inputs_differ: differs, region_from_caller: callerRegion.anchor, region_from_row: rowRegion ? rowRegion.anchor : null,
+      regions_differ: regionsDiffer, mutation: a.gates["mutation"] ?? "not_run", region_gate: a.gates["region"] ?? "not_run",
+      region_cancelled_refusal: a.gates["region_cancelled_refusal"] === true, verify: a.refused ? `refused: ${a.refused}` : "passed", decided_at: a.nowIso,
+    };
+    const parity = a.row_read !== "ok" ? `row ${a.row_read}` : differs.length === 0 ? "inputs agree" : `inputs differ [${differs.join(",")}]${regionsDiffer ? " and the regions differ: pre-land vs arm would differ" : ""}`;
+    console.log(`${TWAP_LOG} decision=${decisionId} variant=${a.variant.variant} (${a.variant.why}) gap=${a.gap_id || "-"} judged_by=${judgedBy} ${parity} mutation=${JSON.stringify(String(record.mutation).slice(0, 120))} region_gate=${JSON.stringify(String(record.region_gate).slice(0, 120))} cancelled=${String(record.region_cancelled_refusal)} -> ${String(record.verify)}`);
+    const vid = testWritingArmParityVariantId(a.variant.variant === 1 ? 1 : 0);
+    void (twapDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "test-writing-arm-parity")))({
+      execution_id: decisionId, template_id: vid, activity_id: vid, activity_variant_id: vid, status: "completed", success: true, started_at: a.nowIso, duration_ms: 0,
+      input_shapes: ["test_suite"], output_shapes: ["testWritingArmParity"],
+      tasks: [{ id: "arm-precheck-inputs", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`testWritingArmParity:${decisionId}`] }],
+      tags: [`test_writing_arm_parity_variant:${a.variant.variant === 1 ? 1 : 0}`, `inputs_differ:${differs.length > 0}`, `regions_differ:${regionsDiffer}`],
+      metadata: { testWritingArmParity: record },
+    }).then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${TWAP_LOG} trace of ${decisionId} not posted (http=${st ?? "none"})`); })
+      .catch((err) => console.warn(`${TWAP_LOG} trace of ${decisionId} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+    return record;
+  } catch (err) {
+    console.warn(`${TWAP_LOG} decision record failed for ${a.gap_id || "-"}: ${String((err as Error)?.message ?? err).slice(0, 160)}`);
+    return null;
+  }
 }
 type TestWritingVerdict = import("./check-supply-admission.js").TestWritingJudgement;
 export function testWritingRedOf(raw: string): TestWritingRed[] {

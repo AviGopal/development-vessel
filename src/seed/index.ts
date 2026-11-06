@@ -179,6 +179,7 @@ import { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V
 import { POST_LAND_BASELINE_KEEP_TEMPLATE, POST_LAND_BASELINE_KEEP_V1_TEMPLATE } from "./post-land-baseline-keep.js";
 import { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 import { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
+import { TEST_WRITING_ARM_PARITY_TEMPLATE, TEST_WRITING_ARM_PARITY_V1_TEMPLATE } from "./test-writing-arm-parity.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -273,6 +274,7 @@ export { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V
 export { POST_LAND_BASELINE_KEEP_TEMPLATE, POST_LAND_BASELINE_KEEP_V1_TEMPLATE } from "./post-land-baseline-keep.js";
 export { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 export { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
+export { TEST_WRITING_ARM_PARITY_TEMPLATE, TEST_WRITING_ARM_PARITY_V1_TEMPLATE } from "./test-writing-arm-parity.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -673,6 +675,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // run in process in feature_compose verify for a draft of a test-defect row's check file; graded by the landing's own check (test-defect-admission.ts)
   TEST_DEFECT_ADMISSION_TEMPLATE,
   TEST_DEFECT_ADMISSION_V1_TEMPLATE,
+  // run in process in feature_compose verify's arm precheck for a drafted check; graded by the arm step's verdict after it lands (test-writing-arm-parity.ts)
+  TEST_WRITING_ARM_PARITY_TEMPLATE,
+  TEST_WRITING_ARM_PARITY_V1_TEMPLATE,
   SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,

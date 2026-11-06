@@ -202,6 +202,16 @@ export function editSiteIsOwnCheck(row: Record<string, unknown>): { site: string
   const rawSite = gapEditSite(row, meta);
   const site = vesselFileOf(rawSite);
   if (!site || !rawSite) return null;
+  // A TEST-DEFECT ROW names its test file as the site on purpose (gap-check-supply testDefectLocalizationDecision): its
+  // defect is in a child script the test runs, and a draft of that file is admitted only by a check DISTINCT from the
+  // row's own (the child-parse certifier, feature-compose test-defect admission). Exempt only when the record's
+  // certifier names this same file; the own check still closes the row.
+  const td = meta["test_defect"] as { certifier?: { shape?: unknown; test_file?: unknown; vessel?: unknown } } | null | undefined;
+  const cert = td && typeof td === "object" ? td.certifier : undefined;
+  if (cert && cert.shape === "test_defect_child_parse") {
+    const f = vesselFileOf(cert.test_file, cert.vessel);
+    if (f && f.rel === site.rel && (!f.vessel || !site.vessel || f.vessel === site.vessel)) return null;
+  }
   const checks: Array<{ path: unknown; vessel: unknown }> = [];
   const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown; vessel?: unknown } } | null | undefined;
   if (er && typeof er === "object" && er.shape === "test_suite" && er.input && typeof er.input === "object") checks.push({ path: er.input.test_file, vessel: er.input.vessel });

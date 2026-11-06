@@ -75,7 +75,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, judgedInputsOf, landedCheckSource, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, sameJudgedInputs, takeBirthVerdictWithReport, unrenderedBindingToken, type JudgedInputs, type MintedBirthVerdict } from "./substrate-gap.js";
+import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, judgedInputsOf, landedCheckSource, postConsumerTrace, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, sameJudgedInputs, takeBirthVerdictWithReport, unrenderedBindingToken, type JudgedInputs, type MintedBirthVerdict } from "./substrate-gap.js";
 export { landedCheckSource, type LandedCheck } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
@@ -104,6 +104,8 @@ import { selfAuthHeaders } from "../lib/self-auth.js";
 import { METABOB_API_KEY, VOLUME_ROOT } from "../config.js";
 import { gapCheckTimeoutMs, sweepGitOut } from "../judge/gap-check-judge.js";
 import { countLiteral, regionFromProposalText, regionOf } from "../lib/region-literal.js";
+import { classifyTestDefect, TEST_DEFECT_CERTIFIER_SHAPE, type TestDefectClassification } from "../lib/child-script-parse.js";
+import { resolvePoolImpulse } from "./pool-impulse.js";
 // THE ARM STEP'S PREDICATES LIVE IN check-supply-admission.ts (user ruling, arm pre-check option i): moved there
 // unchanged so the test-writing verify (feature-compose.ts) reads them from lane core, never from this lane-editable
 // module. Re-exported here, so every importer of gap-check-supply is unchanged; imported here for the arm step itself.
@@ -1339,6 +1341,148 @@ async function localizeForSupply(row: Row, vessel: string, site: string | null):
   return { file: loc.file, method: loc.method, evidence: [{ read: loc.method, why: loc.description }] };
 }
 
+/**
+ * A FAILING TEST WHOSE DEFECT IS IN THE TEST ITSELF IS LOCALIZED TO THE TEST FILE (development-vessel:test-defect-
+ * localization). A row whose own check (evidence_resolve test_suite) is red because a child script the test spawns does
+ * not parse (`bun --eval` of a template literal whose escape the runtime cooked into the child's source) was sited on the
+ * src module the child imports: every draft edited src, the check stayed red, and the one fix, in the test, was refused
+ * as self-certification. Taken for an open class2 row whose own-check baseline reads red_code_reachable for its check,
+ * whose edit site is not already that test file, and whose row carries no operator hold and no test_defect record.
+ * The call is PER FAILING CASE (child-script-parse classifyTestDefect: a stored parse error AND an unparseable child
+ * script in that case's own body, in the clone's file NOW): every case a test defect -> the row is one; only some ->
+ * mixed, left as it is (its other cases are src failures); none -> nothing, no line.
+ *   - variant-0 (the control): logged "would localize to the test file"; no write, no trace.
+ *   - variant-1: ONE write (the write seam re-labels a half-written row unresolvable, gap-eligibility editSiteIsOwnCheck):
+ *     edit_site = the test file, test_defect {cases, certifier: the child-parse check, prior_edit_site, decision_id},
+ *     protected_files without the test file, a localization record, and pwt_escalated (the one-shot pwt escalation
+ *     edits edit_site with no own check; a test_defect draft is admitted only through feature_compose's certifier).
+ *     DEBT: pwt_escalated is reused to mean "this route is closed", recorded as test_defect.pwt_closed_by; the proper
+ *     fix is gap-landing-verdict's escalation condition reading test_defect itself.
+ *     The row's own check is unchanged: it still closes the row.
+ * Its grade is decided by its consumer, the next compose that drafts the row (feature-compose test-defect admission):
+ * a certified test-only draft that turns the own check red -> green -> reached. Under variant-1 the decision is a trace
+ * (output testDefectLocalization), the credit a trace in its composition chain.
+ */
+export const TEST_DEFECT_LOCALIZATION_ACTIVITY = "development-vessel:test-defect-localization";
+export const TEST_DEFECT_LOCALIZATION_CREDIT_ACTIVITY = "development-vessel:test-defect-localization-credit";
+export const testDefectLocalizationVariantId = (variant: number): string => (variant === 0 ? TEST_DEFECT_LOCALIZATION_ACTIVITY : `${TEST_DEFECT_LOCALIZATION_ACTIVITY}-v${variant}`);
+const TDL_LOG = `[${TEST_DEFECT_LOCALIZATION_ACTIVITY}]`;
+type TdMaskRow = { id?: string; body?: unknown };
+export type TestDefectLocalizationDeps = {
+  readMasks?: () => TdMaskRow[];
+  postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
+  /** The check file's text in the vessel clone, or null when unreadable. */
+  readCheck?: (vessel: string, testFile: string) => string | null;
+};
+let tdlDeps: TestDefectLocalizationDeps = {};
+let tdlSeq = 0;
+/** Tests only: the seams the test-defect localization uses. null restores the real ones. */
+export function __setTestDefectLocalizationDepsForTests(d: TestDefectLocalizationDeps | null): void { tdlDeps = d ?? {}; }
+/** The variant in force for the localization at `nowIso`: the first open activityVariantMask row for it whose
+ *  [from, until) holds now. None, an unknown variant or an unreadable pool: variant-0. Never throws. */
+export function testDefectLocalizationVariant(nowIso: string): { variant: number; why: string } {
+  let rows: TdMaskRow[];
+  try {
+    rows = (tdlDeps.readMasks ?? (() => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as TdMaskRow[]))();
+  } catch (err) {
+    return { variant: 0, why: `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0` };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== TEST_DEFECT_LOCALIZATION_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+export type TestDefectCandidate = { vessel: string; testFile: string; failing: Array<{ name?: unknown; error?: unknown }> };
+/** The row's own check and its red baseline failures when the localization may take it, else null. */
+export function testDefectCandidate(row: Row): TestDefectCandidate | null {
+  const meta = metaOf(row);
+  if (falsifierClassOf(meta) !== "class2" || meta["operator_hold"] === true || (meta["test_defect"] !== undefined && meta["test_defect"] !== null)) return null;
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown; only_tests?: unknown } } | undefined;
+  const testFile = er?.shape === "test_suite" && typeof er.input?.test_file === "string" ? er.input.test_file : "";
+  const vessel = typeof er?.input?.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+  if (!testFile || !vessel || !/^[A-Za-z0-9_.-]+$/.test(vessel) || testFile.startsWith("/") || testFile.split("/").includes("..")) return null;
+  const site = String(gapEditSite(row, meta) ?? "").replace(/:\d+.*$/, "").replace(/^repos\/[^/]+\//, "");
+  if (site === testFile || editSiteIsOwnCheck(row)) return null;
+  const b = meta["own_check_baseline"] as { verdict?: unknown; test_file?: unknown; only_tests?: unknown; failing?: unknown } | undefined;
+  const only = Array.isArray(er?.input?.only_tests) ? (er!.input!.only_tests as unknown[]).map(String) : [];
+  if (!b || b.verdict !== "red_code_reachable" || b.test_file !== testFile || JSON.stringify(only) !== JSON.stringify(Array.isArray(b.only_tests) ? b.only_tests : [])) return null;
+  const failing = Array.isArray(b.failing) ? (b.failing as Array<{ name?: unknown; error?: unknown }>) : [];
+  return failing.length > 0 ? { vessel, testFile, failing } : null;
+}
+/** The one write that localizes a test-defect row to its test file (variant-1). */
+export function testDefectLocalizationWrite(row: Row, c: TestDefectCandidate, cls: TestDefectClassification, decisionId: string, nowIso: string): Row {
+  const meta = metaOf(row);
+  const file = `repos/${c.vessel}/${c.testFile}`;
+  const prior = gapEditSite(row, meta) ?? null;
+  const protectedFiles = Array.isArray(meta["protected_files"]) ? (meta["protected_files"] as unknown[]).map(String).filter((p) => p.replace(/^repos\/[^/]+\//, "") !== c.testFile) : null;
+  const why = `every failing case of its own check runs a child script that does not parse (${cls.cases.map((k) => k.why).slice(0, 1).join("")})`;
+  return {
+    id: row["id"], category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: row["status"] ?? "open",
+    classification_metadata: {
+      edit_site: file,
+      localized_by: "test-defect-localization",
+      localization_method: TEST_DEFECT_CERTIFIER_SHAPE,
+      test_defect: {
+        at: nowIso, decision_id: decisionId, prior_edit_site: prior,
+        // pwt_escalated below is set to CLOSE the escalation route for this row, not because it escalated: said here.
+        pwt_closed_by: "test-defect-localization",
+        cases: cls.cases.map((k) => ({ name: k.name, call: k.call, why: k.why })),
+        certifier: { shape: TEST_DEFECT_CERTIFIER_SHAPE, vessel: c.vessel, test_file: c.testFile },
+      },
+      ...(protectedFiles !== null ? { protected_files: protectedFiles } : {}),
+      ...(meta["relocation_hint"] !== undefined ? { relocation_hint: null } : {}),
+      ...(meta["suspected_real_location"] !== undefined ? { suspected_real_location: null } : {}),
+      pwt_escalated: true,
+    },
+    localization: { gap_id: String(row["id"]), file, evidence: [{ read: "own_check_baseline", why }], method: TEST_DEFECT_CERTIFIER_SHAPE, created_at: nowIso },
+  };
+}
+/** THE DECISION for one candidate row. Logs one line when any failing case is a test defect; never throws. */
+export async function testDefectLocalizationDecision(row: Row, nowIso: string, dryRun: boolean): Promise<{ verdict: TestDefectClassification["verdict"]; variant: number; wrote: boolean } | null> {
+  try {
+    const c = testDefectCandidate(row);
+    if (!c) return null;
+    const readCheck = tdlDeps.readCheck ?? ((v: string, f: string): string | null => { try { return readFileSync(join(clonesRoot(), v, f), "utf-8"); } catch { return null; } });
+    const src = readCheck(c.vessel, c.testFile);
+    if (src === null) return null;
+    const cls = classifyTestDefect(src, c.failing);
+    if (cls.verdict === "none") return null;
+    const id = String(row["id"]);
+    const m = testDefectLocalizationVariant(nowIso);
+    const calls = cls.cases.map((k) => `${k.name.split(" > ").pop()}=${k.call}`).join("; ").slice(0, 600);
+    const decisionId = `test-defect-localization-${id.replace(/[^a-zA-Z0-9]+/g, "-").slice(0, 80)}-${Date.parse(nowIso)}-${process.pid}-${++tdlSeq}`;
+    if (cls.verdict === "mixed") {
+      console.log(`${TDL_LOG} decision=${decisionId} variant=${m.variant} (${m.why}) gap=${id} verdict=mixed test_file=${c.testFile} cases=[${calls}] -> left as it is (a case fails outside its child scripts)`);
+      return { verdict: "mixed", variant: m.variant, wrote: false };
+    }
+    const outcome = m.variant === 1 ? `localized to repos/${c.vessel}/${c.testFile}` : "would localize to the test file (variant-0: no write)";
+    console.log(`${TDL_LOG} decision=${decisionId} variant=${m.variant} (${m.why}) gap=${id} verdict=test_defect test_file=${c.testFile} prior_edit_site=${String(gapEditSite(row, metaOf(row)) ?? "none")} cases=[${calls}] -> ${outcome}`);
+    if (m.variant !== 1 || dryRun) return { verdict: "test_defect", variant: m.variant, wrote: false };
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: testDefectLocalizationWrite(row, c, cls, decisionId, nowIso) } as never);
+    if (w.shape === "structuredError") { console.warn(`${TDL_LOG} write refused for ${id}: ${JSON.stringify(w.body).slice(0, 200)}`); return { verdict: "test_defect", variant: 1, wrote: false }; }
+    const vid = testDefectLocalizationVariantId(1);
+    void (tdlDeps.postTrace ?? ((t: Record<string, unknown>) => postConsumerTrace(t, "test-defect-localization")))({
+      execution_id: decisionId, template_id: vid, activity_id: vid, activity_variant_id: vid, status: "completed", success: true, started_at: nowIso, duration_ms: 0,
+      input_shapes: ["substrateGap"], output_shapes: ["testDefectLocalization"],
+      tasks: [{ id: "localize-test-defect", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`testDefectLocalization:${decisionId}`] }],
+      tags: ["test_defect_localization_variant:1"],
+      metadata: { testDefectLocalization: { gap_id: id, vessel: c.vessel, test_file: c.testFile, prior_edit_site: gapEditSite(row, metaOf(row)) ?? null, cases: cls.cases.length, decided_at: nowIso } },
+    }).then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${TDL_LOG} own trace of ${decisionId} not posted (http=${st ?? "none"})`); })
+      .catch((err) => console.warn(`${TDL_LOG} own trace of ${decisionId} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+    return { verdict: "test_defect", variant: 1, wrote: true };
+  } catch (err) {
+    console.warn(`${TDL_LOG} decision failed for ${String(row["id"])} (${String((err as Error)?.message ?? err).slice(0, 160)}): nothing written`);
+    return null;
+  }
+}
+
 // ONE PASS AT A TIME IN THIS PROCESS, AND AN UNDUE PASS AT MOST ONCE PER bookkeeping_min_interval_s. The conductor
 // asks for the bookkeeping on every pass (a heartbeat drives it about twice a minute), and two overlapping passes
 // would read the same settled_attempts and debit one attempt twice. Kept in process memory, never on the rhythm row:
@@ -2004,6 +2148,20 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (!pointer.dry_run) await writeMeta(row, ownCheckUnarmMeta(own, nowIso));
   }
 
+  // A ROW WHOSE OWN CHECK IS RED ONLY BECAUSE A CHILD SCRIPT THE TEST RUNS DOES NOT PARSE is localized to its test file
+  // (testDefectLocalizationDecision). Only when due, bounded by max_per_tick like the localization below.
+  const testDefects: Array<{ id: string; verdict: string; variant: number; wrote: boolean }> = [];
+  if (dispatchDue) {
+    for (const row of open) {
+      const id = String(row["id"]);
+      if (touched.has(id) || testDefects.length >= perTick) continue;
+      const d = await testDefectLocalizationDecision(row, nowIso, pointer.dry_run === true);
+      if (!d) continue;
+      testDefects.push({ id, ...d });
+      if (d.wrote) touched.add(id);
+    }
+  }
+
   // A NARROWED CHILD CARRYING ITS PARENT'S ARMED LEDGER IS GIVEN ITS OWN. Before the inherit fix (narrowedChildRecord,
   // NARROWED_INHERIT_NEVER) a child was minted with a copy of the parent's check_supply, so it reads armed with the
   // parent's armed_at and dispatch id: the dispatch step skips armed rows, and the child, whose falsifier is its own and
@@ -2420,6 +2578,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       control_marked: controlMarked,
       localized,
       ...(unarmedOwnCheck.length ? { unarmed_own_check: unarmedOwnCheck } : {}),
+      ...(testDefects.length ? { test_defects: testDefects } : {}),
       ...(clearedInherited.length ? { cleared_inherited: clearedInherited } : {}),
       outcomes,
       ...(scopeUnread ? { scope_unread: scopeUnread } : {}),

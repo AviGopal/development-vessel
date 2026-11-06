@@ -178,6 +178,7 @@ import { srcReaderAt } from "./check-supply-admission.js";
 import * as armPredicates from "./check-supply-admission.js";
 import { hostname as callerCutHost } from "node:os";
 import { resolvePoolImpulse as callerCutPool } from "./pool-impulse.js";
+import { certifyTestDefectDraft, childScripts, TEST_DEFECT_CERTIFIER_SHAPE, type TestDefectCertificate } from "../lib/child-script-parse.js";
 
 /**
  * THE CALLER WHO STOPPED WAITING (USER: "Operator: fix 1"). goal-host waits a bounded time for a compose and, when it
@@ -5174,12 +5175,124 @@ export function systemAuthoredDissentHold(dissent: SemanticDissent | null | unde
 export function legacyParkVerdictRefusal(judgeAddresses: unknown, directed: unknown): boolean {
   return directed !== true && judgeAddresses !== true;
 }
+/**
+ * A TEST-ONLY DRAFT OF A TEST-DEFECT ROW IS ADMITTED ONLY BY A DISTINCT CHECK (development-vessel:test-defect-admission).
+ * A row the test-defect localization re-sited to its test file (gap-check-supply testDefectLocalizationDecision: its own
+ * check is red because a child script the test runs does not parse) can only be fixed by editing the file its own check
+ * runs, which a green own check can never certify alone: a draft could green it by deleting what it measures. Taken in
+ * verify, for a draft that turned the own check green and edited the check file, when the row's test_defect certifier
+ * names that file.
+ *   - variant-0 (the control): refused as a draft that edits its own check is today; the decision is logged
+ *     "would certify". It posts no trace.
+ *   - variant-1: admitted only when the draft edits nothing but that file and the child-parse certifier
+ *     (child-script-parse certifyTestDefectDraft) is red on the parent and green on the draft with no case, child
+ *     script or skip mark removed or added; the compose's own contract check still refuses fewer expect( sites. A
+ *     certified draft is not vetoed as self_certification (semanticGateDisposition); every other row is unchanged.
+ * The row's own check still closes it. Each decision logs one line. Under variant-1 the decision is a trace (output
+ * testDefectAdmission) and so is the localization's credit (its consumer: reached = this draft was certified and its own
+ * check went red -> green). The admission's own grade is the landing's own check green after it lands (the pending-land
+ * sweep closing the row), joined by the gap id the decision trace carries.
+ */
+export const TEST_DEFECT_ADMISSION_ACTIVITY = "development-vessel:test-defect-admission";
+export const testDefectAdmissionVariantId = (variant: number): string => (variant === 0 ? TEST_DEFECT_ADMISSION_ACTIVITY : `${TEST_DEFECT_ADMISSION_ACTIVITY}-v${variant}`);
+const TEST_DEFECT_LOCALIZATION_CREDIT = "development-vessel:test-defect-localization-credit";
+const TDA_LOG = `[${TEST_DEFECT_ADMISSION_ACTIVITY}]`;
+type TdaMaskRow = { id?: string; body?: unknown };
+export type TestDefectAdmissionDeps = { readMasks?: () => TdaMaskRow[]; postTrace?: (t: Record<string, unknown>) => Promise<number | null> };
+let tdaDeps: TestDefectAdmissionDeps = {};
+let tdaSeq = 0;
+/** Tests only: the seams the test-defect admission uses. null restores the real ones. */
+export function __setTestDefectAdmissionDepsForTests(d: TestDefectAdmissionDeps | null): void { tdaDeps = d ?? {}; }
+/** The variant in force for the admission at `nowIso`. None, an unknown variant or an unreadable pool: variant-0. */
+export function testDefectAdmissionVariant(nowIso: string): { variant: number; why: string } {
+  let rows: TdaMaskRow[];
+  try {
+    rows = (tdaDeps.readMasks ?? (() => callerCutPool({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as TdaMaskRow[]))();
+  } catch (err) {
+    return { variant: 0, why: `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0` };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== TEST_DEFECT_ADMISSION_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+/** The row's test_defect record when its certifier names `testFile` in `vessel`, else null. */
+export function testDefectRecordFor(meta: Record<string, unknown>, testFile: string, vessel: string): { decision_id: string | null } | null {
+  const td = meta["test_defect"] as { decision_id?: unknown; certifier?: { shape?: unknown; test_file?: unknown; vessel?: unknown } } | null | undefined;
+  const c = td && typeof td === "object" ? td.certifier : undefined;
+  if (!c || c.shape !== TEST_DEFECT_CERTIFIER_SHAPE || c.test_file !== testFile) return null;
+  if (typeof c.vessel === "string" && c.vessel !== vessel.replace(/^repos\//, "")) return null;
+  return { decision_id: typeof td!.decision_id === "string" ? td!.decision_id : null };
+}
+const tdaPost = (t: Record<string, unknown>, what: string): void => {
+  void (tdaDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "test-defect-admission")))(t)
+    .then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${TDA_LOG} ${what} not posted (http=${st ?? "none"})`); })
+    .catch((err) => console.warn(`${TDA_LOG} ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+};
+/**
+ * THE DECISION for a green draft that edited its test_defect row's check file. `editedRel` / `createdRel` are the
+ * vessel-relative files the draft edited and created; `baseRed` the own check's red names on the parent. Returns the
+ * contract breach that refuses the draft, or null when it is admitted. Never throws (a failure refuses).
+ */
+export function testDefectAdmissionDecision(a: { gap_id: string; vessel: string; test_file: string; record: { decision_id: string | null }; editedRel: string[]; createdRel: string[]; parentSrc: string; draftSrc: string; baseRed: string[] | null; nowIso: string }): { breach: string | null; variant: number; certificate: TestDefectCertificate | null } {
+  try {
+    const m = testDefectAdmissionVariant(a.nowIso);
+    const decisionId = `test-defect-admission-${a.gap_id.replace(/[^a-zA-Z0-9]+/g, "-").slice(0, 80)}-${Date.parse(a.nowIso)}-${process.pid}-${++tdaSeq}`;
+    const cert = certifyTestDefectDraft(a.parentSrc, a.draftSrc);
+    const others = [...a.editedRel.filter((p) => p !== a.test_file), ...a.createdRel];
+    let breach: string | null;
+    if (m.variant !== 1) breach = `test-defect admission variant-0: a draft that edits its own check file ${a.test_file} is not admitted (the row's certifier is not in force)`;
+    else if (others.length > 0) breach = `the draft of a test-defect row may edit only its test file ${a.test_file}; it also touches ${others.slice(0, 3).join(", ")}`;
+    else breach = cert.ok ? null : `the child-parse certifier refuses this draft: ${cert.reason}`;
+    const outcome = m.variant !== 1 ? `would certify (certifier ${cert.ok ? "passes" : "refuses"}: ${cert.reason}); refused as before` : breach === null ? "admitted: certified by the child-parse check" : `refused: ${breach}`;
+    console.log(`${TDA_LOG} decision=${decisionId} variant=${m.variant} (${m.why}) gap=${a.gap_id} vessel=${a.vessel} test_file=${a.test_file} parent=${JSON.stringify(cert.parent)} draft=${JSON.stringify(cert.draft)} -> ${outcome}`);
+    if (m.variant === 1) {
+      const vid = testDefectAdmissionVariantId(1);
+      tdaPost({
+        execution_id: decisionId, template_id: vid, activity_id: vid, activity_variant_id: vid, status: "completed", success: true, started_at: a.nowIso, duration_ms: 0,
+        input_shapes: ["test_suite"], output_shapes: ["testDefectAdmission"],
+        tasks: [{ id: "certify-test-defect-draft", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`testDefectAdmission:${decisionId}`] }],
+        tags: ["test_defect_admission_variant:1", `admitted:${breach === null}`],
+        metadata: { testDefectAdmission: { gap_id: a.gap_id, vessel: a.vessel, test_file: a.test_file, admitted: breach === null, breach, parent: cert.parent, draft: cert.draft, decided_at: a.nowIso } },
+      }, `own trace of ${decisionId}`);
+      // The localization's consumer: its re-siting was right when a test-only draft of the file was certified and
+      // turned the own check red -> green.
+      if (a.record.decision_id) {
+        const ok = breach === null && Array.isArray(a.baseRed) && a.baseRed.length > 0;
+        const impulse = `testDefectLocalization:${a.record.decision_id}`;
+        tdaPost({
+          execution_id: a.record.decision_id.replace(/^test-defect-localization-/, "test-defect-localization-credit-") + `-${tdaSeq}`,
+          template_id: TEST_DEFECT_LOCALIZATION_CREDIT, activity_id: TEST_DEFECT_LOCALIZATION_CREDIT, activity_variant_id: TEST_DEFECT_LOCALIZATION_CREDIT,
+          status: ok ? "completed" : "failed", success: ok,
+          ...(ok ? {} : { failure_mode: { type: "verifier_negative", reason: breach ?? "the own check was not red on the parent" } }),
+          started_at: a.nowIso, duration_ms: 0, composition_chain: [a.record.decision_id],
+          tasks: [{ id: "compose-of-the-row", resolver_id: "deterministic", resolver_tier: "deterministic", success: ok, input_impulse_ids: [impulse], output_impulse_ids: [],
+            consumed_provenance: [{ impulse_id: impulse, producer_execution_id: a.record.decision_id, origin: "ancestor" }] }],
+          tags: [ok ? "reached:true" : "reached:false"],
+          metadata: { producer_execution_id: a.record.decision_id, gap_id: a.gap_id, admission_decision: decisionId },
+        }, `credit of ${a.record.decision_id}`);
+      }
+    }
+    return { breach, variant: m.variant, certificate: cert };
+  } catch (err) {
+    const why = String((err as Error)?.message ?? err).slice(0, 160);
+    console.warn(`${TDA_LOG} decision failed for ${a.gap_id} (${why}): refused`);
+    return { breach: `test-defect admission failed (${why}): refused`, variant: 0, certificate: null };
+  }
+}
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {
   return !!oc && oc.ran && oc.tc_ok && Array.isArray(oc.base_red) && oc.base_red.length > 0 && oc.draft_red.length === 0 && !oc.contract_breach;
 }
 /** What the semantic gate's verdict means for this draft: land, land under dissent, or veto (and why). Pure. */
-export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_check: OwnCheckEvidence | null; diff: string; edit_site: string | null; src_files: Record<string, string> }): SemanticDisposition {
+export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_check: OwnCheckEvidence | null; diff: string; edit_site: string | null; src_files: Record<string, string>; test_defect_certified?: boolean }): SemanticDisposition {
   const g = input.gate;
   const refuse = (veto: SemanticVeto): SemanticDisposition => ({ land: false, veto, landed_unverified: false, post_land_by_effect_check: "not_required" });
   if (g.addresses && g.on_live_path !== false) return { land: true, veto: null, landed_unverified: false, post_land_by_effect_check: "not_required" };
@@ -5189,7 +5302,9 @@ export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_
   if (!ownCheckWentRedToGreen(oc)) return refuse("semantic_reject");
   const paths = diffFilePaths(input.diff);
   if (paths.length === 0) return refuse("semantic_reject");
-  if (paths.every((p) => TEST_FILE_RE.test(p) || FIXTURE_PATH_RE.test(p) || p === oc!.test_file)) return refuse("self_certification");
+  // A test-only draft of a test-defect row that the child-parse certifier admitted (testDefectAdmissionDecision) is
+  // certified by a check distinct from its own: not self-certification.
+  if (input.test_defect_certified !== true && paths.every((p) => TEST_FILE_RE.test(p) || FIXTURE_PATH_RE.test(p) || p === oc!.test_file)) return refuse("self_certification");
   if (hollowWriteIdentifiers(input.diff, input.src_files).length > 0) return refuse("hollow_write");
   const site = editSiteFile(input.edit_site);
   if (site && !paths.some((p) => p === site || p.endsWith(`/${site}`) || site.endsWith(`/${p}`))) return refuse("edit_site_missed");
@@ -5634,7 +5749,7 @@ function ownCheckNamedBodies(source: string, onlyTests: string[]): { bodies: str
   }
   return { bodies, unlocated };
 }
-export type OwnCheckGrounding = { vessel: string; test_file: string; only_tests: string[]; source: string; block: string; root: string };
+export type OwnCheckGrounding = { vessel: string; test_file: string; only_tests: string[]; source: string; block: string; root: string; /** A test-defect row under the admission's variant-1: the check is the edit site, and its imports are not targets. */ test_defect?: true };
 /** A vessel's root in the vessel clone: the default, and the fallback after the root verify runs the check in. */
 const ownCheckCloneRoot = (vessel: string): string => `${vesselCloneRootForChecks()}/${vessel}`;
 /** The gap's own check as the drafter would be shown it: none (the gap has no own check), unreadable (it names a
@@ -5681,6 +5796,18 @@ export function readOwnCheckGrounding(meta: Record<string, unknown>, rootFor: (v
     shown = text.length <= PER_FILE_SLICE ? text : `${text.slice(0, PER_FILE_SLICE)}\n… (truncated)`;
   }
   const what = own.only_tests.length > 0 ? `its ${own.only_tests.length} named test(s)` : "this file";
+  // A TEST-DEFECT ROW under the admission's variant-1: the check file IS the edit site, and the drafter is told what the
+  // child-parse certifier admits. Every other row's block is unchanged.
+  if (testDefectRecordFor(meta, own.test_file, vessel) && testDefectAdmissionVariant(new Date().toISOString()).variant === 1) {
+    const bad = childScripts(source).filter((c) => c.error !== null);
+    const lines = bad.slice(0, 5).map((c) => `  - line ${source.slice(0, c.offset).split("\n").length}: ${c.error}`).join("\n");
+    const tdBlock = `THE GAP'S OWN CHECK IS ITS EDIT SITE — repos/${vessel}/${own.test_file} (A TEST DEFECT: EDIT THIS FILE ONLY).\n`
+      + `The defect is in this test, not in src: a child script it passes to \`bun --eval\` as a template literal does not parse once the template is cooked (an escape such as \\n in the template becomes a real newline in the child's source, so a quoted string in the child is unterminated). `
+      + `Fix each child script so it parses (for example, double the escape) and ${what} MUST PASS. Keep every test case, every expect() and every child script; do not add .skip, .todo or .only, and do not edit any other file: a draft is admitted only when every child script parses on it and one did not on the parent.\n`
+      + (lines ? `Child scripts that do not parse now:\n${lines}\n` : "")
+      + renderWindowForDrafter(shown);
+    return { state: "shown", ctx: { vessel, test_file: own.test_file, only_tests: own.only_tests, source, block: tdBlock, root, test_defect: true } };
+  }
   const block = `THE GAP'S OWN CHECK — repos/${vessel}/${own.test_file} (READ-ONLY CONTEXT; NOT A TARGET FILE).\n`
     + `This test is what your draft is judged by: after your change ${what} MUST PASS. Bind the change to the API it calls, the option names it passes and the identifiers it imports. `
     + `Do NOT edit this file or any other test: a draft that edits it is refused, however green it makes the check.\n${renderWindowForDrafter(shown)}`;
@@ -8371,7 +8498,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   // below): an added target outside every grounded vessel would trip the blind-window refusal.
   const ownCheckVesselGrounded = !!ownCheckCtx && (verifyVessels.length === 0 || verifyVessels.some((v) => v.replace(/^repos\//, "") === ownCheckCtx.vessel));
   if (ownCheckCtx && !ownCheckVesselGrounded) console.log(`[fc-own-check-grounding] check vessel ${ownCheckCtx.vessel} is not in verify_vessels [${verifyVessels.join(", ")}]; its imports are not added as targets`);
-  if (ownCheckCtx && ownCheckVesselGrounded) {
+  if (ownCheckCtx && ownCheckVesselGrounded && ownCheckCtx.test_defect !== true) {
     // Resolved in the tree the check was read from: its relative imports name files beside it.
     // The baseline's call-path files follow the check's imports, under the same scope partition (targetFiles[0] stays the edit_site).
     const imports = [...new Set([...ownCheckImportedModules(ownCheckCtx, () => ownCheckCtx.root), ...(ownCheckCtx.vessel === composeBaseline?.vessel ? baselineCallPathFiles : [])])];
@@ -10441,6 +10568,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const ownCheckRan: string[] = [];
   // Per-vessel own-check evidence, read by the semantic-gate disposition (semanticGateDisposition).
   const ownEvidence = new Map<string, OwnCheckEvidence>();
+  // The vessels whose draft the test-defect admission certified (testDefectAdmissionDecision): the semantic gate's
+  // self_certification veto does not apply to them.
+  const testDefectCertified = new Set<string>();
   // The gap's own check on the untouched parent (a detached worktree at HEAD; the draft is uncommitted).
   // One run per (gap, vessel, base sha, check): the green-draft contract and the red-draft no-effect
   // comparison share it. An unjudgeable run is not cached.
@@ -10870,6 +11000,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
               const before = staticExpectCount(parentSrc), after = staticExpectCount(draftSrc);
               ownExpects = { ...ownExpects, static_base: before, static_draft: after } as typeof ownExpects;
               if (after < before) contractBreach = `the draft removes assertion sites from the check file itself (${before} -> ${after} expect( calls in source)`;
+            }
+            // A TEST-DEFECT ROW's draft of its check file: admitted only by the child-parse certifier (variant-1).
+            const tdRecord = testDefectRecordFor(gapMeta, own.test_file, v);
+            if (tdRecord && !contractBreach) {
+              const createdRel = created.filter((p) => p.startsWith(vAbs + "/")).map((p) => p.slice(vAbs.length + 1));
+              const td = testDefectAdmissionDecision({ gap_id: String(pointer.gap?.id ?? ""), vessel: v.replace(/^repos\//, ""), test_file: own.test_file, record: tdRecord, editedRel, createdRel, parentSrc, draftSrc, baseRed: ownBaseRed, nowIso: new Date().toISOString() });
+              if (td.breach) contractBreach = td.breach; else testDefectCertified.add(v);
             }
           }
           // An unjudgeable parent is an anomaly in an isolated compose (worktree add failed, timeout): the rule
@@ -11745,6 +11882,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         diff,
         edit_site: typeof editSiteMeta.edit_site === "string" ? editSiteMeta.edit_site : null,
         src_files: dispositionSrc,
+        test_defect_certified: [...touched].some((v) => testDefectCertified.has(v)),
       });
       if (disposition.semantic_dissent) {
         semanticDissent = disposition.semantic_dissent;

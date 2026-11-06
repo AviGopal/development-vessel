@@ -1381,6 +1381,10 @@ export function __setTestDefectLocalizationDepsForTests(d: TestDefectLocalizatio
 /** The variant in force for the localization at `nowIso`: the first open activityVariantMask row for it whose
  *  [from, until) holds now. None, an unknown variant or an unreadable pool: variant-0. Never throws. */
 export function testDefectLocalizationVariant(nowIso: string): { variant: number; why: string } {
+  return tdMaskVariant(TEST_DEFECT_LOCALIZATION_ACTIVITY, nowIso);
+}
+/** The variant in force for `activityId` at `nowIso`, read from the activityVariantMask pool rows (the seam above). */
+function tdMaskVariant(activityId: string, nowIso: string): { variant: number; why: string } {
   let rows: TdMaskRow[];
   try {
     rows = (tdlDeps.readMasks ?? (() => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as TdMaskRow[]))();
@@ -1390,7 +1394,7 @@ export function testDefectLocalizationVariant(nowIso: string): { variant: number
   const now = Date.parse(nowIso);
   for (const r of rows) {
     const b = (r?.body ?? {}) as Record<string, unknown>;
-    if (b["activity_id"] !== TEST_DEFECT_LOCALIZATION_ACTIVITY) continue;
+    if (b["activity_id"] !== activityId) continue;
     const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
     if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
     const v = b["active_variant"];
@@ -1481,6 +1485,71 @@ export async function testDefectLocalizationDecision(row: Row, nowIso: string, d
     console.warn(`${TDL_LOG} decision failed for ${String(row["id"])} (${String((err as Error)?.message ?? err).slice(0, 160)}): nothing written`);
     return null;
   }
+}
+
+/**
+ * WHAT THE TEST-DEFECT PASS'S PER-TICK BUDGET COUNTS (activity development-vessel:test-defect-localization-budget).
+ * Variant-0 counts every decision against max_per_tick, so a decision that writes nothing (variant-0 of the
+ * localization, or a mixed row, which is never written) spends a slot on every pass: the same first rows in store order
+ * fill the budget forever and a row behind them is never decided (on both nodes, 3 per pass = max_per_tick 3, and the
+ * narrowed root never decided). Variant-1 counts only writes against max_per_tick, and bounds the decisions a pass makes
+ * by the rhythm's test_defect_decide_max, so every candidate up to that bound is decided each pass. Both variants count
+ * the candidates the budget left undecided and log one line per pass; variant-1 posts it as a trace (output
+ * testDefectLocalizationBudget). Its grade is its consumer's: a row decided this pass that a variant-0 pass leaves
+ * undecided, read off the localization's own decision lines.
+ */
+export const TEST_DEFECT_BUDGET_ACTIVITY = "development-vessel:test-defect-localization-budget";
+export const testDefectBudgetVariantId = (variant: number): string => (variant === 0 ? TEST_DEFECT_BUDGET_ACTIVITY : `${TEST_DEFECT_BUDGET_ACTIVITY}-v${variant}`);
+/** The default bound on decisions per pass under variant-1 (the rhythm's test_defect_decide_max overrides it). */
+export const TEST_DEFECT_DECIDE_MAX = 20;
+const TDB_LOG = `[${TEST_DEFECT_BUDGET_ACTIVITY}]`;
+let tdbSeq = 0;
+export type TestDefectPassEntry = { id: string; verdict: string; variant: number; wrote: boolean };
+type TestDefectDecide = (row: Row, nowIso: string, dryRun: boolean) => ReturnType<typeof testDefectLocalizationDecision>;
+/** The variant in force for the pass's budget at `nowIso` (the localization's mask seam). */
+export function testDefectBudgetVariant(nowIso: string): { variant: number; why: string } {
+  return tdMaskVariant(TEST_DEFECT_BUDGET_ACTIVITY, nowIso);
+}
+/** One due pass over the open rows. `decide` is the localization's decision (a seam for tests). Never throws. */
+export async function testDefectPass(a: { open: Row[]; touched: Set<string>; perTick: number; decideMax: number; nowIso: string; dryRun: boolean; decide?: TestDefectDecide }): Promise<{ decisions: TestDefectPassEntry[]; budget: Record<string, unknown> }> {
+  const decide = a.decide ?? testDefectLocalizationDecision;
+  const m = testDefectBudgetVariant(a.nowIso);
+  const decisions: TestDefectPassEntry[] = [];
+  const decidedIds = new Set<string>();
+  let wrote = 0;
+  const spent = (): boolean => (m.variant === 1 ? wrote >= a.perTick || decisions.length >= Math.max(a.perTick, a.decideMax) : decisions.length >= a.perTick);
+  for (const row of a.open) {
+    const id = String(row["id"]);
+    if (a.touched.has(id) || spent()) continue;
+    const d = await decide(row, a.nowIso, a.dryRun);
+    if (!d) continue;
+    decisions.push({ id, ...d });
+    decidedIds.add(id);
+    if (d.wrote) { a.touched.add(id); wrote += 1; }
+  }
+  // The candidates the budget left undecided this pass (testDefectCandidate is pure; nothing is classified or read).
+  let undecided = 0;
+  for (const row of a.open) {
+    const id = String(row["id"]);
+    if (!decidedIds.has(id) && !a.touched.has(id) && testDefectCandidate(row) !== null) undecided += 1;
+  }
+  const budget = { variant: m.variant, per_tick: a.perTick, decide_max: m.variant === 1 ? Math.max(a.perTick, a.decideMax) : a.perTick, decided: decisions.length, wrote, undecided_candidates: undecided, decided_at: a.nowIso };
+  if (decisions.length > 0 || undecided > 0) {
+    const passId = `test-defect-localization-budget-${Date.parse(a.nowIso)}-${process.pid}-${++tdbSeq}`;
+    console.log(`${TDB_LOG} pass=${passId} variant=${m.variant} (${m.why}) per_tick=${a.perTick} counts=${m.variant === 1 ? "writes" : "decisions"} decided=${decisions.length} wrote=${wrote} undecided_candidates=${undecided}`);
+    if (m.variant === 1) {
+      const vid = testDefectBudgetVariantId(1);
+      void (tdlDeps.postTrace ?? ((t: Record<string, unknown>) => postConsumerTrace(t, "test-defect-localization-budget")))({
+        execution_id: passId, template_id: vid, activity_id: vid, activity_variant_id: vid, status: "completed", success: true, started_at: a.nowIso, duration_ms: 0,
+        input_shapes: ["substrateGap"], output_shapes: ["testDefectLocalizationBudget"],
+        tasks: [{ id: "budget-test-defect-pass", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`testDefectLocalizationBudget:${passId}`] }],
+        tags: ["test_defect_localization_budget_variant:1"],
+        metadata: { testDefectLocalizationBudget: { ...budget, decided_ids: [...decidedIds].slice(0, 50) } },
+      }).then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${TDB_LOG} trace of ${passId} not posted (http=${st ?? "none"})`); })
+        .catch((err) => console.warn(`${TDB_LOG} trace of ${passId} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+    }
+  }
+  return { decisions, budget };
 }
 
 // ONE PASS AT A TIME IN THIS PROCESS, AND AN UNDUE PASS AT MOST ONCE PER bookkeeping_min_interval_s. The conductor
@@ -2149,18 +2218,11 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
   }
 
   // A ROW WHOSE OWN CHECK IS RED ONLY BECAUSE A CHILD SCRIPT THE TEST RUNS DOES NOT PARSE is localized to its test file
-  // (testDefectLocalizationDecision). Only when due, bounded by max_per_tick like the localization below.
-  const testDefects: Array<{ id: string; verdict: string; variant: number; wrote: boolean }> = [];
-  if (dispatchDue) {
-    for (const row of open) {
-      const id = String(row["id"]);
-      if (touched.has(id) || testDefects.length >= perTick) continue;
-      const d = await testDefectLocalizationDecision(row, nowIso, pointer.dry_run === true);
-      if (!d) continue;
-      testDefects.push({ id, ...d });
-      if (d.wrote) touched.add(id);
-    }
-  }
+  // (testDefectLocalizationDecision). Only when due, bounded by max_per_tick like the localization below; what the
+  // budget counts is the activity development-vessel:test-defect-localization-budget (testDefectPass).
+  const testDefects: TestDefectPassEntry[] = dispatchDue
+    ? (await testDefectPass({ open, touched, perTick, decideMax: Math.floor(posNum(rhythm.body["test_defect_decide_max"], TEST_DEFECT_DECIDE_MAX)), nowIso, dryRun: pointer.dry_run === true })).decisions
+    : [];
 
   // A NARROWED CHILD CARRYING ITS PARENT'S ARMED LEDGER IS GIVEN ITS OWN. Before the inherit fix (narrowedChildRecord,
   // NARROWED_INHERIT_NEVER) a child was minted with a copy of the parent's check_supply, so it reads armed with the

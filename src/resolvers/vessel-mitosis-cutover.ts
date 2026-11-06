@@ -710,6 +710,8 @@ export type BaselineGateDeps = {
   readMasks?: () => BgMaskRow[];
   postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
   nowMs?: () => number;
+  /** post-land-baseline-keep's pending decisions, in place of VOLUME_ROOT/post-land-baseline-keep-pending.json. */
+  pendingFile?: string;
 };
 let bgDeps: BaselineGateDeps = {};
 let bgSeq = 0;
@@ -828,6 +830,108 @@ export function settlePrecutoverBaselineBaseTree(d: PrecutoverBaselineDecision |
       metadata: { producer_execution_id: d.traceId, variant: d.variant, used: d.used, landed_sha: landedSha, outside: outside.slice(0, 8), outside_count: outside.length },
     }, `credit of ${d.traceId}`);
     console.log(`${PBB_LOG} settled ${d.traceId} reached=${ok} used=${d.used} outside=${outside.length} landed_sha=${String(landedSha).slice(0, 12)}`);
+  } catch { /* the credit never changes a cutover */ }
+}
+
+/**
+ * A LANDED REGRESSION IS NOT WRITTEN INTO THE NEXT LANDING'S BASELINE (development-vessel:post-land-baseline-keep). The
+ * post-land suite wrote its whole failing set as the vessel's baseline even when it had just found tests NEWLY failing
+ * after the landing, so the next pre-cutover gate read the regression as standing red and passed it.
+ *   - variant-0 (the control): written as before; the decision is logged "would keep out".
+ *   - variant-1: the written set is the failing set less the newly failing names (postLandBaselineToWrite), so the
+ *     regression stays newly failing for the next landing's gate, and names that went green leave the baseline.
+ * Decided only when the post-land suite ran against a current baseline and found something newly failing; any other
+ * landing reads no mask and logs nothing new. Each decision logs one line and is kept pending in a file (the vessel may
+ * restart before its consumer). Its grade is decided by its consumer, the next pre-cutover gate on that vessel
+ * (settlePostLandBaselineKeep): the baseline it reads is usable and none of the withheld names is still failing while
+ * hidden by that baseline -> reached; an unusable baseline -> not reached; no gate within 72 h -> ungraded, logged.
+ * Under variant-1 the decision and its credit are traces (output postLandBaseline); variant-0 posts none.
+ */
+export const POST_LAND_BASELINE_KEEP_ACTIVITY = "development-vessel:post-land-baseline-keep";
+export const POST_LAND_BASELINE_KEEP_CREDIT_ACTIVITY = "development-vessel:post-land-baseline-keep-credit";
+export const postLandBaselineKeepVariantId = (variant: number): string => (variant === 0 ? POST_LAND_BASELINE_KEEP_ACTIVITY : `${POST_LAND_BASELINE_KEEP_ACTIVITY}-v${variant}`);
+const PLK_LOG = `[${POST_LAND_BASELINE_KEEP_ACTIVITY}]`;
+const PLK_CREDIT_WINDOW_MS = 72 * 3_600_000;
+type PlkPending = { traceId: string; vessel: string; variant: number; withheld: string[]; decidedAtMs: number; landedSha: string };
+const plkPendingFile = (): string => bgDeps.pendingFile ?? join(VOLUME_ROOT, "post-land-baseline-keep-pending.json");
+function plkLoad(): PlkPending[] {
+  try {
+    const j = JSON.parse(readFileSync(plkPendingFile(), "utf8")) as unknown;
+    return Array.isArray(j) ? j.filter((r): r is PlkPending => !!r && typeof r.traceId === "string" && typeof r.vessel === "string" && Array.isArray(r.withheld) && Number.isFinite(r.decidedAtMs)) : [];
+  } catch { return []; }
+}
+function plkSave(rows: PlkPending[]): void {
+  try {
+    const file = plkPendingFile();
+    writeFileSync(`${file}.tmp`, JSON.stringify(rows));
+    renameSync(`${file}.tmp`, file);
+  } catch (err) { console.warn(`${PLK_LOG} pending decisions not saved: ${String((err as Error)?.message ?? err).slice(0, 160)}`); }
+}
+/** The failing set the post-land suite writes as the baseline: under variant-1, less the newly failing names. */
+export function postLandBaselineToWrite(failNow: readonly string[], newly: readonly string[], variant: number): string[] {
+  if (variant !== 1) return failNow.map(String);
+  const out = new Set(newly.map(String));
+  return failNow.map(String).filter((t) => !out.has(t));
+}
+/** THE DECISION, after a post-land suite that ran against a current baseline and found `newly` failing. Returns the set
+ *  to write. Never throws (a failure is variant-0). */
+export function postLandBaselineKeepDecision(a: { vessel: string; failNow: readonly string[]; newly: readonly string[]; landedSha: string }): string[] {
+  try {
+    const now = bgNowMs();
+    const nowIso = new Date(now).toISOString();
+    const m = baselineGateVariant(POST_LAND_BASELINE_KEEP_ACTIVITY, nowIso);
+    const write = postLandBaselineToWrite(a.failNow, a.newly, m.variant);
+    const traceId = `post-land-baseline-keep-${String(a.vessel).replace(/[^a-zA-Z0-9]+/g, "-")}-${String(a.landedSha).slice(0, 12)}-${now}-${process.pid}-${++bgSeq}`;
+    const outcome = m.variant === 1 ? `kept ${a.newly.length} newly failing out of the baseline` : "would keep the newly failing out (variant-0: written as before)";
+    console.log(`${PLK_LOG} decision=${traceId} variant=${m.variant} (${m.why}) vessel=${a.vessel} landed_sha=${a.landedSha} failing=${a.failNow.length} newly=${a.newly.length} written=${write.length} -> ${outcome}`);
+    const id = postLandBaselineKeepVariantId(m.variant);
+    if (m.variant !== 0) bgPost(PLK_LOG, {
+      execution_id: traceId, template_id: id, activity_id: id, activity_variant_id: id, status: "completed", success: true, started_at: nowIso, duration_ms: 0,
+      input_shapes: ["test_suite"], output_shapes: ["postLandBaseline"],
+      tasks: [{ id: "write-baseline", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`postLandBaseline:${traceId}`] }],
+      tags: [`post_land_baseline_keep_variant:${m.variant}`],
+      metadata: { postLandBaseline: { variant: m.variant, vessel: a.vessel, landed_sha: a.landedSha, failing: a.failNow.length, newly: a.newly.slice(0, 8), newly_count: a.newly.length, written: write.length, decided_at: nowIso } },
+    }, `own trace of ${traceId}`);
+    const pend = plkLoad();
+    pend.push({ traceId, vessel: a.vessel, variant: m.variant, withheld: a.newly.map(String), decidedAtMs: now, landedSha: a.landedSha });
+    plkSave(pend);
+    return write;
+  } catch (err) {
+    console.warn(`${PLK_LOG} decision failed (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0, written as before`);
+    return a.failNow.map(String);
+  }
+}
+/** The next pre-cutover gate on the vessel settles its pending decisions, once it has measured the staged tree:
+ *  `unusable` is why the baseline it read is unusable (null: usable). Never throws. */
+export function settlePostLandBaselineKeep(vessel: string, a: { unusable: string | null; failNow: readonly string[]; baseline: readonly string[] | null }): void {
+  try {
+    const pend = plkLoad();
+    if (!pend.some((p) => p.vessel === vessel)) return;
+    const now = bgNowMs();
+    const failing = new Set(a.failNow.map(String));
+    const inBase = new Set((a.baseline ?? []).map(String));
+    const kept: PlkPending[] = [];
+    for (const p of pend) {
+      if (p.vessel !== vessel) { kept.push(p); continue; }
+      if (now - p.decidedAtMs > PLK_CREDIT_WINDOW_MS) { console.log(`${PLK_LOG} ungraded ${p.traceId}: no pre-cutover gate on ${vessel} within 72 h`); continue; }
+      const hidden = p.withheld.filter((t) => failing.has(t) && inBase.has(t));
+      const ok = a.unusable === null && hidden.length === 0;
+      const why = a.unusable !== null ? `the baseline the next gate read is unusable (${a.unusable})` : `${hidden.length} withheld test(s) still fail and the baseline hides them`;
+      const impulse = `postLandBaseline:${p.traceId}`;
+      if (p.variant !== 0) bgPost(PLK_LOG, {
+        execution_id: p.traceId.replace(/^post-land-baseline-keep-/, "post-land-baseline-keep-credit-"),
+        template_id: POST_LAND_BASELINE_KEEP_CREDIT_ACTIVITY, activity_id: POST_LAND_BASELINE_KEEP_CREDIT_ACTIVITY, activity_variant_id: POST_LAND_BASELINE_KEEP_CREDIT_ACTIVITY,
+        status: ok ? "completed" : "failed", success: ok,
+        ...(ok ? {} : { failure_mode: { type: "verifier_negative", reason: why } }),
+        started_at: new Date(now).toISOString(), duration_ms: 0, composition_chain: [p.traceId],
+        tasks: [{ id: "next-precutover-gate", resolver_id: "deterministic", resolver_tier: "deterministic", success: ok, input_impulse_ids: [impulse], output_impulse_ids: [],
+          consumed_provenance: [{ impulse_id: impulse, producer_execution_id: p.traceId, origin: "ancestor" }] }],
+        tags: [ok ? "reached:true" : "reached:false", `post_land_baseline_keep_variant:${p.variant}`],
+        metadata: { producer_execution_id: p.traceId, variant: p.variant, vessel, unusable: a.unusable, hidden: hidden.slice(0, 8), hidden_count: hidden.length, after_ms: now - p.decidedAtMs },
+      }, `credit of ${p.traceId}`);
+      console.log(`${PLK_LOG} settled ${p.traceId} reached=${ok} vessel=${vessel} unusable=${a.unusable ?? "none"} hidden=${hidden.length} withheld=${p.withheld.length}`);
+    }
+    plkSave(kept);
   } catch { /* the credit never changes a cutover */ }
 }
 
@@ -3825,6 +3929,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         if (precutoverBaselineForTests) { baseline = await precutoverBaselineForTests(String(vessel_name)); baselineLegacy = false; baselineUnusable = baseline === null ? "absent" : null; }
         if (baseline !== null && baseline.length === 0) baselineUnusable = "empty";
         else if (baseline === null && baselineUnusable === null) baselineUnusable = "absent";
+        // This gate is the consumer of the vessel's pending post-land-baseline-keep decisions: it read the baseline.
+        settlePostLandBaselineKeep(String(vessel_name), { unusable: baselineUnusable ?? (baselineLegacy ? "legacy" : null), failNow, baseline });
         // NO USABLE BASELINE IS A DECISION (precutoverBaselineBaseTreeDecision): variant-1 measures the base tree here.
         if (baselineUnusable !== null) {
           pbbDecision = await precutoverBaselineBaseTreeDecision({
@@ -4633,10 +4739,14 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     let _prev: string[] | null = null;
     try { const p = parsePostLandBaseline(JSON.parse(await readFile(_baseFile, "utf8"))); _prev = p && !p.legacy ? p.names : null; } catch { _prev = null; }
     const _newlyFailing = computeNewlyFailing(_prev, _failNow);
+    // A REGRESSION THIS LANDING BROUGHT IS A DECISION (postLandBaselineKeepDecision): variant-1 keeps it out of the baseline.
+    const _toWrite = sb.ran === true && _prev !== null && _newlyFailing.length > 0
+      ? postLandBaselineKeepDecision({ vessel: String(vessel_name), failNow: _failNow, newly: _newlyFailing, landedSha: String(newSha) })
+      : _failNow;
     // Only a suite that ran to its summary is a baseline: a killed run lists only part of its failures.
     if (sb.ran === true) try {
       await mkdir(_baseDir, { recursive: true });
-      await writeFile(_baseFile, JSON.stringify({ format: POST_LAND_BASELINE_FORMAT, failing: _failNow }));
+      await writeFile(_baseFile, JSON.stringify({ format: POST_LAND_BASELINE_FORMAT, failing: _toWrite }));
     } catch { /* baseline is best-effort; a missed write costs one noisy cycle, not correctness */ }
     if (_prev === null && sb.ran === true) {
       console.log(`[mitosis-cutover] post-land suite: no baseline for ${vessel_name} yet — recorded ${_failNow.length} failing test(s), filing nothing (nothing is attributable on first observation)`);

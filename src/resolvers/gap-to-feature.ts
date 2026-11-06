@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
@@ -17,7 +17,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, landingLeaseOf, landingReleaseOf } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, landingLeaseOf, landingReleaseOf, postConsumerTrace } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -27,7 +27,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 // The human-question channel the closed landing verdict asks through (qa 10.2: injected per call, never imported).
 const askHuman: Ask = (p) => resolveUiWritePassthrough(p as never);
 
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT, VOLUME_ROOT } from "../config.js";
 import { crossNodeKeyHeaders } from "../lib/self-auth.js";
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { readFile } from "node:fs/promises";
@@ -36,7 +36,7 @@ import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, editSiteIsOwnCheck, isNonAttemptComposeResult, ownCheckUnarmMeta } from "../judge/gap-eligibility.js";
 import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes, scopeHoldFor, gapInHoldLineage } from "../judge/gap-policy.js";
 import { learningTableSource, landabilityScore, originDevShaOnce, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd, heldLearningTable, setPendingPriorityDecision } from "../judge/gap-attempt-credit.js";
-import { composeExitReach } from "../judge/learning-credit.js";
+import { composeExitReach, reachGrade } from "../judge/learning-credit.js";
 import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { inheritedPredicateHolds, repoPathExists, existingEditTargets, ownCheckCallPathTargets, admitActionableGaps, orderByLandability, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps, type WouldBeChild } from "../judge/gap-admission.js";
 import { PRIORITY_TERMS, rankByTerms, sampleTermWeights, type PriorityWeights } from "./gap-priority-ranking.js";
@@ -212,6 +212,256 @@ export function lineageBackoffState(
     if (Number.isFinite(t) && (lastFailedAtMs === null || t > lastFailedAtMs)) lastFailedAtMs = t;
   }
   return { attempts, lastFailedAtMs, depth: metas.length - 1 };
+}
+
+/**
+ * LINEAGE-CAP RELEASE, the activity development-vessel:lineage-cap-release. Past RECOMMIT_LINEAGE_ATTEMPT_CAP a recommit
+ * lineage is held from the auto-pick and nothing released it: the cap held 96-131 rows a pass, about a quarter of them
+ * with a system-born root. Variant-1 admits a capped lineage past the cap when its OPEN lineage carries information newer
+ * than its last failure, read from the rows themselves:
+ *   - falsifier_classified_at, with the class now class1 or class2. The classifier keeps the old stamp when a
+ *     re-classification is identical (stampFalsifierClassification), so it moves only when the classification changed;
+ *   - check_supply.armed_at on a row still armed. An arm inherited from a parent predates the lineage's failures.
+ * Not read: predicate_birth_at (the birth sweep re-stamps it every tick for an unknown verdict), and the edit site's file
+ * (the row records no change to it). Once by construction: the released attempt's failure moves last_failed_at past the
+ * event and the cap holds again; a landing closes the row. A lineage with no last_failed_at stays capped.
+ * Variant-0 (the control) caps exactly as before and logs "would release". Which variant runs is the activityVariantMask
+ * pool impulse, read once per pick pass and only when a capped row has such an event (no row in force, or an unreadable
+ * pool: variant-0). Graded by consumption: a released row that reaches its compose posts the decision's trace and is
+ * kept pending; a compose that does not come back ok settles it at its exit (not reached), as composeExitReach grades a
+ * compose, and an ok one waits for its landing verdict (the attempt ledger's #2 regressed -> not reached, else #1 held ->
+ * reached), never its exit. A non-attempt, or no settlement within the attempt settle window, is ungraded, logged.
+ */
+export const LINEAGE_CAP_RELEASE_ACTIVITY = "development-vessel:lineage-cap-release";
+export const LINEAGE_CAP_RELEASE_CREDIT_ACTIVITY = "development-vessel:lineage-cap-release-credit";
+export const lineageCapReleaseVariantId = (variant: number): string => (variant === 0 ? LINEAGE_CAP_RELEASE_ACTIVITY : `${LINEAGE_CAP_RELEASE_ACTIVITY}-v${variant}`);
+const LCR_LOG = "[gap-to-feature] lineage-cap-release";
+type LcrMaskRow = { id?: string; body?: unknown };
+export type LineageCapReleaseDeps = {
+  readMasks?: () => LcrMaskRow[];
+  postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
+  pendingFile?: string;
+  /** The attempt ledger's attemptSettlement records for one key (`<attempt_id>#1`, `#2`). */
+  settlement?: (key: string) => Array<{ record: Record<string, unknown> }>;
+  settleWindowMs?: () => number;
+  /** The shared reach path (learning-credit reachGrade). */
+  reach?: (v: { execution_id: string; reached: boolean }, ctx: { source: "landing" | "compose_exit"; why: string; gap_id?: string }) => Promise<unknown>;
+};
+let lcrDeps: LineageCapReleaseDeps = {};
+let lastLcrPoolLog = -Infinity;
+/** Decision ids already logged by this process: the line is said once per (row, event), not once per pass. */
+const lcrLogged = new Set<string>();
+/** Tests only: the mask read and trace post seams; the once-per-process log memory is cleared. */
+export function __setLineageCapReleaseDepsForTests(d: LineageCapReleaseDeps | null): void { lcrDeps = d ?? {}; lastLcrPoolLog = -Infinity; lcrLogged.clear(); }
+
+export interface LineageCapEvidence {
+  event: "falsifier_classified" | "armed";
+  event_at: string;
+  last_failed_at: string;
+  attempts: number;
+  root: string;
+  /** The open walk's root `source`, or unresolved(<why>) when the walk ended before a row with no parent. */
+  root_source: string;
+  /** The newest failure lesson in the open lineage, its class[:stage] verbatim, or "unrecorded". */
+  last_failed_step: string;
+}
+export interface LineageCapReleaseDecision { id: string; variant: number; why: string; released: boolean; row: string; evidence: LineageCapEvidence }
+
+/** The newest information event in `gap`'s open lineage that postdates the lineage's last failure, or null. */
+export function lineageCapReleaseEvidence(gap: Record<string, unknown>, byId: Map<string, Record<string, unknown>>, maxDepth = 8): LineageCapEvidence | null {
+  const state = lineageBackoffState(gap, byId, maxDepth);
+  if (state.lastFailedAtMs === null) return null;
+  const metaOf = (r: Record<string, unknown>) => (r.classification_metadata ?? r.metadata ?? {}) as Record<string, unknown>;
+  const parentOf = (r: Record<string, unknown>) => String(metaOf(r).parent_gap_id ?? metaOf(r).source_gap_id ?? "");
+  // The same walk as lineageMetas, kept as rows: the root's `source` lives on the row, not in its metadata.
+  const rows: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let cur: Record<string, unknown> | undefined = gap;
+  while (cur && rows.length <= maxDepth) {
+    const id = String(cur.id ?? "");
+    if (id && seen.has(id)) break;
+    if (id) seen.add(id);
+    if (typeof metaOf(cur) !== "object" || metaOf(cur) === null) break;
+    rows.push(cur);
+    const pid = parentOf(cur);
+    cur = pid ? byId.get(pid) : undefined;
+  }
+  let best: { event: LineageCapEvidence["event"]; at: number } | null = null;
+  let lesson: string | null = null;
+  for (const r of rows) {
+    const m = metaOf(r);
+    const f = m.falsifier as unknown;
+    const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+    const classifiedAt = Date.parse(String(m.falsifier_classified_at ?? ""));
+    if ((cls === "class1" || cls === "class2") && classifiedAt > state.lastFailedAtMs && (best === null || classifiedAt > best.at)) best = { event: "falsifier_classified", at: classifiedAt };
+    const cs = m.check_supply as { state?: unknown; armed_at?: unknown } | null | undefined;
+    const armedAt = cs && typeof cs === "object" && cs.state === "armed" ? Date.parse(String(cs.armed_at ?? "")) : NaN;
+    if (armedAt > state.lastFailedAtMs && (best === null || armedAt > best.at)) best = { event: "armed", at: armedAt };
+    if (lesson === null && Array.isArray(m.failure_lessons) && m.failure_lessons.length > 0) {
+      const l = (m.failure_lessons[m.failure_lessons.length - 1] ?? {}) as Record<string, unknown>;
+      lesson = `${String(l.class ?? "lesson")}${l.stage ? `:${String(l.stage)}` : ""}`.slice(0, 120);
+    }
+  }
+  if (best === null) return null;
+  const root = rows[rows.length - 1] ?? gap;
+  const rootParent = parentOf(root);
+  const rootSource = !rootParent ? String(root.source ?? "unset")
+    : !byId.has(rootParent) ? `unresolved(closed ancestor ${rootParent})`
+    : `unresolved(walk stopped at ${rootParent})`;
+  return {
+    event: best.event, event_at: new Date(best.at).toISOString(), last_failed_at: new Date(state.lastFailedAtMs).toISOString(),
+    attempts: state.attempts, root: String(root.id ?? ""), root_source: rootSource, last_failed_step: lesson ?? "unrecorded",
+  };
+}
+
+/** The variant in force for this activity (the newest open mask row whose [from, until) holds now). Never throws. */
+export function lineageCapReleaseVariant(nowIso: string): { variant: number; why: string } {
+  let rows: LcrMaskRow[];
+  try {
+    rows = (lcrDeps.readMasks ?? (() => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as LcrMaskRow[]))();
+  } catch (err) {
+    if (Date.now() - lastLcrPoolLog >= 30_000) { lastLcrPoolLog = Date.now(); console.log(`${LCR_LOG} pool_read shape=activityVariantMask ok=false`); }
+    const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
+    console.warn(`${LCR_LOG} ${why}`);
+    return { variant: 0, why };
+  }
+  if (Date.now() - lastLcrPoolLog >= 30_000) { lastLcrPoolLog = Date.now(); console.log(`${LCR_LOG} pool_read shape=activityVariantMask ok=true`); }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== LINEAGE_CAP_RELEASE_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+
+/**
+ * One pick pass's decisions over its lineage-capped rows, keyed by row id. A row with no event newer than its last
+ * failure gets no decision (capped as before, nothing read or logged); the mask is read only when some row has one.
+ * Never throws: a failure is no decision, so every row stays capped.
+ */
+export function lineageCapReleaseDecisions(capped: readonly Record<string, unknown>[], byId: Map<string, Record<string, unknown>>, nowMs: number): Map<string, LineageCapReleaseDecision> {
+  const out = new Map<string, LineageCapReleaseDecision>();
+  try {
+    const withEvidence: Array<{ row: string; evidence: LineageCapEvidence }> = [];
+    for (const g of capped) {
+      const evidence = lineageCapReleaseEvidence(g, byId);
+      if (evidence) withEvidence.push({ row: String(g.id ?? ""), evidence });
+    }
+    if (withEvidence.length === 0) return out;
+    const m = lineageCapReleaseVariant(new Date(nowMs).toISOString());
+    for (const { row, evidence } of withEvidence) {
+      const d: LineageCapReleaseDecision = { id: `lcr-${row}-${Date.parse(evidence.event_at)}`, variant: m.variant, why: m.why, released: m.variant === 1, row, evidence };
+      out.set(row, d);
+      if (lcrLogged.has(d.id)) continue;
+      lcrLogged.add(d.id);
+      console.log(`${LCR_LOG} decision=${d.id} variant=${d.variant} (${d.why}) row=${row} root=${evidence.root} root_source=${evidence.root_source} event=${evidence.event}@${evidence.event_at} last_failed_at=${evidence.last_failed_at} attempts=${evidence.attempts} last_failed_step=${evidence.last_failed_step} → ${d.released ? "released" : "would release (variant-0: capped as before)"}`);
+    }
+  } catch (err) {
+    console.warn(`${LCR_LOG} decisions failed (${String((err as Error)?.message ?? err).slice(0, 160)}): every row capped as before`);
+    out.clear();
+  }
+  return out;
+}
+
+const lcrPost = (t: Record<string, unknown>, what: string): void => {
+  void (lcrDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "lineage-cap-release")))(t)
+    .then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${LCR_LOG} ${what} not posted (http=${st ?? "none"})`); })
+    .catch((err) => console.warn(`${LCR_LOG} ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+};
+
+/** A released row's compose waiting for its landing verdict: kept in a file, so the landing's own restart keeps it. */
+type LcrPending = { decisionId: string; attemptId: string; variant: number; row: string; root_source: string; last_failed_step: string; dispatchedAtMs: number };
+/** How long past the attempt settle window a pending release waits for its #1 before it is logged ungraded. */
+const LCR_SETTLE_MARGIN_MS = 40 * 60_000;
+const lcrPendingFile = (): string => lcrDeps.pendingFile ?? join(VOLUME_ROOT, "lineage-cap-release-pending.json");
+function lcrLoad(): LcrPending[] {
+  try {
+    const j = JSON.parse(readFileSync(lcrPendingFile(), "utf8")) as unknown;
+    return Array.isArray(j) ? j.filter((p): p is LcrPending => !!p && typeof p.decisionId === "string" && typeof p.attemptId === "string" && Number.isFinite(p.dispatchedAtMs)) : [];
+  } catch { return []; }
+}
+function lcrSave(rows: LcrPending[]): void {
+  try {
+    const file = lcrPendingFile();
+    writeFileSync(`${file}.tmp`, JSON.stringify(rows));
+    renameSync(`${file}.tmp`, file);
+  } catch (err) { console.warn(`${LCR_LOG} pending releases not saved: ${String((err as Error)?.message ?? err).slice(0, 160)}`); }
+}
+const lcrDrop = (decisionId: string): void => { const rows = lcrLoad(); const kept = rows.filter((p) => p.decisionId !== decisionId); if (kept.length !== rows.length) lcrSave(kept); };
+
+/** A settled release: its verdict is posted onto the decision's own trace through the shared reach path (reachGrade). */
+function lcrCredit(p: { decisionId: string; variant: number; row: string; root_source: string; last_failed_step: string }, reached: boolean, source: "landing" | "compose_exit", how: string, meta: Record<string, unknown>): void {
+  void (lcrDeps.reach ?? reachGrade)({ execution_id: p.decisionId, reached }, { source, why: `lineage-cap release of ${p.row}: ${how}`, gap_id: p.row })
+    .catch((err: unknown) => console.warn(`${LCR_LOG} reach of ${p.decisionId} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+  console.log(`${LCR_LOG} settled ${p.decisionId} reached=${reached} how=${how} row=${p.row} root_source=${p.root_source} last_failed_step=${p.last_failed_step}${Object.entries(meta).map(([k, v]) => ` ${k}=${String(v ?? "-")}`).join("")}`);
+}
+
+/**
+ * The released row reached its compose: the decision is consumed, so its own trace is posted, and the release is kept
+ * pending (written now, before the compose, so the restart a landing brings cannot lose it). Never throws.
+ */
+export function traceLineageCapRelease(d: LineageCapReleaseDecision | undefined, attemptId: string | undefined, nowMs: number): void {
+  if (!d?.released) return;
+  try {
+    const id = lineageCapReleaseVariantId(d.variant);
+    lcrPost({
+      execution_id: d.id, template_id: id, activity_id: id, activity_variant_id: id, status: "completed", success: true, started_at: new Date(nowMs).toISOString(), duration_ms: 0,
+      input_shapes: ["substrateGap"], output_shapes: ["lineageCapRelease"],
+      tasks: [{ id: "decide-release", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`lineageCapRelease:${d.id}`] }],
+      tags: [`lineage_cap_release_variant:${d.variant}`, `root_source:${d.evidence.root_source}`],
+      metadata: { lineageCapRelease: { row: d.row, attempt_id: attemptId ?? null, ...d.evidence } },
+    }, `own trace of ${d.id}`);
+    if (!attemptId) { console.log(`${LCR_LOG} ungraded ${d.id}: its compose carries no attempt id, so no landing verdict can settle it`); return; }
+    const rows = lcrLoad().filter((p) => p.decisionId !== d.id);
+    rows.push({ decisionId: d.id, attemptId, variant: d.variant, row: d.row, root_source: d.evidence.root_source, last_failed_step: d.evidence.last_failed_step, dispatchedAtMs: nowMs });
+    lcrSave(rows);
+  } catch { /* a trace never changes a pick */ }
+}
+
+/**
+ * The released row's compose came back. Graded at its exit only when it did not come back ok (reached:false), as
+ * composeExitReach grades a compose; an ok compose waits for its landing verdict (settleLineageCapReleasePending), and
+ * a non-attempt is ungraded. Never throws.
+ */
+export function settleLineageCapReleaseAtExit(d: LineageCapReleaseDecision | undefined, o: { ok: boolean; nonAttempt: boolean; stage?: unknown; failure_kind?: unknown; verdict?: unknown; attempt?: string }, nowMs: number): void {
+  if (!d?.released) return;
+  try {
+    if (o.nonAttempt) { lcrDrop(d.id); console.log(`${LCR_LOG} ungraded ${d.id}: non-attempt (stage=${String(o.stage ?? "-")} failure_kind=${String(o.failure_kind ?? "-")})`); return; }
+    if (o.ok) { console.log(`${LCR_LOG} dispatched ${d.id} ok stage=${String(o.stage ?? "-")} verdict=${String(o.verdict ?? "-")} attempt=${o.attempt ?? "-"}: awaiting its landing verdict`); return; }
+    lcrDrop(d.id);
+    lcrCredit({ decisionId: d.id, variant: d.variant, row: d.row, root_source: d.evidence.root_source, last_failed_step: d.evidence.last_failed_step }, false, "compose_exit", "compose_exit", { stage: o.stage, failure_kind: o.failure_kind, verdict: o.verdict, attempt: o.attempt });
+  } catch { /* the credit never changes a pick */ }
+}
+
+/**
+ * The landing verdict settles each pending release, read from the attempt ledger by its attempt id: a #2 settlement
+ * (regressed) -> not reached; else #1 held -> reached, any other #1 verdict -> not reached; neither within the
+ * attempt settle window plus a margin -> ungraded, logged. Run once per auto-pick pass. Never throws.
+ */
+export function settleLineageCapReleasePending(nowMs: number): number {
+  let settled = 0;
+  try {
+    const pend = lcrLoad();
+    if (pend.length === 0) return 0;
+    const settlement = lcrDeps.settlement ?? ((key: string) => readRecords("attemptSettlement", { key }) as Array<{ record: Record<string, unknown> }>);
+    const windowMs = (lcrDeps.settleWindowMs ?? settleWindowMs)() + LCR_SETTLE_MARGIN_MS;
+    const kept: LcrPending[] = [];
+    for (const p of pend) {
+      const s2 = settlement(`${p.attemptId}#2`)[0]?.record;
+      const s1 = settlement(`${p.attemptId}#1`)[0]?.record;
+      if (s2) { lcrCredit(p, false, "landing", "settlement_2", { verdict: s2["verdict"], attempt: p.attemptId }); settled++; continue; }
+      if (s1) { lcrCredit(p, s1["verdict"] === "held", "landing", "settlement_1", { verdict: s1["verdict"], attempt: p.attemptId }); settled++; continue; }
+      if (nowMs - p.dispatchedAtMs > windowMs) { console.log(`${LCR_LOG} ungraded ${p.decisionId}: no settlement for attempt ${p.attemptId} within ${Math.round(windowMs / 60_000)} min`); continue; }
+      kept.push(p);
+    }
+    if (kept.length !== pend.length) lcrSave(kept);
+  } catch { /* the credit never changes a pick */ }
+  return settled;
 }
 
 /**
@@ -2053,7 +2303,8 @@ async function routeCapabilityGapToNewResolver(
   };
 }
 
-import { sweepAttempts } from "./attempt-register.js";
+import { sweepAttempts, settleWindowMs } from "./attempt-register.js";
+import { readRecords } from "./attempt-ledger.js";
 import { gapDirected, inheritedDirectedGrant } from "../lib/operator-direct.js";
 
 let attemptSweepInFlight = false;
@@ -2315,6 +2566,8 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   }
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
+  /** The auto-picked row's lineage-cap-release decision, when it was picked past the cap. */
+  let capRelease: LineageCapReleaseDecision | undefined;
   try {
     const read = await duringActivity("gap_to_feature:read_store", () => resolveSubstrateGap({
       type: "substrateGap",
@@ -2374,7 +2627,13 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // so the hold can never park a whole lineage"; the cap below makes the newest recommit unpickable, so it must not be
     // the holder. It is skipped and the next workable member holds, keeping one live gap per (lineage, check). Deleting
     // the hold instead (the previous fix) made every sibling of the check pickable at once.
-    const isLineageCapped = (g: Record<string, unknown>): boolean => String(g.id ?? "").startsWith("recommit-") && lineageBackoffState(g, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP;
+    // A capped row with information newer than its lineage's last failure is decided by lineage-cap-release (auto-pick
+    // only); under variant-1 it is not capped, here and in the holder election, and under variant-0 nothing changes.
+    const overCap = (g: Record<string, unknown>): boolean => String(g.id ?? "").startsWith("recommit-") && lineageBackoffState(g, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP;
+    if (!pointer.gap_id) settleLineageCapReleasePending(nowMs);
+    const capReleases = pointer.gap_id ? new Map<string, LineageCapReleaseDecision>() : lineageCapReleaseDecisions(gaps.filter(overCap), gapsById, nowMs);
+    const capReleased = (g: Record<string, unknown>): boolean => capReleases.get(String(g.id ?? ""))?.released === true;
+    const isLineageCapped = (g: Record<string, unknown>): boolean => overCap(g) && !capReleased(g);
     // A GAP SITED AT ITS OWN CHECK IS REFUSED BY NAME, BEFORE EVERY OTHER BRAKE (gap-eligibility editSiteIsOwnCheck). It
     // was refused only inside admission, after the lease, hold, lineage-cap and backoff filters, so the rows those
     // filters caught (recommit-route-edit-7ffa6330-step-1-*) were never named and stayed armed: the supply tick that
@@ -2417,7 +2676,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
       { const why = crossNodeLeaseSkip(g, nowMs, pickNode, GAP_COMPOSE_COOLDOWN_MS); if (why) { crossNodeLines.push(`${String(g.id)}: ${why}`); return false; } }
       const state = lineageBackoffState(g, gapsById);
-      if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
+      if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP && !capReleased(g)) {
         lineageCapped++;
         return false;
       }
@@ -2475,6 +2734,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       }
       let floored: string[] = [];
       gap = pool.rows.length ? duringActivity("gap_to_feature:pick", () => pickMostLandable(pool.rows, (ids) => { floored = ids; }, headOf)) : null;
+      capRelease = gap ? capReleases.get(String(gap.id ?? "")) : undefined;
       recordAdmissionPass({ node: pickNode, candidates: eligible.length, admitted, excluded, floored, groundedBy, headOf });
     }
   } catch (e) {
@@ -3105,6 +3365,7 @@ const familySample: string[] = await (async () => {
   const park = await readParkedLanding(String(gap.id ?? "")).catch(() => null);
   const freshPark = park && Date.now() - Date.parse(park.parked_at) < parkTtlMs ? park : null;
   if (freshPark) console.log(`[gap-to-feature] picked ${String(gap.id)} has a fresh parked landing (${freshPark.compose_id}) - dispatching feature_compose with resume_from`);
+  traceLineageCapRelease(capRelease, attempt.id, Date.now());
   const compose = await resolveFeatureCompose({
     type: "feature_compose",
     spec,
@@ -3145,6 +3406,7 @@ const familySample: string[] = await (async () => {
     // Handle the non-attempt compose case.
   }
   const { land, closure, nonAttempt } = await gradeComposeOutcome(gap, cb, spec, pointer.dry_run, attempt.id, { ask: askHuman, escalate: escalateToDecomposition });
+  settleLineageCapReleaseAtExit(capRelease, { ok: cb["ok"] === true, nonAttempt, stage: cb.stage, failure_kind: cb.failure_kind, verdict: cb.verdict, attempt: attempt.id }, Date.now());
   {
     // The grader judged a compose that never ran (a non-attempt): it costs the gap no cooldown.
     if (nonAttempt) {

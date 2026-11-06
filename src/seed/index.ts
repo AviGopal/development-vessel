@@ -174,6 +174,7 @@ import { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE }
 import { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./compose-caller-cut.js";
 import { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 import { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } from "./gap-goal-unarmed-skip.js";
+import { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -263,6 +264,7 @@ export { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE }
 export { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./compose-caller-cut.js";
 export { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 export { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } from "./gap-goal-unarmed-skip.js";
+export { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -648,6 +650,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // boredom-vessel's, decided in process at its pool pick; graded by the goal that filled the slot (gap-goal-unarmed-skip.ts)
   GAP_GOAL_UNARMED_SKIP_TEMPLATE,
   GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE,
+  // run in process at each gap-to-feature pick pass; graded by the released row's compose (lineage-cap-release.ts)
+  LINEAGE_CAP_RELEASE_TEMPLATE,
+  LINEAGE_CAP_RELEASE_V1_TEMPLATE,
   SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,

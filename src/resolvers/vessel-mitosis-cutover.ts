@@ -677,6 +677,160 @@ export function computeNewlyFailing(prev: string[] | null, now: string[]): strin
   return out;
 }
 
+/** Failures present now but not in a MEASURED baseline (de-duplicated, order-stable). Unlike computeNewlyFailing, an
+ *  empty set is a measurement here: the base tree was run and nothing failed, so every failure now is new. */
+export function newlyFailingVsMeasured(base: readonly string[], now: readonly string[]): string[] {
+  const b = new Set(base.map(String));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of now.map(String)) {
+    if (b.has(t) || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/** The baseline the gate uses when the base tree was measured with nothing failing: one name no test line matches, so
+ *  computeNewlyFailing (which reads an empty baseline as unmeasured) counts every failure on the staged tree as new. */
+export const MEASURED_CLEAN_BASE = "(base tree measured: nothing failing)";
+
+/** Tests only: the post-land baseline directory, in place of /workspace/post-land-baseline; null restores it. */
+let postLandBaselineDirForTests: string | null = null;
+export function __setPostLandBaselineDirForTests(dir: string | null): void { postLandBaselineDirForTests = dir; }
+const postLandBaselineDir = (): string => postLandBaselineDirForTests ?? "/workspace/post-land-baseline";
+
+/**
+ * THE BASELINE GATE'S DECISIONS ARE ACTIVITIES. Which variant runs is the activityVariantMask pool impulse: the first
+ * open row for the activity whose [from, until) holds now. No row in force, an unknown variant or an unreadable pool:
+ * variant-0. Read only where a decision is taken. Never throws.
+ */
+type BgMaskRow = { id?: string; body?: unknown };
+export type BaselineGateDeps = {
+  readMasks?: () => BgMaskRow[];
+  postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
+  nowMs?: () => number;
+};
+let bgDeps: BaselineGateDeps = {};
+let bgSeq = 0;
+/** Tests only: the seams the baseline gate's decisions and credits use. null restores the real ones. */
+export function __setBaselineGateDepsForTests(d: BaselineGateDeps | null): void { bgDeps = d ?? {}; }
+const bgNowMs = (): number => bgDeps.nowMs?.() ?? Date.now();
+const bgPost = (log: string, t: Record<string, unknown>, what: string): void => {
+  void (bgDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "baseline-gate")))(t)
+    .then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${log} ${what} not posted (http=${st ?? "none"})`); })
+    .catch((err) => console.warn(`${log} ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+};
+export function baselineGateVariant(activityId: string, nowIso: string): { variant: number; why: string } {
+  let rows: BgMaskRow[];
+  try {
+    rows = (bgDeps.readMasks ?? (() => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as BgMaskRow[]))();
+  } catch (err) {
+    return { variant: 0, why: `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0` };
+  }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== activityId) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+
+/**
+ * THE PRE-CUTOVER GATE MEASURES THE BASE TREE WHEN IT HAS NO USABLE BASELINE (development-vessel:precutover-baseline-
+ * base-tree). A post-land baseline that is absent, unparseable, empty, or older than BASELINE_MAX_AGE_MS reached
+ * computeNewlyFailing as nothing to compare against, and the gate passed every staged tree unmeasured while its verdict
+ * still cited the baseline delta.
+ *   - variant-0 (the control): as before; the decision is logged "would measure the base tree".
+ *   - variant-1: the whole suite runs once on the untouched base tree (base_ref HEAD: the staged change is uncommitted,
+ *     so excluded by construction), and its failing set is the baseline; an empty set there is a measurement, held as
+ *     MEASURED_CLEAN_BASE so computeNewlyFailing does not read it as no baseline. A base run that does not measure refuses an undirected landing (pre_cutover_baseline_unmeasured);
+ *     a directed landing keeps the fail-open, named on the decision line.
+ * A legacy (capped) baseline is usable and keeps its own re-measure (dropRedOnBase). Each decision logs one line naming
+ * the baseline used; under variant-1 it also posts its own trace (output precutoverBaseline). Its grade is decided by its
+ * consumer, the same landing's post-land suite (settlePrecutoverBaselineBaseTree): no failure there outside the baseline
+ * the decision supplied -> reached. A refusal, or a landing whose post-land suite does not run, is ungraded, logged.
+ * Variant-0 posts no trace; its decisions and settlements are its log lines.
+ */
+export const PRECUTOVER_BASELINE_BASE_TREE_ACTIVITY = "development-vessel:precutover-baseline-base-tree";
+export const PRECUTOVER_BASELINE_BASE_TREE_CREDIT_ACTIVITY = "development-vessel:precutover-baseline-base-tree-credit";
+export const precutoverBaselineBaseTreeVariantId = (variant: number): string => (variant === 0 ? PRECUTOVER_BASELINE_BASE_TREE_ACTIVITY : `${PRECUTOVER_BASELINE_BASE_TREE_ACTIVITY}-v${variant}`);
+const PBB_LOG = `[${PRECUTOVER_BASELINE_BASE_TREE_ACTIVITY}]`;
+export type PrecutoverBaselineDecision = {
+  traceId: string;
+  variant: number;
+  /** none: variant-0, nothing measured; base_tree_measured: `baseline` is the base tree's failing set; base_tree_unmeasured: variant-1, the base run did not measure. */
+  used: "none" | "base_tree_measured" | "base_tree_unmeasured";
+  baseline: string[] | null;
+  directed: boolean;
+};
+export async function precutoverBaselineBaseTreeDecision(a: {
+  vessel: string;
+  unusable: string;
+  directed: boolean;
+  directedWhy: string;
+  measureBase: () => Promise<{ failing: string[] | null; ran: boolean; pass: number; fail: number }>;
+}): Promise<PrecutoverBaselineDecision> {
+  const now = bgNowMs();
+  const nowIso = new Date(now).toISOString();
+  const m = baselineGateVariant(PRECUTOVER_BASELINE_BASE_TREE_ACTIVITY, nowIso);
+  let used: PrecutoverBaselineDecision["used"] = "none";
+  let baseline: string[] | null = null;
+  let base = "not run (variant-0)";
+  if (m.variant === 1) {
+    let r: { failing: string[] | null; ran: boolean; pass: number; fail: number } | null = null;
+    try { r = await a.measureBase(); } catch (err) { base = `threw: ${String((err as Error)?.message ?? err).slice(0, 120)}`; }
+    if (r && r.ran && r.failing !== null && r.pass + r.fail > 0) { used = "base_tree_measured"; baseline = r.failing; base = `pass=${r.pass} fail=${r.fail}`; }
+    else { used = "base_tree_unmeasured"; if (r) base = r.ran ? "ran but measured 0 tests" : "did not run"; }
+  }
+  const outcome = used === "none" ? "would measure the base tree (variant-0: no baseline, as before)"
+    : used === "base_tree_measured" ? "baseline=base_tree_measured"
+    : a.directed ? "directed: fail-open, unmeasured" : "baseline=base_tree_unmeasured -> refused";
+  const traceId = `precutover-baseline-base-tree-${String(a.vessel).replace(/[^a-zA-Z0-9]+/g, "-")}-${now}-${process.pid}-${++bgSeq}`;
+  console.log(`${PBB_LOG} decision=${traceId} variant=${m.variant} (${m.why}) vessel=${a.vessel} unusable=${a.unusable} base=${base} directed=${a.directed} (${a.directedWhy}) -> ${outcome}`);
+  const id = precutoverBaselineBaseTreeVariantId(m.variant);
+  // Variant-0 posts no trace: the control's decisions and settlements are its log lines.
+  if (m.variant !== 0) bgPost(PBB_LOG, {
+    execution_id: traceId, template_id: id, activity_id: id, activity_variant_id: id, status: "completed", success: true, started_at: nowIso, duration_ms: 0,
+    input_shapes: ["test_suite"], output_shapes: ["precutoverBaseline"],
+    tasks: [{ id: "choose-baseline", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`precutoverBaseline:${traceId}`] }],
+    tags: [`precutover_baseline_variant:${m.variant}`, `used:${used}`],
+    metadata: { precutoverBaseline: { variant: m.variant, vessel: a.vessel, unusable: a.unusable, used, base, directed: a.directed, baseline_size: baseline?.length ?? null, decided_at: nowIso } },
+  }, `own trace of ${traceId}`);
+  return { traceId, variant: m.variant, used, baseline, directed: a.directed };
+}
+/** A decision that ends before its consumer runs (a refusal, a landing whose post-land suite did not run). */
+export function precutoverBaselineUngraded(d: PrecutoverBaselineDecision | null, why: string): void {
+  if (d) console.log(`${PBB_LOG} ungraded ${d.traceId}: ${why}`);
+}
+/** The landing's post-land suite settles the decision: a failure there outside the baseline the decision supplied
+ *  (none under variant-0, or an unmeasured base) -> not reached. Never throws. */
+export function settlePrecutoverBaselineBaseTree(d: PrecutoverBaselineDecision | null, postLandFailing: readonly string[], landedSha: string): void {
+  if (!d) return;
+  try {
+    const outside = newlyFailingVsMeasured(d.baseline ?? [], postLandFailing);
+    const ok = outside.length === 0;
+    const impulse = `precutoverBaseline:${d.traceId}`;
+    if (d.variant !== 0) bgPost(PBB_LOG, {
+      execution_id: `${d.traceId.replace(/^precutover-baseline-base-tree-/, "precutover-baseline-base-tree-credit-")}`,
+      template_id: PRECUTOVER_BASELINE_BASE_TREE_CREDIT_ACTIVITY, activity_id: PRECUTOVER_BASELINE_BASE_TREE_CREDIT_ACTIVITY, activity_variant_id: PRECUTOVER_BASELINE_BASE_TREE_CREDIT_ACTIVITY,
+      status: ok ? "completed" : "failed", success: ok,
+      ...(ok ? {} : { failure_mode: { type: "verifier_negative", reason: `${outside.length} test(s) fail after the landing outside the baseline the decision supplied` } }),
+      started_at: new Date(bgNowMs()).toISOString(), duration_ms: 0, composition_chain: [d.traceId],
+      tasks: [{ id: "post-land-suite", resolver_id: "deterministic", resolver_tier: "deterministic", success: ok, input_impulse_ids: [impulse], output_impulse_ids: [],
+        consumed_provenance: [{ impulse_id: impulse, producer_execution_id: d.traceId, origin: "ancestor" }] }],
+      tags: [ok ? "reached:true" : "reached:false", `precutover_baseline_variant:${d.variant}`, `used:${d.used}`],
+      metadata: { producer_execution_id: d.traceId, variant: d.variant, used: d.used, landed_sha: landedSha, outside: outside.slice(0, 8), outside_count: outside.length },
+    }, `credit of ${d.traceId}`);
+    console.log(`${PBB_LOG} settled ${d.traceId} reached=${ok} used=${d.used} outside=${outside.length} landed_sha=${String(landedSha).slice(0, 12)}`);
+  } catch { /* the credit never changes a cutover */ }
+}
+
 /**
  * A FAILING TEST AN OPEN GAP ALREADY TRACKS, AND THAT WAS ALREADY RED BEFORE THE STAGED CHANGE,
  * IS NOT A REGRESSION (2026-09-30).
@@ -3565,6 +3719,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //     such check it is refused (no_measurement_available). An unreadable lease runs the suite.
   // Closes cutover-suite-observes-but-does-not-gate. End-to-end gating is verified on the next
   // real cutover; the decision primitive and the fail-open paths are unit-covered now.
+  // The no-usable-baseline decision (precutoverBaselineBaseTreeDecision), settled by this landing's post-land suite.
+  let pbbDecision: PrecutoverBaselineDecision | null = null;
   let suiteHold: { held: boolean; holder: string } = { held: false, holder: "" };
   try {
     const lr = (await resolveMaintenanceLease({ type: "maintenanceLease", name: "precutover_suite" })) as { body?: { held?: unknown; holder?: unknown } };
@@ -3634,15 +3790,19 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         );
       }
       if (failNow !== null) {                // null = unmeasurable → fall through and commit
-        const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
+        const baseFile = `${postLandBaselineDir()}/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
         let baseline: string[] | null = null;
         let baselineLegacy = false;
+        // Why the baseline is unusable, for the decision below (null: usable).
+        let baselineUnusable: string | null = null;
         try {
           if (precutoverBaselineTextForTests) {
             const text = await precutoverBaselineTextForTests(String(vessel_name));
             const parsed = text === null ? null : parsePostLandBaseline(JSON.parse(text));
             baseline = parsed?.names ?? null;
             baselineLegacy = parsed?.legacy === true;
+            if (text === null) baselineUnusable = "absent";
+            else if (parsed === null) baselineUnusable = "unparseable";
           } else {
             const bstat = await fs.stat(baseFile);
             // A baseline older than BASELINE_MAX_AGE_MS predates whatever has since drifted in the
@@ -3653,10 +3813,34 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
               const parsed = parsePostLandBaseline(JSON.parse(await readFile(baseFile, "utf8")));
               baseline = parsed?.names ?? null;
               baselineLegacy = parsed?.legacy === true;
+              if (parsed === null) baselineUnusable = "unparseable";
+            } else {
+              baselineUnusable = `stale (age=${((Date.now() - bstat.mtimeMs) / 3_600_000).toFixed(1)}h > ${BASELINE_MAX_AGE_MS / 3_600_000}h)`;
             }
           }
-        } catch { baseline = null; baselineLegacy = false; }
-        if (precutoverBaselineForTests) { baseline = await precutoverBaselineForTests(String(vessel_name)); baselineLegacy = false; }
+        } catch (err) {
+          baseline = null; baselineLegacy = false;
+          baselineUnusable = (err as { code?: string })?.code === "ENOENT" ? "absent" : `unreadable (${String((err as Error)?.message ?? err).slice(0, 80)})`;
+        }
+        if (precutoverBaselineForTests) { baseline = await precutoverBaselineForTests(String(vessel_name)); baselineLegacy = false; baselineUnusable = baseline === null ? "absent" : null; }
+        if (baseline !== null && baseline.length === 0) baselineUnusable = "empty";
+        else if (baseline === null && baselineUnusable === null) baselineUnusable = "absent";
+        // NO USABLE BASELINE IS A DECISION (precutoverBaselineBaseTreeDecision): variant-1 measures the base tree here.
+        if (baselineUnusable !== null) {
+          pbbDecision = await precutoverBaselineBaseTreeDecision({
+            vessel: String(vessel_name), unusable: baselineUnusable, directed: precutoverOrigin.directed, directedWhy: precutoverOrigin.why,
+            measureBase: () => runSuiteWith({ base_ref: "HEAD" }),
+          });
+          if (pbbDecision.used === "base_tree_measured") { baseline = pbbDecision.baseline!.length > 0 ? pbbDecision.baseline : [MEASURED_CLEAN_BASE]; baselineLegacy = false; }
+          else if (pbbDecision.used === "base_tree_unmeasured" && !precutoverOrigin.directed) {
+            precutoverBaselineUngraded(pbbDecision, "refused (pre_cutover_baseline_unmeasured)");
+            await unstage("pre_cutover_baseline_unmeasured");
+            return softRefuse(
+              `pre_cutover_baseline_unmeasured: this vessel has no usable post-land baseline (${baselineUnusable}), and the base tree measured at this tick produced no result, so nothing measured what this staged tree newly breaks; a system-authored landing (${precutoverOrigin.why}) is not verified without it. Refusing like pre_cutover_suite_zero_tests: this tree is not retried, the gap stays open and is recomposed.`,
+              { kind: "pre_cutover_baseline_unmeasured", refuse_class: "pre_cutover_baseline_unmeasured", vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, baseline_unusable: baselineUnusable, operations },
+            );
+          }
+        }
         let newlyFailing = computeNewlyFailing(baseline, failNow);
         // TRACKED RED IS NOT A REGRESSION (2026-09-30): subtract names an OPEN gap for this vessel
         // deliberately tracks as red (evidence_resolve.only_tests), never the landing gap's own, and
@@ -3717,6 +3901,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             ? await runSuiteOnly(isolatedNames)
             : await runSuite();
           if (failAgain === null) {
+            precutoverBaselineUngraded(pbbDecision, "refused (isolation_unmeasurable)");
             await unstage("isolation_unmeasurable");
             return softRefuse(
               `isolation_unmeasurable: ${newlyFailing.length} test(s) fail on the staged tree that passed at the last landed baseline, and the confirmation re-run produced no result — e.g. "${newlyFailing[0]!.slice(0, 120)}". An unconfirmed regression is not a pass; refusing.`,
@@ -3743,6 +3928,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           newlyFailing = r.kept;
         }
         if (newlyFailing.length > 0) {
+          precutoverBaselineUngraded(pbbDecision, "refused (precutover_regression)");
           await unstage("precutover_regression");
           return softRefuse(
             `precutover_regression: ${newlyFailing.length} test(s) fail on the staged tree that passed at the last landed baseline, confirmed on a re-run — e.g. "${newlyFailing[0]!.slice(0, 120)}". Refusing to promote a regression. Fix the staged change or, if these are known-flaky, they will clear once the baseline is refreshed by a green landing.`,
@@ -4419,6 +4605,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     if (notRanReason !== null) {
       // Not a regression signal (nothing was measured), so no gap is filed; but no landed_verified credit either.
       landingCreditWithheld = true;
+      precutoverBaselineUngraded(pbbDecision, `post-land suite did not run (${notRanReason.slice(0, 120)})`);
       console.log(`[mitosis-cutover] post-land suite NOT RUN vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} reason=${notRanReason} — landed_verified credit withheld`);
     }
     // A red suite after landing is a regression signal the system should act on, not a log
@@ -4438,7 +4625,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     // newly failing. With no baseline yet, record one and file nothing — nothing can be
     // attributed on the first observation, and guessing is what this replaces.
     const _failNow: string[] = Array.isArray(sb.failingTests) ? (sb.failingTests as string[]).map(String) : [];
-    const _baseDir = "/workspace/post-land-baseline";
+    if (sb.ran === true) settlePrecutoverBaselineBaseTree(pbbDecision, _failNow, String(newSha));
+    const _baseDir = postLandBaselineDir();
     const _baseFile = `${_baseDir}/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
     // A LEGACY (capped) baseline is not the failing set (parsePostLandBaseline): nothing is attributable against it, so it
     // reads as no baseline here and is replaced by the full set below.

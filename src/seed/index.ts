@@ -175,6 +175,7 @@ import { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./c
 import { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 import { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } from "./gap-goal-unarmed-skip.js";
 import { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
+import { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V1_TEMPLATE } from "./precutover-baseline-base-tree.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -265,6 +266,7 @@ export { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./c
 export { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 export { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } from "./gap-goal-unarmed-skip.js";
 export { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
+export { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V1_TEMPLATE } from "./precutover-baseline-base-tree.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -653,6 +655,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // run in process at each gap-to-feature pick pass; graded by the released row's compose (lineage-cap-release.ts)
   LINEAGE_CAP_RELEASE_TEMPLATE,
   LINEAGE_CAP_RELEASE_V1_TEMPLATE,
+  // run in process at the pre-cutover gate with no usable baseline; graded by the landing's post-land suite (precutover-baseline-base-tree.ts)
+  PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE,
+  PRECUTOVER_BASELINE_BASE_TREE_V1_TEMPLATE,
   SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,

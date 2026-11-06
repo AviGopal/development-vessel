@@ -172,6 +172,7 @@ import { OWN_CHECK_BASELINE_TEMPLATE } from "./own-check-baseline.js";
 import { REACH_GRADE_TEMPLATE } from "./reach-grade.js";
 import { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE } from "./edit-site-mutation-gate.js";
 import { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./compose-caller-cut.js";
+import { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -259,6 +260,7 @@ export { OWN_CHECK_BASELINE_TEMPLATE } from "./own-check-baseline.js";
 export { REACH_GRADE_TEMPLATE } from "./reach-grade.js";
 export { EDIT_SITE_MUTATION_GATE_TEMPLATE, EDIT_SITE_MUTATION_GATE_V1_TEMPLATE } from "./edit-site-mutation-gate.js";
 export { COMPOSE_CALLER_CUT_TEMPLATE, COMPOSE_CALLER_CUT_V1_TEMPLATE } from "./compose-caller-cut.js";
+export { CHECK_LANDING_RESTART_TEMPLATE, CHECK_LANDING_RESTART_V1_TEMPLATE } from "./check-landing-restart.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -638,6 +640,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // run in process at a compose's checkpoints; graded by the next compose acquire of its slot class (compose-caller-cut.ts)
   COMPOSE_CALLER_CUT_TEMPLATE,
   COMPOSE_CALLER_CUT_V1_TEMPLATE,
+  // run in process at a self-cutover's restart step; graded by the next compose request on this node (check-landing-restart.ts)
+  CHECK_LANDING_RESTART_TEMPLATE,
+  CHECK_LANDING_RESTART_V1_TEMPLATE,
   SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,

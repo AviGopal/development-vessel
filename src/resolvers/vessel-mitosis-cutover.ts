@@ -4,7 +4,7 @@
 
 import { resolve, join, dirname, relative, isAbsolute, basename } from "path";
 import { pickRemovedLinePredicate } from "../removed-line-predicate.js";
-import { env } from "../config.js";
+import { env, VOLUME_ROOT } from "../config.js";
 import fs from "node:fs/promises";
 import {
   rename,
@@ -18,12 +18,16 @@ import {
   appendFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { hostname as clrHost } from "node:os";
+import { resolvePoolImpulse } from "./pool-impulse.js";
+import { inFlightOldestMs } from "../lib/compose-progress.js";
 import { registerAttempt, verifyDirectedIntentStamp } from "./attempt-register.js";
 import { readRecords } from "./attempt-ledger.js";
 import type { AutonomyScope } from "../judge/gap-policy.js";
 import { readTuningNumber } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, postConsumerTrace, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite, ONLY_TESTS_MAX_NAMES } from "./test-suite.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
@@ -344,6 +348,200 @@ export function selfRestartAlreadyOwed(vesselName: string): string | null {
     }
   } catch { /* unobservable: schedule as before */ }
   return null;
+}
+
+/**
+ * check-landing-restart — whether dv's self-cutover restarts dv for a CHECK-ONLY staging (isCheckOnlyStaging: every
+ * staged file an out-of-suite test/checks/<name>.check.ts). Such a landing changes no file the running process loaded:
+ * step 9 mirrors only the staged files, nothing in src imports a file under test/, and test_suite runs a check as its
+ * own child (./<path>) from the tree at use time. The restart still closes admission for its quiesce wait, so composes
+ * are refused while it drains, and it cuts those still in flight.
+ *   - variant-0 (`development-vessel:check-landing-restart`, the control): restart as before.
+ *   - variant-1 (`…-v1`): skip the restart, unless the runtime is stale (a file under src/, or package.json or bun.lock,
+ *     in the runtime tree is newer than this process) or a self-restart is already owed; then restart as before.
+ * Decided only for a check-only staging and read there: any other cutover reads no mask and logs nothing new. Which
+ * variant runs is the activityVariantMask pool impulse (no row in force, or an unreadable pool: variant-0). Each decision
+ * logs one line and posts its own trace (output checkLandingRestart). Its grade is decided by its consumer: the first
+ * compose request on this node within 17 min of the decision settles every pending one, admitted -> reached, refused
+ * (BUSY, or the drain's 503) -> not reached; none, or a restart this decision did not cause -> ungraded, logged. The
+ * pending decisions are kept in a file, so variant-0's own restart does not lose them.
+ */
+export const CHECK_LANDING_RESTART_ACTIVITY = "development-vessel:check-landing-restart";
+export const CHECK_LANDING_RESTART_CREDIT_ACTIVITY = "development-vessel:check-landing-restart-credit";
+export const checkLandingRestartVariantId = (variant: number): string => (variant === 0 ? CHECK_LANDING_RESTART_ACTIVITY : `${CHECK_LANDING_RESTART_ACTIVITY}-v${variant}`);
+const CLR_LOG = `[${CHECK_LANDING_RESTART_ACTIVITY}]`;
+const CLR_CREDIT_WINDOW_MS = 17 * 60_000;
+/** How long after a decision that restarts its own restart may come: the quiesce wait, the timer's delay and a margin. */
+const CLR_OWN_RESTART_WITHIN_MS = CUTOVER_QUIESCE_MAX_MS + 2 * 60_000;
+type ClrMaskRow = { id?: string; body?: unknown };
+type ClrPending = { traceId: string; decidedAtMs: number; variant: number; restartTaken: boolean; procStartMs: number; ownRestartSeen?: boolean };
+export type CheckLandingRestartDeps = {
+  readMasks?: () => ClrMaskRow[];
+  postTrace?: (t: Record<string, unknown>) => Promise<number | null>;
+  nowMs?: () => number;
+  /** When this process started (ms since the epoch). */
+  procStartMs?: () => number;
+  pendingFile?: string;
+  restartOwed?: (vesselName: string) => string | null;
+  /** The newest commit before `newSha` touching src/, package.json or bun.lock: the code the runtime serves. */
+  runtimeSha?: (hostRepoRoot: string, newSha: string) => Promise<string>;
+};
+let clrDeps: CheckLandingRestartDeps = {};
+let clrPending: ClrPending[] | null = null;
+let lastClrPoolLog = -Infinity;
+let clrSeq = 0;
+/** Tests only: the seams the check-landing-restart decision and its credit use; the pending list is read again. */
+export function __setCheckLandingRestartDepsForTests(d: CheckLandingRestartDeps | null): void { clrDeps = d ?? {}; clrPending = null; lastClrPoolLog = -Infinity; }
+const clrNowMs = (): number => clrDeps.nowMs?.() ?? Date.now();
+const clrProcStartMs = (): number => clrDeps.procStartMs?.() ?? Math.floor(performance.timeOrigin);
+const clrPendingFile = (): string => clrDeps.pendingFile ?? join(VOLUME_ROOT, "check-landing-restart-pending.json");
+const clrPost = (t: Record<string, unknown>, what: string): void => {
+  void (clrDeps.postTrace ?? ((x: Record<string, unknown>) => postConsumerTrace(x, "check-landing-restart")))(t)
+    .then((st) => { if (st === null || st < 200 || st >= 300) console.warn(`${CLR_LOG} ${what} not posted (http=${st ?? "none"})`); })
+    .catch((err) => console.warn(`${CLR_LOG} ${what} not posted: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+};
+/** The variant in force for this activity (the newest open mask row whose [from, until) holds now). Never throws. */
+export function checkLandingRestartVariant(nowIso: string): { variant: number; why: string } {
+  let rows: ClrMaskRow[];
+  try {
+    rows = (clrDeps.readMasks ?? (() => resolvePoolImpulse({ type: "poolImpulse", shape: "activityVariantMask", status: "open" }).body.impulses as ClrMaskRow[]))();
+  } catch (err) {
+    if (Date.now() - lastClrPoolLog >= 30_000) { lastClrPoolLog = Date.now(); console.log(`${CLR_LOG} pool_read shape=activityVariantMask ok=false`); }
+    const why = `mask_unread (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0`;
+    console.warn(`${CLR_LOG} ${why}`);
+    return { variant: 0, why };
+  }
+  if (Date.now() - lastClrPoolLog >= 30_000) { lastClrPoolLog = Date.now(); console.log(`${CLR_LOG} pool_read shape=activityVariantMask ok=true`); }
+  const now = Date.parse(nowIso);
+  for (const r of rows) {
+    const b = (r?.body ?? {}) as Record<string, unknown>;
+    if (b["activity_id"] !== CHECK_LANDING_RESTART_ACTIVITY) continue;
+    const from = Date.parse(String(b["from"] ?? "")), until = Date.parse(String(b["until"] ?? ""));
+    if (!Number.isFinite(from) || !Number.isFinite(until) || now < from || now >= until) continue;
+    const v = b["active_variant"];
+    if (v !== 0 && v !== 1) return { variant: 0, why: `mask ${String(r.id)} names unknown variant ${JSON.stringify(v)}: variant-0` };
+    return { variant: v, why: `mask ${String(r.id)} [${String(b["from"])}, ${String(b["until"])}) by ${String(b["by"])}: ${String(b["reason"])}` };
+  }
+  return { variant: 0, why: "no mask in force: variant-0" };
+}
+/** The first runtime file this process may not have loaded: under src/, or package.json or bun.lock, modified after
+ *  `startedMs`. null when there is none; a tree that cannot be read names itself, and counts as stale. */
+export function staleRuntimePath(runtimeRoot: string, startedMs: number): string | null {
+  try {
+    for (const top of ["package.json", "bun.lock"]) {
+      let mtime = -Infinity;
+      try { mtime = statSync(join(runtimeRoot, top)).mtimeMs; } catch { /* absent */ }
+      if (mtime > startedMs) return top;
+    }
+    const walk = (rel: string): string | null => {
+      const st = statSync(join(runtimeRoot, rel));
+      if (!st.isDirectory()) return st.mtimeMs > startedMs ? rel : null;
+      for (const name of readdirSync(join(runtimeRoot, rel)).sort()) { const hit = walk(`${rel}/${name}`); if (hit !== null) return hit; }
+      return null;
+    };
+    return walk("src");
+  } catch (err) {
+    return `(unreadable: ${String((err as Error)?.message ?? err).slice(0, 120)})`;
+  }
+}
+function clrSave(rows: ClrPending[]): void {
+  try {
+    const file = clrPendingFile();
+    writeFileSync(`${file}.tmp`, JSON.stringify(rows));
+    renameSync(`${file}.tmp`, file);
+  } catch (err) { console.warn(`${CLR_LOG} pending decisions not saved: ${String((err as Error)?.message ?? err).slice(0, 160)}`); }
+}
+/** The pending decisions, read once per process. A decision from an earlier process survives only the one restart it
+ *  took itself, within CLR_OWN_RESTART_WITHIN_MS; any other restart leaves it ungraded. */
+function clrLoad(): ClrPending[] {
+  if (clrPending !== null) return clrPending;
+  let rows: ClrPending[] = [];
+  try {
+    const j = JSON.parse(readFileSync(clrPendingFile(), "utf8")) as unknown;
+    if (Array.isArray(j)) rows = j.filter((r): r is ClrPending => !!r && typeof r.traceId === "string" && Number.isFinite(r.decidedAtMs) && Number.isFinite(r.procStartMs));
+  } catch { /* none pending */ }
+  const me = clrProcStartMs();
+  const kept: ClrPending[] = [];
+  let changed = false;
+  for (const p of rows) {
+    if (p.procStartMs === me) { kept.push(p); continue; }
+    changed = true;
+    if (p.restartTaken && !p.ownRestartSeen && me >= p.decidedAtMs && me - p.decidedAtMs <= CLR_OWN_RESTART_WITHIN_MS) { kept.push({ ...p, ownRestartSeen: true, procStartMs: me }); continue; }
+    console.log(`${CLR_LOG} ungraded ${p.traceId}: the unit restarted in its window, not by this decision`);
+  }
+  clrPending = kept;
+  if (changed) clrSave(kept);
+  return kept;
+}
+const defaultRuntimeSha = (gitCmd: string) => async (hostRepoRoot: string, newSha: string): Promise<string> => {
+  const r = await runGit(gitCmd, ["log", "-1", "--format=%H", `${newSha}^`, "--", "src", "package.json", "bun.lock"], hostRepoRoot, { timeoutMs: 10_000 });
+  return r.exit_code === 0 && r.stdout.trim() ? r.stdout.trim() : "unknown";
+};
+/**
+ * THE DECISION, at step 10 of a self-cutover. null: not a check-only staging (nothing read, nothing logged; the
+ * restart goes on as before). Otherwise { skip }: skip is true only under variant-1 with a current runtime and no
+ * restart owed. Never throws (a failure is variant-0).
+ */
+export async function checkLandingRestartDecision(a: { stagedFiles: readonly string[]; newSha: string; vesselName: string; runtimeRoot: string; hostRepoRoot: string; gitCmd: string }): Promise<{ skip: boolean; variant: number } | null> {
+  if (!isCheckOnlyStaging(a.stagedFiles)) return null;
+  try {
+    const now = clrNowMs();
+    const nowIso = new Date(now).toISOString();
+    const m = checkLandingRestartVariant(nowIso);
+    const stale = staleRuntimePath(a.runtimeRoot, clrProcStartMs());
+    const owed = (clrDeps.restartOwed ?? selfRestartAlreadyOwed)(a.vesselName);
+    let runtimeSha = "unknown";
+    try { runtimeSha = await (clrDeps.runtimeSha ?? defaultRuntimeSha(a.gitCmd))(a.hostRepoRoot, a.newSha); } catch { /* unknown */ }
+    const skip = m.variant === 1 && stale === null && owed === null;
+    const reason = m.variant !== 1 ? "variant0_restart" : stale !== null ? "stale_runtime" : owed !== null ? "restart_owed" : "check_only_skip";
+    const oldest = inFlightOldestMs(now);
+    const traceId = `check-landing-restart-${String(a.newSha).slice(0, 12)}-${now}-${process.pid}-${++clrSeq}`;
+    console.log(`${CLR_LOG} decision variant=${m.variant} (${m.why}) reason=${reason} restart=${!skip} landed_sha=${a.newSha} runtime_sha=${runtimeSha} staged=${a.stagedFiles.length} check_only=true stale=${stale ?? "none"} owed=${owed ?? "none"} in_flight_oldest_ms=${oldest ?? "none"} node=${clrHost()} at=${nowIso}`);
+    const id = checkLandingRestartVariantId(m.variant);
+    clrPost({
+      execution_id: traceId, template_id: id, activity_id: id, activity_variant_id: id, status: "completed", success: true, started_at: nowIso, duration_ms: 0,
+      input_shapes: ["cutoverApplied"], output_shapes: ["checkLandingRestart"],
+      tasks: [{ id: "decide-restart", resolver_id: "deterministic", resolver_tier: "deterministic", success: true, input_impulse_ids: [], output_impulse_ids: [`checkLandingRestart:${traceId}`] }],
+      tags: [`check_landing_restart_variant:${m.variant}`, `reason:${reason}`],
+      metadata: { checkLandingRestart: { variant: m.variant, reason, restart: !skip, landed_sha: a.newSha, runtime_sha: runtimeSha, staged: a.stagedFiles.length, stale, owed, in_flight_oldest_ms: oldest, decided_at: nowIso } },
+    }, `own trace of ${a.newSha.slice(0, 12)}`);
+    const pend = clrLoad();
+    pend.push({ traceId, decidedAtMs: now, variant: m.variant, restartTaken: !skip, procStartMs: clrProcStartMs() });
+    clrSave(pend);
+    return { skip, variant: m.variant };
+  } catch (err) {
+    console.warn(`${CLR_LOG} decision failed (${String((err as Error)?.message ?? err).slice(0, 160)}): variant-0, restart as before`);
+    return { skip: false, variant: 0 };
+  }
+}
+/** The next compose request on this node settles every pending decision: admitted -> reached, refused (BUSY, the
+ *  drain's 503) -> not reached. Older than the window: ungraded (logged). Never throws. */
+export function settleCheckLandingRestart(admitted: boolean, how: string, settledBy: string): number {
+  let settled = 0;
+  try {
+    const pend = clrLoad();
+    if (pend.length === 0) return 0;
+    const now = clrNowMs();
+    for (const p of pend.splice(0, pend.length)) {
+      if (now - p.decidedAtMs > CLR_CREDIT_WINDOW_MS) { console.log(`${CLR_LOG} ungraded ${p.traceId}: no compose request within 17 min`); continue; }
+      settled += 1;
+      const impulse = `checkLandingRestart:${p.traceId}`;
+      clrPost({
+        execution_id: `check-landing-restart-credit-${p.traceId.replace(/^check-landing-restart-/, "")}`,
+        template_id: CHECK_LANDING_RESTART_CREDIT_ACTIVITY, activity_id: CHECK_LANDING_RESTART_CREDIT_ACTIVITY, activity_variant_id: CHECK_LANDING_RESTART_CREDIT_ACTIVITY,
+        status: admitted ? "completed" : "failed", success: admitted,
+        ...(admitted ? {} : { failure_mode: { type: "verifier_negative", reason: `the next compose request after the decision was refused (${how})` } }),
+        started_at: new Date(now).toISOString(), duration_ms: 0, composition_chain: [p.traceId],
+        tasks: [{ id: "next-compose", resolver_id: "deterministic", resolver_tier: "deterministic", success: admitted, input_impulse_ids: [impulse], output_impulse_ids: [],
+          consumed_provenance: [{ impulse_id: impulse, producer_execution_id: p.traceId, origin: "ancestor" }] }],
+        tags: [admitted ? "reached:true" : "reached:false", `check_landing_restart_variant:${p.variant}`],
+        metadata: { producer_execution_id: p.traceId, variant: p.variant, restart_taken: p.restartTaken, settled_by: settledBy, how, after_ms: now - p.decidedAtMs },
+      }, `credit of ${p.traceId}`);
+      console.log(`${CLR_LOG} settled ${p.traceId} reached=${admitted} how=${how} settled_by=${settledBy}`);
+    }
+    clrSave(pend);
+  } catch { /* the credit never changes a request */ }
+  return settled;
 }
 
 /**
@@ -3896,10 +4094,13 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       const delaySec = process.env["MITOSIS_SELF_RESTART_DELAY_S"] ?? "5";
       const tsUnit = `mitosis-self-restart-${mitosis_version_id}`.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 90);
 
+      // A check-only staging restarts or not as its check-landing-restart variant decides (null: not check-only).
+      const checkLanding = await checkLandingRestartDecision({ stagedFiles, newSha, vesselName: vessel_name, runtimeRoot: baseRoot, hostRepoRoot, gitCmd });
+
       // Prevent duplicate restarts from overlapping quiesce waits by checking for an existing unit.
       let alreadyScheduled = false;
       // Don't bother checking systemd if we're going to skip it anyway.
-      if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] !== "1") {
+      if (checkLanding?.skip !== true && process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] !== "1") {
         try {
           // Check for both the timer and the service unit. 'list-units' is atomic and safe.
           // If either exists, a restart is pending or was very recently triggered.
@@ -3913,7 +4114,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         }
       }
 
-      if (alreadyScheduled) {
+      if (checkLanding?.skip === true) {
+        operations.push({ op: `deferred self-restart ${unit}`, status: "skipped", detail: `check-only landing: no file the process loaded changed (${checkLandingRestartVariantId(checkLanding.variant)})` });
+      } else if (alreadyScheduled) {
         operations.push({ op: `deferred self-restart ${unit}`, status: "ok", detail: `(already scheduled as ${tsUnit})` });
       } else if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] === "1") {
         vesselRestarted = true;

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { isLongRunningBody, longRunningType } from "./long-running.js";
 import { bindCallerGone, runWithCallerGone } from "./resolvers/feature-compose.js";
+import { settleCheckLandingRestart } from "./resolvers/vessel-mitosis-cutover.js";
 import { impulsesRouter } from "./routes/impulses.js";
 import { config, DISCOVERY_SHAPES } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
@@ -265,6 +266,8 @@ const server = Bun.serve({
             console.log(
               `[development-vessel] REFUSING long-running request during drain — it cannot finish before the deadline; caller should retry against the next process`,
             );
+            // A compose refused here is the consumer of the check-landing-restart decisions pending on this node.
+            if (longRunningType(raw) === "feature_compose") settleCheckLandingRestart(false, "drain_503", `drain-refusal-${Date.now()}`);
             return new Response(
               JSON.stringify({
                 success: false,

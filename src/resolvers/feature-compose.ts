@@ -31,7 +31,7 @@ import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { crossNodeKeyHeaders, overlayHopReason } from "../lib/self-auth.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
-import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
+import { resolveVesselMitosisCutover, runGit, settleCheckLandingRestart, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite as resolveSubstrateGapWriteStore, postConsumerTrace, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
@@ -7339,6 +7339,8 @@ async function resolveFeatureComposeInMode(pointer: FeatureComposePointer, obser
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot, armed: composeArmed });
   // This acquire is the consumer of the caller cuts pending in its slot class (compose-caller-cut credit).
   settleCallerCutCredits(isDirected, slot.granted, slotId);
+  // It is also the consumer of the check-landing-restart decisions pending on this node (a duplicate refusal is no grade).
+  if (slot.granted || !slot.duplicateOf) settleCheckLandingRestart(slot.granted, slot.granted ? "admitted" : "refused_busy", slotId);
   if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
   if (!slot.granted && slot.duplicateOf) {
     admittedCapture?.(false);

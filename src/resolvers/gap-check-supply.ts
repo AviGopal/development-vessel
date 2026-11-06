@@ -175,7 +175,7 @@ type Ledger = {
 export const SEND_PENDING = "send_pending";
 // A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
 // that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
-export const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "existence_only"]);
+export const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
 /** How many arm entries a ledger keeps (check_supply.arms); the oldest is dropped past it. */
 const ARM_HISTORY_MAX = 5;
 const settledHistory = (l: Ledger): Row[] => {

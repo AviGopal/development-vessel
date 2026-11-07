@@ -176,6 +176,7 @@ import { codeContract } from "./code-introspect.js";
 import { srcReaderAt } from "./check-supply-admission.js";
 // The arm step's predicates, statically from lane core (user ruling, arm pre-check option i): never from gap-check-supply.
 import * as armPredicates from "./check-supply-admission.js";
+import { statedCauseOf } from "./check-region-cause-anchor.js";
 import { hostname as callerCutHost } from "node:os";
 import { resolvePoolImpulse as callerCutPool } from "./pool-impulse.js";
 import { certifyTestDefectDraft, childScripts, TEST_DEFECT_CERTIFIER_SHAPE, type TestDefectCertificate } from "../lib/child-script-parse.js";
@@ -6742,7 +6743,7 @@ export async function testWritingArmMutantRefusal(a: { vessel: string; vesselRoo
   let regionSite: string | null = null;
   if (region) { try { regionSite = readFileSync(`${a.vesselRoot}/${a.siteRel}`, "utf8"); } catch { regionSite = null; } }
   const regionGate = (mutation.kind === "pass" || mutation.kind === "refuse") && supply.regionGateApplies(a.meta, region ? regionSite : null)
-    ? await supply.regionMutantGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, titles: redTitles, baseline: report, evidence: a.summary, spec: typeof a.meta["falsifier_spec"] === "string" ? String(a.meta["falsifier_spec"]) : "", more: { must_fail: typeof a.meta["must_fail"] === "string" ? String(a.meta["must_fail"]) : undefined, control: typeof a.meta["control"] === "string" ? String(a.meta["control"]) : undefined } })
+    ? await supply.regionMutantGateAt(a.vesselRoot, { vessel: name, siteRel: a.siteRel, testFile: a.checkFile, titles: redTitles, baseline: report, evidence: a.summary, spec: typeof a.meta["falsifier_spec"] === "string" ? String(a.meta["falsifier_spec"]) : "", more: { must_fail: typeof a.meta["must_fail"] === "string" ? String(a.meta["must_fail"]) : undefined, control: typeof a.meta["control"] === "string" ? String(a.meta["control"]) : undefined , cause: statedCauseOf(a.meta) } })
     : null;
   const regionMoved = regionGate?.kind === "pass" && Number(regionGate.record["changed"] ?? 0) > 0;
   seen.mutation = mutation.kind === "refuse" ? `refuse: ${mutation.reason.slice(0, 200)}` : mutation.kind === "wait" ? `wait: ${mutation.detail.slice(0, 200)}` : `pass: ${String(mutation.record["decided"] ?? `changed ${String(mutation.record["changed"] ?? "?")}`)}`;

@@ -28,6 +28,7 @@ import { testTitleInSource, type CheckRunClass } from "./retry-evidence.js";
 import { countLiteral, regionOf } from "../lib/region-literal.js";
 import { operatorSites, regionStatementMutant, selectMutants, type Mutant } from "./scope-earn-in.js";
 import { gapStoreIsLocal, postConsumerTrace } from "./substrate-gap.js";
+import { causeAnchorRegion } from "./check-region-cause-anchor.js";
 import { MUTATE_EDIT_MAX, resolveTestSuite } from "./test-suite.js";
 import { resolvePoolImpulse } from "./pool-impulse.js";
 import { METABOB_API_KEY } from "../config.js";
@@ -1728,7 +1729,7 @@ export type CheckAnchor = { kind: "symbol" | "text" | "behaviour" | "token" | "r
  * check goal passes `site_tokens` and `region` only for a row the evidence alone does not anchor (checkSupplyAnchors),
  * so what the drafter is told for an anchored row is unchanged.
  */
-export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean; region?: string };
+export type AnchorSources = { must_fail?: string; control?: string; site_tokens?: boolean; region?: string; cause?: string };
 /** The site with its comments blanked to spaces (offsets kept): an anchor named only in a comment is no region. */
 export function commentFreeSource(src: string): string {
   let ts: typeof import("typescript");
@@ -2364,7 +2365,8 @@ export const regionGateApplies = (meta: Row, siteSrc: string | null = null): boo
  * (qa, 2026-10-24): a name's own declaration is not the code that uses it, so only its other occurrences count toward
  * 1 to 5 and are replaced.
  */
-export function explainedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { region: { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null; why: string } {
+export function explainedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { region: { anchor: string; kind: "text" | "token" | "cause"; occurrences: number; mutant: Mutant } | null; why: string } {
+  if (more.cause) { const d = causeAnchorRegion(siteSrc, siteRel, more.cause, () => explainedTextRegion(siteSrc, siteRel, evidence, spec, { ...more, cause: undefined })); if (d) return { region: d, why: "" }; }
   const anchors = falsifiableAnchors(evidence, siteSrc, spec, null, { ...more, site_tokens: true });
   const free = commentFreeSource(siteSrc);
   const notes: string[] = [];
@@ -2411,7 +2413,7 @@ export async function regionMutantGate(a: { vessel: string; siteRel: string; tes
   if (!region) return { kind: "pass", record: { decided: "unmeasured: no region", why: explained.why } };
   const m = region.mutant;
   const shown = m.original.replace(/\s+/g, " ").slice(0, 160);
-  const record: Row = { region: region.kind === "text" ? "derived_from_text_anchor" : "derived_from_token_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement.slice(0, 200), ...(region.occurrences > 1 ? { occurrences: region.occurrences } : {}) };
+  const record: Row = { region: region.kind === "text" ? "derived_from_text_anchor" : region.kind === "cause" ? "derived_from_stated_cause" : "derived_from_token_anchor", anchor: region.anchor.slice(0, 120), line: m.line, replacement: m.replacement.slice(0, 200), ...(region.occurrences > 1 ? { occurrences: region.occurrences } : {}) };
   const run = await mutantRun(a, m);
   if ("wait" in run) return { kind: "wait", detail: run.wait };
   const v = mutationGateVerdict(a.baseline, [{ mutant: m, report: run.report }], a.titles);

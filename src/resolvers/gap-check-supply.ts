@@ -89,6 +89,7 @@ import {
   PARKING_DISPOSITIONS,
 } from "../judge/gap-eligibility.js";
 import { autonomyScopeExcludes, editSitePath, identifyVessel, parseScopeExceptions, type AutonomyScope } from "../judge/gap-policy.js";
+import { causeClearsNeedsRegion, noteCauseAnchorGoal, settleCauseAnchor, statedCauseOf } from "./check-region-cause-anchor.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, castCalleeRefusal, configSiteCheckGoal, consumerResolverModules, contractMismatchRefusal, exportGuardUnavailable, MISSING_EXPORT_STAGE, missingExportRefusal, moduleExports, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { codeContract, type CodeContract } from "./code-introspect.js";
 import { VESSEL_TEST_FILE_RE } from "./vessel-paths.js";
@@ -449,7 +450,7 @@ export function checkSupplyGoal(vessel: string, testFile: string, summary: strin
  * statement at path:line, and what that statement produces. No derivable region: nothing is added.
  */
 export function regionInputsOf(meta: Row): { spec: string; more: AnchorSources } {
-  return { spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } };
+  return { spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined, cause: statedCauseOf(meta) } };
 }
 /** What a region statement produces, read off its text: a return value, a throw, a log line or a state write. */
 export function regionObservable(statement: string): string {
@@ -1121,7 +1122,7 @@ export function regionGateOutcome(g: MutationGateOutcome): string {
   const decided = String(g.record["decided"] ?? "");
   return decided === "unmeasured: no region" ? decided : decided.startsWith("unmeasured") ? "unmeasured: no measurement" : "measured-passed";
 }
-export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { anchor: string; kind: "text" | "token"; occurrences: number; mutant: Mutant } | null {
+export function derivedTextRegion(siteSrc: string, siteRel: string, evidence: string, spec = "", more: AnchorSources = {}): { anchor: string; kind: "text" | "token" | "cause"; occurrences: number; mutant: Mutant } | null {
   return explainedTextRegion(siteSrc, siteRel, evidence, spec, more).region;
 }
 /**
@@ -1814,7 +1815,9 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // in its edit_site, and the arm write would refuse it. Refused here, terminal, with the region text it was filed
     // with, so the ledger records an outcome rather than a dispatch with none. A write that sets a literal-once region
     // clears the flag, and its changed judged_inputs take the row again.
-    if (meta["needs_region"] === true) {
+    // Under check-region-cause-anchor variant-1, one whose stated cause resolves in its edit site goes on to the gates.
+    const causeSiteRel = meta["needs_region"] === true ? vesselRelativeEditSite(ledger.edit_site ?? meta["edit_site"]) : null;
+    if (meta["needs_region"] === true && !causeClearsNeedsRegion(meta, causeSiteRel ? srcReaderAt(join(clonesRoot(), ledger.vessel)).read(causeSiteRel) : null, causeSiteRel)) {
       const reason = `needs_region: ${String(meta["region_prior_text"] ?? "").slice(0, 160)} (not literal once in the row's edit_site)`;
       refused += 1;
       notArmed.push({ id, reason });
@@ -1949,9 +1952,10 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     // mutants, spread over every declaration the check reaches, can all miss the code a correct check measures (the
     // hand-written 5e69d7a0 check: six mutants of supplyPass's reach, none on the refusal path).
     const regionGate = (mutation?.kind === "pass" || mutation?.kind === "refuse") && site.ok && regionGateApplies(meta, region ? regionSite : null)
-      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles: redTitles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
+      ? await regionMutantGate({ vessel: vesselDir, siteRel: site.edit_site, testFile: ledger.test_file, titles: redTitles, baseline: report, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined , cause: statedCauseOf(meta) } })
       : null;
     if (regionGate && regionGate.kind !== "wait") console.log(`[gap-check-supply] ${id}: region_gate=${regionGateOutcome(regionGate)}`);
+    if (regionGate && regionGate.kind !== "wait") settleCauseAnchor(id, regionGate);
     const waiting = mutation?.kind === "wait" ? mutation : regionGate?.kind === "wait" ? regionGate : null;
     if (waiting) {
       notArmed.push({ id, reason: `awaiting_mutation_runs: ${waiting.detail}` });
@@ -2101,12 +2105,13 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     if (!baseline || baseline["ran"] !== true) continue;
     const red = Number(baseline["requested_not_passing"] ?? 0) > 0;
     const g: MutationGateOutcome = red
-      ? await regionMutantGate({ vessel: ledger.vessel, siteRel, testFile: ledger.test_file, titles, baseline, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined } })
+      ? await regionMutantGate({ vessel: ledger.vessel, siteRel, testFile: ledger.test_file, titles, baseline, evidence: String(row["summary"] ?? ""), spec: typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "", more: { must_fail: typeof meta["must_fail"] === "string" ? String(meta["must_fail"]) : undefined, control: typeof meta["control"] === "string" ? String(meta["control"]) : undefined , cause: statedCauseOf(meta) } })
       : { kind: "pass", record: { decided: "unmeasured: the check is not red at HEAD" } };
     if (g.kind === "wait") continue;
     const outcome = regionGateOutcome(g);
     regated.push({ id, outcome });
     console.log(`[gap-check-supply] ${id}: region_gate=${outcome} (re-gated: armed before the region gate)`);
+    settleCauseAnchor(id, g);
     if (pointer.dry_run) continue;
     const mutation_gate = { ...(prior && typeof prior === "object" ? prior : {}), region_gate: g.record };
     if (g.kind === "refuse") {
@@ -2516,6 +2521,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     }
     const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? [], settledHistory(ledger), meta);
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
+    noteCauseAnchorGoal({ gapId: id, meta, siteSrc, siteRel });
     // RECORD BEFORE SEND (CHANGE-30): the in-flight record is written FIRST, without the goal text, so no send is ever
     // unrecorded. If even that write is refused, nothing is sent: a send this tick cannot record is a send the next
     // tick would repeat (the 455-a-day loop). A crash between this write and the send settles through the existing

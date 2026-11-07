@@ -18,6 +18,7 @@ declare module "./feature-compose.js" {
 }
 
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, landingLeaseOf, landingReleaseOf, postConsumerTrace } from "./substrate-gap.js";
+import { noteGapLocalization } from "./gap-localization.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -961,6 +962,7 @@ export async function decomposeGap(
   // only when the cheap metadata and grep paths cannot choose, and writes nothing) could have sited it.
   if (!site) {
     const loc = await localizeGap(parent, { useLlm: true });
+    await noteGapLocalization({ caller: "decompose", gap: parent, answer: loc });
     if (!loc || !existsSync(join(vesselsCloneRoot(), loc.file.replace(/^repos\//, "")))) return { written: [], reason: "needs_information: no readable edit site (no edit_site and nothing localises)" };
     site = loc.file;
   }
@@ -3236,6 +3238,7 @@ const familySample: string[] = await (async () => {
     try {
       localized = await localizeGap(gap, { useLlm: true, directed: (pointer as { directed?: boolean }).directed === true });
     } catch { localized = null; }
+    await noteGapLocalization({ caller: "compose_pick", gap, answer: localized });
     if (localized) {
       editTargets = [{ file: localized.file, description: localized.description }];
     await resolveSubstrateGapWrite({

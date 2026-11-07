@@ -78,6 +78,9 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/src/resolvers/pool-impulse.ts",
   "repos/development-vessel/src/resolvers/test-suite.ts",
   "repos/development-vessel/src/resolvers/gap-to-feature.ts",
+  // The localization decision after each of gap-to-feature's localizeGap calls (gap-localization.ts): it may persist the
+  // edit site a compose is then judged at.
+  "repos/development-vessel/src/resolvers/gap-localization.ts",
   "repos/development-vessel/src/resolvers/feature-compose.ts",
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts",
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts",
@@ -199,6 +202,7 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/resolvers/composer-interruption-sweep.ts": { class: "operational", reason: "sweeps interrupted composes: decides no credential, containment, verdict, credit, settlement, push or ingress" },
   "repos/development-vessel/src/resolvers/feature-compose.ts": { class: "judge_trust", reason: "evaluator file: drafts, verifies and lands (verdict)" },
   "repos/development-vessel/src/resolvers/gap-to-feature.ts": { class: "judge_trust", reason: "evaluator file: the landing sweep and scope application (verdict)" },
+  "repos/development-vessel/src/resolvers/gap-localization.ts": { class: "judge_trust", reason: "evaluator file: the localization decision on gap-to-feature's pick path, which may persist the edit site a compose is judged at (verdict input)" },
   "repos/development-vessel/src/resolvers/pool-impulse.ts": { class: "judge_trust", reason: "evaluator file: the pool's one writer and its trust-root grants (credential)" },
   "repos/development-vessel/src/resolvers/rhythm-conductor-tick.ts": { class: "judge_trust", reason: "evaluator file: the evaluator's pacing (judge)" },
   "repos/development-vessel/src/resolvers/self-fact-reconcile.ts": { class: "judge_trust", reason: "evaluator file: the judge of scope changes (judge)" },

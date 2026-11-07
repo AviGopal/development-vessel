@@ -76,6 +76,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { birthTreeMoved, checkSupplyExpectationOf, class2PredicateKey, DETECTOR_ROW_UNARMABLE_REASON, gapStoreIsLocal, judgedInputsOf, landedCheckSource, postConsumerTrace, predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, sameJudgedInputs, takeBirthVerdictWithReport, unrenderedBindingToken, type JudgedInputs, type MintedBirthVerdict } from "./substrate-gap.js";
+import { noteGapLocalization } from "./gap-localization.js";
 export { landedCheckSource, type LandedCheck } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
@@ -2480,6 +2481,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (!loc || locExcl) {
         const reason = !loc ? "no_site: no src file named by the gap's evidence exists, and the localizer found no confident one" : `localized site ${loc.file} is excluded by the autonomy scope (${locExcl})`;
         skipped.push({ id, reason });
+        if (!loc && !pointer.dry_run) await noteGapLocalization({ caller: "check_supply", gap: row, answer: null });
         continue;
       }
       if (pointer.dry_run) { localized.push({ id, edit_site: loc.file, method: loc.method }); continue; }
@@ -2492,6 +2494,7 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
       if (lw.shape === "structuredError") { skipped.push({ id, reason: `localization write refused: ${JSON.stringify(lw.body).slice(0, 160)}` }); continue; }
       touched.add(id);
       localized.push({ id, edit_site: loc.file, method: loc.method });
+      await noteGapLocalization({ caller: "check_supply", gap: row, answer: { file: loc.file, method: loc.method, description: loc.evidence[0]?.why } });
       continue;
     }
     const mode = "check_file";

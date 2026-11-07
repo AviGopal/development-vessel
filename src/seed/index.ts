@@ -181,6 +181,7 @@ import { PRECUTOVER_SUITE_TIMEOUT_DEFER_TEMPLATE, PRECUTOVER_SUITE_TIMEOUT_DEFER
 import { CHECK_REGION_CAUSE_ANCHOR_TEMPLATE, CHECK_REGION_CAUSE_ANCHOR_V1_TEMPLATE } from "./check-region-cause-anchor.js";
 import { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 import { TEST_DEFECT_LOCALIZATION_BUDGET_TEMPLATE, TEST_DEFECT_LOCALIZATION_BUDGET_V1_TEMPLATE } from "./test-defect-localization-budget.js";
+import { GAP_LOCALIZATION_TEMPLATE, GAP_LOCALIZATION_V1_TEMPLATE } from "./gap-localization.js";
 import { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
 import { TEST_WRITING_ARM_PARITY_TEMPLATE, TEST_WRITING_ARM_PARITY_V1_TEMPLATE } from "./test-writing-arm-parity.js";
 import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
@@ -279,6 +280,7 @@ export { PRECUTOVER_SUITE_TIMEOUT_DEFER_TEMPLATE, PRECUTOVER_SUITE_TIMEOUT_DEFER
 export { CHECK_REGION_CAUSE_ANCHOR_TEMPLATE, CHECK_REGION_CAUSE_ANCHOR_V1_TEMPLATE } from "./check-region-cause-anchor.js";
 export { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 export { TEST_DEFECT_LOCALIZATION_BUDGET_TEMPLATE, TEST_DEFECT_LOCALIZATION_BUDGET_V1_TEMPLATE } from "./test-defect-localization-budget.js";
+export { GAP_LOCALIZATION_TEMPLATE, GAP_LOCALIZATION_V1_TEMPLATE } from "./gap-localization.js";
 export { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
 export { TEST_WRITING_ARM_PARITY_TEMPLATE, TEST_WRITING_ARM_PARITY_V1_TEMPLATE } from "./test-writing-arm-parity.js";
 export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
@@ -687,6 +689,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // run in process by the check-supply tick's test-defect pass; graded by the rows the pass decides (test-defect-localization-budget.ts)
   TEST_DEFECT_LOCALIZATION_BUDGET_TEMPLATE,
   TEST_DEFECT_LOCALIZATION_BUDGET_V1_TEMPLATE,
+  // run in process after each localizeGap call; graded by the gap's next localizer read (gap-localization.ts)
+  GAP_LOCALIZATION_TEMPLATE,
+  GAP_LOCALIZATION_V1_TEMPLATE,
   // run in process in feature_compose verify for a draft of a test-defect row's check file; graded by the landing's own check (test-defect-admission.ts)
   TEST_DEFECT_ADMISSION_TEMPLATE,
   TEST_DEFECT_ADMISSION_V1_TEMPLATE,

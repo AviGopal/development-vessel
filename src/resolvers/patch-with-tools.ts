@@ -37,6 +37,7 @@ import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
 import { readOperatorHold, classifyVesselsRoot } from "../lib/operator-hold.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { rowIdOf, testFileWriteVerdict, type TestFileWriteVerdict } from "../gates/test-file-gates.js";
 
 const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -763,7 +764,61 @@ async function pwtAdmissionRefusal(pointer: PatchWithToolsPointer): Promise<Reso
 export const LIVE_TREE_HOLD_ID = "pwt-live-tree-writes";
 export const LIVE_TREE_HOLD_SCOPE = "patch_with_tools:live_tree_writes";
 
+/** Test seams for the entry checks below: the row read and the compose-worktree isolation. null restores both. */
+export type PwtEntryDeps = { readGap?: (id: string) => Promise<Record<string, unknown> | null>; isolate?: typeof acquirePwtComposeRoot };
+let pwtEntryDeps: PwtEntryDeps = {};
+export function __setPwtEntryDepsForTests(d: PwtEntryDeps | null): void { pwtEntryDeps = d ?? {}; }
+/** The test-file localization verdict for this run's target (gates/test-file-gates.ts), reading the row it names. */
+async function pwtTestFileCheck(pointer: PatchWithToolsPointer): Promise<TestFileWriteVerdict | null> {
+  const d = deriveVesselFromPath(pointer.target_file);
+  if (!d) return null;
+  const gapId = typeof pointer.gap_id === "string" && pointer.gap_id.trim() ? rowIdOf(pointer.gap_id) : null;
+  if (testFileWriteVerdict(d.vessel, d.subPath, null, gapId).verdict === "not_applicable") return testFileWriteVerdict(d.vessel, d.subPath, null, gapId);
+  let row: Record<string, unknown> | null = null;
+  if (gapId) {
+    try {
+      row = pwtEntryDeps.readGap ? await pwtEntryDeps.readGap(gapId)
+        : (((await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps ?? []).find((g) => g?.["id"] === gapId) ?? null;
+    } catch { row = null; }
+  }
+  return testFileWriteVerdict(d.vessel, d.subPath, row ? ((row["classification_metadata"] ?? {}) as Record<string, unknown>) : null, gapId);
+}
+
+/**
+ * THE ENTRY CHECKS, before anything is read, drafted or written:
+ *   - TEST-FILE LOCALIZATION (gates/test-file-gates.ts testFileWriteVerdict): a test-file target is written only where
+ *     its row (gap_id, a "-compose" suffix stripped) was localized to exactly that file; refused otherwise, a missing
+ *     row included. The verdict is shaped into the result (test_file_check) on every outcome, so a later variant can be
+ *     graded against it.
+ *   - ISOLATION: a run whose pointer names no vessels_root (a walk or goal dispatch) runs in an isolated compose
+ *     worktree at origin/dev (acquirePwtComposeRoot, the escalation route's own isolation), released when the run ends;
+ *     it never defaults to the running tree. The live-tree hold (pwt-live-tree-writes) is unchanged.
+ */
 export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Promise<ResolverResult> {
+  const check = await pwtTestFileCheck(pointer);
+  if (check) console.log(`[patch_with_tools] test_file_check ${check.verdict}: ${check.reason}`);
+  if (check?.verdict === "refused") {
+    return structuredError(`test_file_check refused: ${check.reason}`, { stage: "test_file_check", verdict: "REFUSED", test_file_check: check, target_file: pointer.target_file });
+  }
+  let run = pointer;
+  let release: (() => Promise<void>) | null = null;
+  if (pointer.vessels_root === undefined) {
+    const iso = await (pwtEntryDeps.isolate ?? acquirePwtComposeRoot)(pointer.target_file, `pwt-${Date.now()}-${process.pid}`);
+    if (!iso) {
+      return structuredError("no isolated compose worktree for the target's vessel: not run on the running tree", { stage: "isolation_unavailable", verdict: "REFUSED", target_file: pointer.target_file, ...(check ? { test_file_check: check } : {}) });
+    }
+    run = { ...pointer, vessels_root: iso.vesselsRoot };
+    release = iso.release;
+  }
+  try {
+    const r = await patchWithToolsRun(run);
+    return check && r.body && typeof r.body === "object" ? { ...r, body: { ...(r.body as Record<string, unknown>), test_file_check: check } } : r;
+  } finally {
+    if (release) await release().catch((err) => console.warn(`[patch_with_tools] compose worktree release failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`));
+  }
+}
+
+async function patchWithToolsRun(pointer: PatchWithToolsPointer): Promise<ResolverResult> {
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   // LIVE-TREE WRITES ARE HELD (operatorHold pwt-live-tree-writes). This resolver edits the tree it is

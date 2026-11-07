@@ -34,3 +34,23 @@ export function testDefectRecordFor(meta: Record<string, unknown>, testFile: str
   if (typeof c.vessel === "string" && c.vessel !== vessel.replace(/^repos\//, "")) return null;
   return { decision_id: typeof td!.decision_id === "string" ? td!.decision_id : null };
 }
+
+/** The row a gap id names: a "<gap>-compose" id, derived from a "<gap>-compose-report.json" proposal name
+ *  (apply-proposal-as-patch), names <gap>. */
+export function rowIdOf(gapId: string): string {
+  return gapId.trim().replace(/-compose$/, "");
+}
+/** What a single-file write may do to a test file: admitted only where its row was localized to exactly that file (the
+ *  row's test_defect certifier names it and its edit_site allows it); refused with the cited reason otherwise, a missing
+ *  row included. A target that is not a test file is not this check's. Pure: the caller reads the row. */
+export type TestFileWriteVerdict = { verdict: "admitted" | "refused" | "not_applicable"; reason: string; gap_id: string | null; localization_record_id: string };
+export function testFileWriteVerdict(vessel: string, subPath: string, rowMeta: Record<string, unknown> | null, gapId: string | null): TestFileWriteVerdict {
+  const out = (verdict: TestFileWriteVerdict["verdict"], reason: string, record = "none"): TestFileWriteVerdict => ({ verdict, reason, gap_id: gapId, localization_record_id: record });
+  if (strayTestEdits(vessel, [subPath], {}).length === 0) return out("not_applicable", `${subPath} is not a test file`);
+  if (!rowMeta) return out("refused", `test-file target ${subPath}: no localization row${gapId ? ` (${gapId} not found)` : " (no gap_id)"}`);
+  const decision = (rowMeta["test_defect"] as { decision_id?: unknown } | null | undefined)?.decision_id;
+  const record = typeof decision === "string" && decision ? decision : "none";
+  if (!testDefectRecordFor(rowMeta, subPath, vessel)) return out("refused", `test-file target ${subPath}: row ${gapId}'s test_defect certifier does not name it`, record);
+  if (strayTestEdits(vessel, [subPath], rowMeta).length > 0) return out("refused", `test-file target ${subPath}: row ${gapId}'s edit_site does not allow it`, record);
+  return out("admitted", `test-file target ${subPath} is row ${gapId}'s localized test file`, record);
+}

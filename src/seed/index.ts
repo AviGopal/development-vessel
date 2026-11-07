@@ -177,6 +177,7 @@ import { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } fro
 import { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
 import { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V1_TEMPLATE } from "./precutover-baseline-base-tree.js";
 import { POST_LAND_BASELINE_KEEP_TEMPLATE, POST_LAND_BASELINE_KEEP_V1_TEMPLATE } from "./post-land-baseline-keep.js";
+import { PRECUTOVER_SUITE_TIMEOUT_DEFER_TEMPLATE, PRECUTOVER_SUITE_TIMEOUT_DEFER_V1_TEMPLATE } from "./precutover-suite-timeout-defer.js";
 import { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 import { TEST_DEFECT_LOCALIZATION_BUDGET_TEMPLATE, TEST_DEFECT_LOCALIZATION_BUDGET_V1_TEMPLATE } from "./test-defect-localization-budget.js";
 import { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
@@ -273,6 +274,7 @@ export { GAP_GOAL_UNARMED_SKIP_TEMPLATE, GAP_GOAL_UNARMED_SKIP_V1_TEMPLATE } fro
 export { LINEAGE_CAP_RELEASE_TEMPLATE, LINEAGE_CAP_RELEASE_V1_TEMPLATE } from "./lineage-cap-release.js";
 export { PRECUTOVER_BASELINE_BASE_TREE_TEMPLATE, PRECUTOVER_BASELINE_BASE_TREE_V1_TEMPLATE } from "./precutover-baseline-base-tree.js";
 export { POST_LAND_BASELINE_KEEP_TEMPLATE, POST_LAND_BASELINE_KEEP_V1_TEMPLATE } from "./post-land-baseline-keep.js";
+export { PRECUTOVER_SUITE_TIMEOUT_DEFER_TEMPLATE, PRECUTOVER_SUITE_TIMEOUT_DEFER_V1_TEMPLATE } from "./precutover-suite-timeout-defer.js";
 export { TEST_DEFECT_LOCALIZATION_TEMPLATE, TEST_DEFECT_LOCALIZATION_V1_TEMPLATE } from "./test-defect-localization.js";
 export { TEST_DEFECT_LOCALIZATION_BUDGET_TEMPLATE, TEST_DEFECT_LOCALIZATION_BUDGET_V1_TEMPLATE } from "./test-defect-localization-budget.js";
 export { TEST_DEFECT_ADMISSION_TEMPLATE, TEST_DEFECT_ADMISSION_V1_TEMPLATE } from "./test-defect-admission.js";
@@ -671,6 +673,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // run in process after a post-land suite that found tests newly failing; graded by the vessel's next pre-cutover gate (post-land-baseline-keep.ts)
   POST_LAND_BASELINE_KEEP_TEMPLATE,
   POST_LAND_BASELINE_KEEP_V1_TEMPLATE,
+  // run in process at the pre-cutover gate when an undirected landing's suite did not run; graded by the gap's next pre-cutover suite (precutover-suite-timeout-defer.ts)
+  PRECUTOVER_SUITE_TIMEOUT_DEFER_TEMPLATE,
+  PRECUTOVER_SUITE_TIMEOUT_DEFER_V1_TEMPLATE,
   // run in process by the check-supply tick for a failing-test row whose child scripts do not parse; graded by the row's next compose (test-defect-localization.ts)
   TEST_DEFECT_LOCALIZATION_TEMPLATE,
   TEST_DEFECT_LOCALIZATION_V1_TEMPLATE,

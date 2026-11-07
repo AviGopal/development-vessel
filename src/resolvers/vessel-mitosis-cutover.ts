@@ -29,6 +29,7 @@ import { readTuningNumber } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, postConsumerTrace, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite, ONLY_TESTS_MAX_NAMES } from "./test-suite.js";
+import { precutoverSuiteTimeoutDecision, settlePrecutoverSuiteTimeoutDefer } from "./precutover-suite-timeout-defer.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLease, resolveMaintenanceLeaseWrite } from "./maintenance-lease";
@@ -3861,13 +3862,14 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     try {
       const suiteTimeoutMs = await precutoverSuiteTimeoutMs();
       operations.push({ op: "precutover_suite_budget", status: "ok", detail: `timeout_ms=${suiteTimeoutMs} (${PRECUTOVER_SUITE_TIMEOUT_ROW})` });
-      const runSuiteWith = async (extra: Record<string, unknown>): Promise<{ failing: string[] | null; ran: boolean; pass: number; fail: number }> => {
+      const runSuiteWith = async (extra: Record<string, unknown>): Promise<{ failing: string[] | null; ran: boolean; timedOut: boolean; pass: number; fail: number }> => {
         await renewChangeWindow(args.changeWindow, suiteTimeoutMs, "pre-cutover suite");
         const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, timeout_ms: suiteTimeoutMs, ...extra });
         const sb = (res as { body?: Record<string, unknown> }).body ?? {};
         const ran = sb.ran === true;
         return {
           ran,
+          timedOut: sb.timed_out === true,
           pass: Number(sb.pass ?? 0),
           fail: Number(sb.fail ?? 0),
           failing: ran ? (Array.isArray(sb.failingTests) ? (sb.failingTests as unknown[]).map(String) : []) : null,   // null = unmeasurable → caller fails open
@@ -3877,10 +3879,25 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       /** Re-run ONLY the named tests, so a load-correlated flake is not confirmed by its own load. */
       const runSuiteOnly = async (names: string[]): Promise<string[] | null> => (await runSuiteWith({ only_tests: names })).failing;
       const firstRun = await runSuiteWith({});
+      // The consumer of an earlier timeout deferral for this gap (precutover-suite-timeout-defer.ts).
+      settlePrecutoverSuiteTimeoutDefer(precutoverGapId, firstRun);
       const failNow = firstRun.failing;
       if (!precutoverOrigin.directed && (!firstRun.ran || (firstRun.pass === 0 && firstRun.fail === 0))) {
         const reasonLabel = firstRun.ran ? "ran but measured 0 tests" : "did not run";
         const kind = firstRun.ran ? "pre_cutover_suite_zero_tests" : "pre_cutover_suite_not_run";
+        // A TIMEOUT UNDER CONTENTION IS DEFERRED, NOT REFUSED, under variant-1 (precutover-suite-timeout-defer.ts).
+        if (!firstRun.ran) {
+          const td = await precutoverSuiteTimeoutDecision({ vessel: String(vessel_name), gapId: precutoverGapId, mitosisVersionId: String(mitosis_version_id), timedOut: firstRun.timedOut });
+          if (td.defer) {
+            const dkind = "pre_cutover_suite_timeout_deferred";
+            operations.push({ op: "precutover_suite", status: "deferred", detail: `${td.outcome} (${td.traceId})` });
+            await unstage(dkind);
+            return softRefuse(
+              `${dkind}: the pre-cutover suite timed out on a contended host, so it measured nothing about this staged tree. Deferring this cutover; the staged tree is kept and retried (${td.outcome}).`,
+              { kind: dkind, refuse_class: dkind, deferred: true, preserve_pending: true, vessel_name, gap_id: precutoverGapId, staged_files: stagedFiles, precutover_suite_timeout: { trace_id: td.traceId, variant: td.variant }, own_check_counters: getOwnCheckCounters(), operations },
+            );
+          }
+        }
         // NOT CHARGED TO THE LANDING GAP'S OWN CHECK (gap a-pre-cutover-suite-timeout-is-charged-to-the-landing-gaps-own-check-
         // counter-and-breaks-an-unrelated-predicate). This suite is the whole-suite scan, not the gap's own check: stamping
         // its did-not-run on the row's own_check_unmeasurable_count demoted, at OWN_CHECK_UNMEASURABLE_ESCALATE_AT in a row,

@@ -101,6 +101,17 @@ async function discoverShellEndpoint(): Promise<string | null> {
   }
 }
 
+/** The line a bun run killed at its budget prints (resolveTestSuite's bunRun); never a summary line. */
+export const TIMED_OUT_MARKER = "TEST_SUITE_TIMED_OUT";
+/**
+ * Whether the run was killed at its budget: the marker with `timeout`'s own exit status (124) AND a wall time at the
+ * budget, so a run that itself exited 124 early is not read as a timeout.
+ */
+export function suiteTimedOut(raw: string, budgetSec: number): boolean {
+  const m = new RegExp(`^${TIMED_OUT_MARKER} rc=(124) elapsed=(\\d+)$`, "m").exec(raw);
+  return !!m && Number(m[2]) >= budgetSec - 1;
+}
+
 /**
  * Parse bun's summary. Counts are read from the SUMMARY lines rather than by tallying
  * `(fail)` lines, because a suite that fails to load emits FEWER per-test lines, not more —
@@ -509,7 +520,11 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const baseRef = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim())
     ? pointer.base_ref.trim()
     : "";
-  const bunRun = `timeout ${budgetSec} ${testChildEnvShellPrefix()} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
+  // A RUN KILLED AT ITS BUDGET SAYS SO (suiteTimedOut): `timeout` exits 124 when it ended the run, and only then is one
+  // marker line printed with the run's wall seconds, so a timeout is told apart from a run that never started. No -k:
+  // a run that outlives TERM is ended by the shell producer's own cap and prints no marker, so it reads as not timed
+  // out (the conservative reading). The exit status stays 0, as before.
+  const bunRun = `{ __ts=$(date +%s); timeout ${budgetSec} ${testChildEnvShellPrefix()} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1; __rc=$?; [ "$__rc" = 124 ] && echo "${TIMED_OUT_MARKER} rc=$__rc elapsed=$(( $(date +%s) - __ts ))"; true; }`;
   const command = baseRef
     ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       (composeRoot
@@ -577,6 +592,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       gap_id: typeof pointer.gap_id === "string" ? pointer.gap_id : null,
       proposal_id: typeof pointer.proposal_id === "string" ? pointer.proposal_id : null,
       ran,
+      // Present only on a run killed at its budget, so every other body is unchanged.
+      ...(suiteTimedOut(raw, budgetSec) ? { timed_out: true } : {}),
       ...(gateRefused ? { gate_refused: gateRefused } : {}),
       total: parsed.total,
       pass: parsed.pass,

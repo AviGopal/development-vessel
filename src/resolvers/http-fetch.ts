@@ -40,6 +40,36 @@ export async function resolveHttpFetch(pointer: HttpFetchPointer): Promise<Resol
   const timeoutMs = pointer.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBodyBytes = pointer.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
+  // Egress gate: block outbound requests by default except substrate-local hosts.
+  // Policy (minimal viable):
+  //  - Always allow localhost/127.0.0.1/::1
+  //  - For other hosts, allow only GET when the hostname is present in
+  //    HTTP_FETCH_EGRESS_ALLOW_HOSTS (comma-separated, exact host match).
+  const isLocalHost =
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "::1";
+  const allowlistEnv = process.env["HTTP_FETCH_EGRESS_ALLOW_HOSTS"] ?? "";
+  const allowHosts = allowlistEnv
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0);
+  const inAllowlist = allowHosts.includes(parsed.hostname.toLowerCase());
+  let egressAllowed = true;
+  if (!isLocalHost) {
+    // Non-GET methods to external hosts are refused by default.
+    egressAllowed = method === "GET" && inAllowlist;
+  }
+  const decision = egressAllowed ? "allow" : "block";
+  try {
+    // Leave evidence: record host, method, and the decision for every http_fetch.
+    console.info(`[egress_gate] http_fetch ${method} ${parsed.hostname} decision=${decision}`);
+  } catch {}
+  if (!egressAllowed) {
+    // Fail before any network IO.
+    throw new Error(`egress gate: ${method} to ${parsed.hostname} is not allowed`);
+  }
+
   const timer = setTimeout(() => {}, timeoutMs);
 
   // Auto-attach this vessel's METABOB_API_KEY when the target is a

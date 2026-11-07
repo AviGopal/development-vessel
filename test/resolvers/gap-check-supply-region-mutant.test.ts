@@ -54,6 +54,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -231,16 +232,16 @@ describe("a row with a literal region gets no region mutant (regression controls
 
   it("[CONTROL] development-vessel's recommit-draft row (its real region and site) is not region-gated (decision level)", () => {
     const meta = { edit_site: "repos/development-vessel/src/resolvers/gap-check-supply.ts", region: "  if (cat === \"orphaned_capability\" || cat === \"unreachable_producer\") return null;" };
-    expect(supply.regionGateApplies(meta)).toBe(false);
-    expect(supply.regionGateApplies({ edit_site: meta.edit_site })).toBe(true);
-    expect(supply.regionGateApplies({ edit_site: meta.edit_site, region: null })).toBe(true);
+    expect(supply_checkSupplyAdmission.regionGateApplies(meta)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ edit_site: meta.edit_site })).toBe(true);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ edit_site: meta.edit_site, region: null })).toBe(true);
   });
 
   it("[REPLAY, DECISION] development-vessel 40d50487's check (its row carries a literal region) is not region-gated (decision level)", () => {
     // The check (fixture, verbatim) imports this vessel's whole gap-check-supply module: not hostable in a temp clone.
     expect(fixture("40d50487-no-new-title-age.check.ts.txt")).toContain('import * as mod from "../../src/resolvers/gap-check-supply.js"');
     const meta = { edit_site: "repos/development-vessel/src/resolvers/gap-check-supply.ts", region: "        ? { kind: \"failed\", reason: `the goal ended ${status} and reached, but no new test title appeared in ${ledger.test_file ?? \"the check file\"} within ${hours(bounds.title_grace_ms)}` }" };
-    expect(supply.regionGateApplies(meta)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies(meta)).toBe(false);
   });
 });
 
@@ -283,7 +284,7 @@ describe("[REPLAY] libp2p-federation-transport 84460a91's check (research agf_20
     const site = fixture("libp2p-federation-transport-index.84460a91.ts.txt");
     expect(check).toContain("fetch: (_peer: any, options: any) =>");
     expect(site).toContain("await httpSvc.fetchProtocol(dialTarget, RESOLVE_HTTP_PROTO, {");
-    expect(supply.regionGateApplies({ edit_site: "scripts/substrate/federation-relay/federation-transport-server.ts", region: FED_REGION })).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ edit_site: "scripts/substrate/federation-relay/federation-transport-server.ts", region: FED_REGION })).toBe(false);
     expect(supply.derivedTextRegion(site, "src/index.ts", FED_SUMMARY, FED_SPEC)).toBeNull();
   });
 });

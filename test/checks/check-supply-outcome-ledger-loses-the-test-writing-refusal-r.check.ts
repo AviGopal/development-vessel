@@ -4,12 +4,13 @@
 // was lost, and the next goal was sent the same text. Pure functions of src/resolvers/gap-check-supply.ts; no I/O.
 import { describe, expect, test } from "bun:test";
 import * as cs from "../../src/resolvers/gap-check-supply.ts";
+import * as cs_checkSupplyDispatch from "../../src/landing/check-supply-dispatch.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
 const LEDGER = { dispatch_id: "d1", last_dispatch_at: new Date(NOW - 3_600_000).toISOString(), test_file: "test/checks/g.check.ts", attempts: 1 };
 const PREFIX = "early edit-intent routed to feature_compose; check_supply compose refused at (none) (verdict=UNFAVORABLE): verify failed (development-vessel): ";
 const verdictFor = (reach_reason: string) =>
-  cs.dispatchVerdict(LEDGER as never, { http: 200, status: "failed", reached: false, reach_reason } as never, NOW, cs.outcomeBoundsOf({}), "node-a") as { kind: string; reason?: string };
+  cs_checkSupplyDispatch.dispatchVerdict(LEDGER as never, { http: 200, status: "failed", reached: false, reach_reason } as never, NOW, cs_checkSupplyDispatch.outcomeBoundsOf({}), "node-a") as { kind: string; reason?: string };
 
 describe("check supply: the test-writing refusal reaches the ledger and the next goal", () => {
   test("a long test-writing refusal reason is not truncated", () => {

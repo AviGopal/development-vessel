@@ -28,7 +28,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
-import * as fc from "../../src/resolvers/feature-compose.js";
+import * as fc from "../../src/landing/dissent.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
 import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
@@ -220,7 +220,7 @@ function fnText(file: string, name: string): string {
 }
 describe("independent landing verdict: wiring", () => {
   it("landedCloseReason consults the sweep's label (goal_verification_label) bound to the landing", () => {
-    const body = fnText("feature-compose.ts", "landedCloseReason");
+    const body = fnText("../landing/dissent.ts", "landedCloseReason");
     expect(body.length).toBeGreaterThan(0);
     expect(/landingLabelHere\(|goal_verification_label/.test(body)).toBe(true);
   });

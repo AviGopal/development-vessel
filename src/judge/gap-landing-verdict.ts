@@ -22,8 +22,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "../resolvers/types.js";
-import { resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER } from "../resolvers/feature-compose.js";
-import type { GoalVerificationLabel } from "../resolvers/feature-compose.js";
+import { resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER } from "../landing/dissent.js";
+import type { GoalVerificationLabel } from "../landing/dissent.js";
 import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, closeAbsentDetectorRows, birthCheckRepo, postConsumerTrace } from "../resolvers/substrate-gap.js";
 import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";

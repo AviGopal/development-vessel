@@ -47,6 +47,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyDispatch = await import("../../src/landing/check-supply-dispatch.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -179,7 +180,7 @@ async function dispatchAndLand(prefix: string, check: string): Promise<string> {
  *  private settledHistory (history, plus the current state when it is a judged-not-armed one), into priorAttemptSentence. */
 function nextAttemptSentence(l: Row): string {
   const prior = Array.isArray(l["history"]) ? (l["history"] as Row[]).slice(-4) : [];
-  const judged = supply.JUDGED_NOT_ARMED.has(String(l["state"] ?? "")) ? [{ attempt: Number(l["attempts"] ?? 0), state: l["state"], reason: l["reason"] ?? "", titles: Array.isArray(l["judged_titles"]) ? l["judged_titles"] : [] }] : [];
+  const judged = supply_checkSupplyDispatch.JUDGED_NOT_ARMED.has(String(l["state"] ?? "")) ? [{ attempt: Number(l["attempts"] ?? 0), state: l["state"], reason: l["reason"] ?? "", titles: Array.isArray(l["judged_titles"]) ? l["judged_titles"] : [] }] : [];
   return supply.priorAttemptSentence([...prior, ...judged]);
 }
 const PROSE_REGION = "the line where add combines its two inputs";

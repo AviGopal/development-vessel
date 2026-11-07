@@ -41,6 +41,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -171,7 +172,7 @@ describe("the check goal carries the row's must-fail and asks for a control", ()
     expect(goal.length).toBeLessThan(8192);
   });
   it("[MF-a] after a check_no_control refusal, the next attempt's goal tells it to add a control", () => {
-    const prior = [{ state: "arm_refused", titles: ["add(2, 1) is 3"], reason: String(supply["CHECK_NO_CONTROL_REASON"] ?? "") }];
+    const prior = [{ state: "arm_refused", titles: ["add(2, 1) is 3"], reason: String(supply_checkSupplyAdmission["CHECK_NO_CONTROL_REASON"] ?? "") }];
     const goal = supply.checkSupplyGoal(VESSEL, "test/checks/x.check.ts", "add returns 1 where 3 is required", SITE, undefined, [], prior as Row[], null);
     expect(goal).toContain("check_no_control: every new test is red at HEAD; add a CONTROL test");
   });

@@ -165,7 +165,7 @@ export async function resolveOwnCheckBaselineClassify(pointer: OwnCheckBaselineP
   // The check file and its imports AS OF THE BASE (the run's worktree is gone): git show base:<path> in the clone.
   const readAtBase = (rel: string): string | null => git(clone, ["show", `${base}:${rel}`]);
   const checkSrc = readAtBase(testFile);
-  const fc = await import("./feature-compose.js");
+  const fc = await import("../gates/own-check-static.js");
   const importSpecs = checkSrc ? [...fc.relativeImportBindings(checkSrc, true).values()] : [];
   const c = classifyOwnCheckRun(body, onlyTests, importSpecs, policy, testFile);
   const failing = (Array.isArray(body?.["own_failing"]) ? body!["own_failing"] : []) as OwnCheckFailure[];

@@ -142,9 +142,15 @@ const EXCLUDED_SRC = [
   "src/resolvers/intervention-evaluate.ts",
   // The §14 evaluator's operator-acts reader (qa 10-22, TIGHTENING): self-fact-reconcile's repair_autonomy imports it.
   "src/resolvers/operator-acts.ts",
+  // The code-change-path cut's one-time bootstrap move: the declarations kept code took from feature-compose,
+  // gap-to-feature and gap-check-supply, lifted as-is into these modules, closed as the files they came from were.
+  "src/gates/contract-narrowing.ts", "src/gates/own-check-static.ts", "src/gates/patch-gates.ts", "src/gates/semantic-gate.ts", "src/gates/test-file-gates.ts", "src/landing/caller-gone.ts", "src/landing/check-supply-dispatch.ts", "src/landing/dissent.ts", "src/landing/gap-decompose.ts", "src/landing/gap-localize.ts",
 ];
 const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
-const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];
+const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts",
+  // The code-change-path cut's one-time bootstrap move lifted these out of feature-compose, gap-to-feature and
+  // gap-check-supply as-is: still item 1's verdict path, so their closure stays report-only as it was inside those files.
+  "src/gates/contract-narrowing.ts", "src/gates/own-check-static.ts", "src/gates/patch-gates.ts", "src/gates/semantic-gate.ts", "src/gates/test-file-gates.ts", "src/landing/caller-gone.ts", "src/landing/check-supply-dispatch.ts", "src/landing/dissent.ts", "src/landing/gap-decompose.ts", "src/landing/gap-localize.ts"];
 // The lane-editable modules still on the evaluator's path, each REVIEWED (qa, 10-05): why it may stay unguarded.
 // None of them decides a verdict, a scope write or a credential; a lane landing in one can at worst degrade
 // plumbing or a notice, which the evaluator's own re-run and the guarded files would not certify.

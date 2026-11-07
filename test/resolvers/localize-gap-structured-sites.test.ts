@@ -31,7 +31,7 @@ process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
 process.env["VESSELS_CLONE_ROOT"] = CLONES;
 
 const gp = (await import("../../src/judge/gap-policy.js")) as Record<string, any>;
-const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2f = await import("../../src/landing/gap-localize.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 const realFetch = globalThis.fetch;
 let excluded: string[] = [];

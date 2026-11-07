@@ -32,6 +32,7 @@ const CLONE = join(ROOT, "clone");
 const RUNTIME = join(ROOT, "runtime");
 const prevClone = process.env["VESSELS_CLONE_ROOT"];
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+const fc_testFileGates = (await import("../../src/gates/test-file-gates.js")) as Record<string, any>;
 const RUN = Math.random().toString(36).slice(2, 8);
 // feature-compose PER_FILE_SLICE: the window one target file gets.
 const TARGET_WINDOW = 6000;
@@ -130,7 +131,7 @@ describe("the own check is in the grounding of the drafter, read-only", () => {
 
 describe("GUARD a draft that edits the check file is refused, however green it makes the check", () => {
   it("GUARD strayTestEdits names the check file when a draft edits it beside the source", () => {
-    expect(fc.strayTestEdits(`repos/${VESSEL}`, [CHECK, "src/widget.ts"], meta([NAMED]))).toEqual([CHECK]);
+    expect(fc_testFileGates.strayTestEdits(`repos/${VESSEL}`, [CHECK, "src/widget.ts"], meta([NAMED]))).toEqual([CHECK]);
   });
 
   it("GUARD a check-file-only diff is vetoed as self_certification even when the check went red to green", () => {

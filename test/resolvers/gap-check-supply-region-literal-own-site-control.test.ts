@@ -38,6 +38,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -196,11 +197,11 @@ describe("a correct check on a literal-own-site row (the replacement control)", 
     expect((base.body as Row)["requested_not_passing"]).toBe(1);
     const mut = await resolveTestSuite({ ...input, base_ref: "HEAD", mutate_edit: { file: OWN.siteRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } } as never);
     expect(((mut.body as Row)["mutation"] as Row)["applied"]).toBe(true);
-    expect(supply.mutationGateVerdict(base.body as Row, [{ mutant: m, report: mut.body as Row }], [TITLE])).toEqual({ measured: 1, changed: 1, unmeasured: 0 });
+    expect(supply_checkSupplyAdmission.mutationGateVerdict(base.body as Row, [{ mutant: m, report: mut.body as Row }], [TITLE])).toEqual({ measured: 1, changed: 1, unmeasured: 0 });
   }, 120_000);
 
   it("[CONTROL] in this range it arms with no region_gate (a literal in its own site keeps the exemption)", async () => {
-    expect(supply.regionGateApplies({ region: LITERAL }, OWN_SRC)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: LITERAL }, OWN_SRC)).toBe(false);
     const { row } = await landAndArm("own-lit", OWN, OWN_SUMMARY, LITERAL, CHECK_OWN);
     expect(ledgerOf(row)["state"]).toBe("armed");
     expect(gateOf(row)["region_gate"]).toBeUndefined();

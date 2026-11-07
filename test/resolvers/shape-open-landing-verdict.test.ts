@@ -10,7 +10,7 @@
 // test_suite stays the first (built-in) verifier with no behaviour change: its labels are exactly as before.
 // A kind with no registered verifier, or any refused rule, is no label: the close waits; it is never a pass.
 import { describe, it, expect } from "bun:test";
-import * as fc from "../../src/resolvers/feature-compose.js";
+import * as fc from "../../src/landing/dissent.js";
 import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
 type Verdict = "present" | "absent" | "pending" | "unknown";

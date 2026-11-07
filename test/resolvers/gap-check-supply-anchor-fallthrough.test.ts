@@ -47,6 +47,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, any>;
+const supply_checkSupplyAdmission = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, any>;
 const admission = await import("../../src/resolvers/check-supply-admission.js");
 
 type Row = Record<string, unknown>;
@@ -211,7 +212,7 @@ describe("step 3 falls through to the anchors a row's writers already wrote", ()
     await seed(id, summary, { edit_site: site("anchor-token.ts"), falsifier: "none" });
     const p = await pass(Date.parse("2031-06-06T00:00:00.000Z"));
     const siteSrc = SITES["anchor-token.ts"]!;
-    const own = supply.falsifiableAnchors(summary, siteSrc, "", null);
+    const own = supply_checkSupplyAdmission.falsifiableAnchors(summary, siteSrc, "", null);
     expect(own.length).toBeGreaterThan(0);
     const meta = ((await stored(id))?.["classification_metadata"] ?? {}) as Row;
     const reader = admission.srcReaderAt(join(CLONES, VESSEL));

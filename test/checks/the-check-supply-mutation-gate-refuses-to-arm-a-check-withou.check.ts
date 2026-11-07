@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as mod from "../../src/resolvers/gap-check-supply";
+import * as mod from "../../src/landing/check-supply-dispatch";
 
 describe("check-supply mutation gate refusal is surfaced to the evaluator (REALIGNMENT §2.1, law 8)", () => {
   test("arm_refused with red_independent_of_edit_site is classified as a 'refused' outcome with its reason", () => {

@@ -17,7 +17,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isolatedChildEnv } from "../resolvers/isolated-gap-store-run.js";
-import { gapCheckIdentity } from "../../src/resolvers/feature-compose.js";
+import { gapCheckIdentity } from "../../src/landing/dissent.js";
 import * as glv from "../../src/judge/gap-landing-verdict.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-partial-reopen-${Date.now()}-${Math.random().toString(36).slice(2)}`);

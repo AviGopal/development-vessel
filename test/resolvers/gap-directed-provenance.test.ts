@@ -143,10 +143,10 @@ describe("a gap row's directed is honoured only with an operator's provenance", 
 
   it("gap-directed the in-process readers honour directed only through gapDirected (source pins)", () => {
     const src = (f: string) => readFileSync(join(import.meta.dir, "..", "..", "src", f), "utf8");
-    expect(src("resolvers/gap-to-feature.ts")).toContain("const childDirected = gapDirected(meta) || opts.directed === true;");
+    expect(src("landing/gap-decompose.ts")).toContain("const childDirected = gapDirected(meta) || opts.directed === true;");
     expect(src("judge/gap-admission.ts")).toContain("const childDirected = gapDirected(meta) || opts.directed === true;");
     expect(src("resolvers/feature-compose.ts")).toContain("...(gapDirected(meta) ? { directed: true } : {}) }");
-    for (const f of ["resolvers/gap-to-feature.ts", "judge/gap-admission.ts", "resolvers/feature-compose.ts", "judge/gap-attempt-credit.ts"]) {
+    for (const f of ["resolvers/gap-to-feature.ts", "landing/gap-decompose.ts", "judge/gap-admission.ts", "resolvers/feature-compose.ts", "judge/gap-attempt-credit.ts"]) {
       expect(src(f)).not.toMatch(/meta\.directed === true/);
     }
     expect(src("resolvers/substrate-gap.ts")).toContain("gateGapDirected(pointer as Record<string, unknown>);");

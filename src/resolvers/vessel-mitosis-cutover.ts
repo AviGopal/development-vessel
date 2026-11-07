@@ -4815,7 +4815,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // by its feature_compose caller.
   if (dissentFromPendingRecord && semanticDissent && gapId !== "unknown-gap") {
     try {
-      const { settleSemanticDissent } = await import("./feature-compose.js");
+      const { settleSemanticDissent } = await import("../landing/dissent.js");
       await settleSemanticDissent(gapId, semanticDissent as never, { push_status: pushStatus, new_git_sha: newSha });
     } catch (err) {
       console.warn(`[mitosis-cutover] gap=${gapId}: pending semantic dissent not settled (${(err as Error)?.message ?? String(err)})`);

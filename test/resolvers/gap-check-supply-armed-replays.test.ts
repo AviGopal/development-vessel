@@ -47,6 +47,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -186,12 +187,12 @@ describe("pre-registered replays of the five still-armed wrong checks", () => {
   it("[REPLAY] libp2p 84460a91: UNMEASURED, its reason recorded", () => {
     const e = ev("84460a91-row-evidence.json");
     const site = fixture("libp2p-federation-transport-index.84460a91.ts.txt");
-    expect(supply.regionGateApplies({ region: e.region }, site)).toBe(true);
-    expect(supply.explainedTextRegion(site, "src/index.ts", e.summary, e.falsifier_spec ?? "")).toEqual({ region: null, why: "token resolveViaLibp2p: 0 non-declaration occurrence(s) of 1; token resolveViaHttp: 0 non-declaration occurrence(s) of 1" });
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, site)).toBe(true);
+    expect(supply_checkSupplyAdmission.explainedTextRegion(site, "src/index.ts", e.summary, e.falsifier_spec ?? "")).toEqual({ region: null, why: "token resolveViaLibp2p: 0 non-declaration occurrence(s) of 1; token resolveViaHttp: 0 non-declaration occurrence(s) of 1" });
   });
   it("[REPLAY] dv 40d50487: OUTSIDE REACH in this range (its literal is in its own site)", () => {
     const e = ev("40d50487-row-evidence.json");
-    expect(supply.regionGateApplies({ region: e.region }, readFileSync(join(REPO, "src/resolvers/gap-check-supply.ts"), "utf8"))).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, readFileSync(join(REPO, "src/landing/check-supply-dispatch.ts"), "utf8"))).toBe(false);
   });
 });
 

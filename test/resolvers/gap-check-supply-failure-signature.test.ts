@@ -6,7 +6,7 @@
 // (red_reason from retry-evidence classifyCheckRun).
 import { describe, expect, it } from "bun:test";
 
-const supply = await import("../../src/resolvers/gap-check-supply.js");
+const supply = await import("../../src/resolvers/check-supply-admission.js");
 type Row = Record<string, unknown>;
 const T = "the gate refusal is logged";
 const NAME = `suite > ${T}`;

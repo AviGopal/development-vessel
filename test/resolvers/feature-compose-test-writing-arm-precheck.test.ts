@@ -107,7 +107,7 @@ describe("the test-writing verify applies the arm step's static predicates", () 
 });
 
 const fcMod = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
-const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, any>;
+const supply = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, any>;
 describe("testWritingArmStaticRefusal: the same reason strings as the arm step", () => {
   const fc = fcMod;
   const DIR = join(ROOT, "static-vessel");

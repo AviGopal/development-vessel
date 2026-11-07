@@ -47,6 +47,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -177,7 +178,7 @@ async function gutGate(prefix: string, check: string, at: { vessel: string; site
   git(at.vessel, "commit", "-q", "-m", `check ${prefix}`);
   landCheck(join(CLONES, at.vessel), testFile);
   const gate = supply["guttingGate"] as (a: { vessel: string; siteRel: string; testFile: string; checkSrc: string; titles: string[] }) => Promise<{ kind: string; reason?: string; record?: Row }>;
-  return gate({ vessel: at.vessel, siteRel: at.siteRel, testFile, checkSrc: check, titles: supply.declaredTestTitles(check) });
+  return gate({ vessel: at.vessel, siteRel: at.siteRel, testFile, checkSrc: check, titles: supply_checkSupplyAdmission.declaredTestTitles(check) });
 }
 
 describe("gate 9: a check the gutted edit-site function passes is not armed", () => {

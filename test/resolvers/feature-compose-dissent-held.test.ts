@@ -41,12 +41,13 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import ts from "typescript";
 import * as fc from "../../src/resolvers/feature-compose.js";
+import * as fc_callerGone from "../../src/landing/caller-gone.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 function exported<T>(name: string): T {
-  const f = (fc as unknown as Record<string, unknown>)[name];
+  const f = ({ ...fc, ...fc_callerGone } as unknown as Record<string, unknown>)[name];
   expect(typeof f, `src/resolvers/feature-compose.ts must export ${name}`).toBe("function");
   return f as T;
 }

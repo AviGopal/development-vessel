@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 process.env.LLM_VESSEL_ENDPOINT ??= "http://127.0.0.1:65535";
-import { detectZeroBehaviorDelta } from "../src/resolvers/feature-compose.js";
+import { detectZeroBehaviorDelta } from "../src/gates/semantic-gate.js";
 
 const cases: Array<[string,string,boolean]> = [
   // [name, diff, expectedInert]

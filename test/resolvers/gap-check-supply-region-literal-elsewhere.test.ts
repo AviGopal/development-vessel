@@ -35,6 +35,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -176,14 +177,14 @@ describe("the region gate applies to a literal region that is not in the check's
   it("[MUST-FAIL] 84460a91: its literal (resolveOverLibp2p) is not in src/index.ts, so the gate applies", () => {
     const e = ev("84460a91-row-evidence.json");
     expect(FED_SITE.includes(String(e.region))).toBe(false);
-    expect(supply.regionGateApplies({ region: e.region }, FED_SITE)).toBe(true);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, FED_SITE)).toBe(true);
   });
   it("[CONTROL] a literal in its own site keeps the exemption: ribosome 44abf5e, 40d50487; and no site text, no change", () => {
-    expect(supply.regionGateApplies({ region: RIBO_REGION }, TREES[RIBO.vessel]![RIBO.siteRel]!)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: RIBO_REGION }, TREES[RIBO.vessel]![RIBO.siteRel]!)).toBe(false);
     const dv = ev("40d50487-row-evidence.json");
-    expect(supply.regionGateApplies({ region: dv.region }, fixture("gap-check-supply.bf88c790.ts.txt"))).toBe(false);
-    expect(supply.regionGateApplies({ region: FED_REGION })).toBe(false);
-    expect(supply.regionGateApplies({ region: null }, FED_SITE)).toBe(true);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: dv.region }, fixture("gap-check-supply.bf88c790.ts.txt"))).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: FED_REGION })).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: null }, FED_SITE)).toBe(true);
   });
   it("[MUST-FAIL] end to end: 23f78717's check on a row whose literal names another file is refused by the region gate", async () => {
     const { row } = await landAndArm("le-elsewhere", CDB, CDB_SUMMARY, "resolveOverLibp2p", fixture("23f78717-concept-delete-write.check.ts.txt"));

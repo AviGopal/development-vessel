@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs';
  *   consistently and is still caught.
  */
 
-const SRC = new URL('../../src/resolvers/feature-compose.ts', import.meta.url).pathname;
+const SRC = new URL('../../src/gates/semantic-gate.ts', import.meta.url).pathname;
 const source = () => readFileSync(SRC, 'utf8');
 
 const block = (): string => {

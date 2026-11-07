@@ -30,7 +30,7 @@ process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
 delete process.env["GAP_STORE_ENDPOINT"];
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
-const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2f = await import("../../src/landing/gap-decompose.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const { resolveSubstrateGapWrite, resolveSubstrateGap, __settleBirthEvaluationsForTests, __setFleetVocabularyForTests } = sg;
 const { decomposeGap } = g2f;

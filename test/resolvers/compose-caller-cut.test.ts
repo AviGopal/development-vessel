@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+const fc_callerGone = (await import("../../src/landing/caller-gone.js")) as Record<string, any>;
 const lr = (await import("../../src/long-running.js")) as Record<string, any>;
 const SRC = (rel: string) => readFileSync(join(import.meta.dir, "..", "..", "src", rel), "utf8");
 const P = "[development-vessel:compose-caller-cut]";
@@ -39,7 +40,7 @@ const gone = () => { const ac = new AbortController(); ac.abort({ at: T0_ISO });
 const state = (variant: number, dispatchId: string | null, directed = false) => ({ variant, why: `fixture variant-${variant}`, gapId: "gap-fixture", dispatchId, directed });
 // A compose's pointer as the run carries it: its caller-cut state under COMPOSE_CUT_STATE, copied by a spread.
 const ptr = (st: Record<string, unknown>) => ({ ...{ type: "feature_compose", [fc.COMPOSE_CUT_STATE]: st } });
-const at = (signal: AbortSignal | undefined, st: Record<string, unknown>, fn: (p: unknown) => unknown) => { const p = ptr(st); return fc.runWithCallerGone(signal, () => fn(p)); };
+const at = (signal: AbortSignal | undefined, st: Record<string, unknown>, fn: (p: unknown) => unknown) => { const p = ptr(st); return fc_callerGone.runWithCallerGone(signal, () => fn(p)); };
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 afterEach(() => fc.__setCallerCutDepsForTests(null));
@@ -47,13 +48,13 @@ afterEach(() => fc.__setCallerCutDepsForTests(null));
 describe("the caller-gone signal", () => {
   it("[MUST-FAIL] a client dropping the connection aborts it, with the time it left; a draining process does not", () => {
     const req = new AbortController();
-    const s = fc.bindCallerGone(req.signal, () => false);
+    const s = fc_callerGone.bindCallerGone(req.signal, () => false);
     expect(s.aborted).toBe(false);
     req.abort();
     expect(s.aborted).toBe(true);
     expect(typeof (s.reason as { at?: unknown }).at).toBe("string");
     const req2 = new AbortController();
-    const s2 = fc.bindCallerGone(req2.signal, () => true);
+    const s2 = fc_callerGone.bindCallerGone(req2.signal, () => true);
     req2.abort();
     expect(s2.aborted).toBe(false);
   });
@@ -61,7 +62,7 @@ describe("the caller-gone signal", () => {
     let draining = false;
     const seen: Record<string, boolean> = {};
     const srv = Bun.serve({ port: 0, idleTimeout: 30, async fetch(req) {
-      const s = fc.bindCallerGone(req.signal, () => draining);
+      const s = fc_callerGone.bindCallerGone(req.signal, () => draining);
       const tag = new URL(req.url).pathname;
       await new Promise((r) => setTimeout(r, 800));
       seen[tag] = s.aborted;
@@ -103,7 +104,7 @@ describe("the checkpoints", () => {
     const traces: Trace[] = [];
     fc.__setCallerCutDepsForTests({ postTrace: async (t: Trace) => { traces.push(t); return 201; } });
     expect(at(new AbortController().signal, state(1, "d"), (p: unknown) => fc.callerCutCheckpoint("before_draft", p))).toBeNull();
-    expect(fc.runWithCallerGone(gone(), () => fc.callerCutCheckpoint("before_draft", { type: "feature_compose" }))).toBeNull();
+    expect(fc_callerGone.runWithCallerGone(gone(), () => fc.callerCutCheckpoint("before_draft", { type: "feature_compose" }))).toBeNull();
     expect(fc.callerCutCheckpoint("repair_round", ptr(state(1, "d")))).toBeNull();
     expect(traces.length).toBe(0);
   });
@@ -112,7 +113,7 @@ describe("the checkpoints", () => {
     const p = ptr(state(1, "d-copy")) as Record<string, unknown>;
     const c = capture();
     let r: any;
-    try { r = fc.runWithCallerGone(gone(), () => fc.callerCutCheckpoint("before_draft", { ...{ ...p, spec: "copied" } })); } finally { c.restore(); }
+    try { r = fc_callerGone.runWithCallerGone(gone(), () => fc.callerCutCheckpoint("before_draft", { ...{ ...p, spec: "copied" } })); } finally { c.restore(); }
     expect(r?.body?.verdict).toBe("CALLER_GONE");
     expect(JSON.stringify(p)).toBe('{"type":"feature_compose"}');
   });
@@ -199,11 +200,11 @@ describe("the mask and the wiring", () => {
     const stages = ["before_draft", "repair_round", "before_cutover"];
     const c = capture();
     try {
-      for (const s of stages) fc.runWithCallerGone(undefined, () => fc.callerCutCheckpoint(s, p));
-      for (const s of stages) fc.runWithCallerGone(new AbortController().signal, () => fc.callerCutCheckpoint(s, p));
+      for (const s of stages) fc_callerGone.runWithCallerGone(undefined, () => fc.callerCutCheckpoint(s, p));
+      for (const s of stages) fc_callerGone.runWithCallerGone(new AbortController().signal, () => fc.callerCutCheckpoint(s, p));
       expect(reads).toBe(0);
       expect(c.lines).toEqual([]);
-      for (const s of stages) fc.runWithCallerGone(gone(), () => fc.callerCutCheckpoint(s, p));
+      for (const s of stages) fc_callerGone.runWithCallerGone(gone(), () => fc.callerCutCheckpoint(s, p));
       await settle();
     } finally { c.restore(); }
     expect(reads).toBe(1);
@@ -228,7 +229,7 @@ describe("the mask and the wiring", () => {
       const c = capture();
       const out: unknown[] = [];
       try {
-        for (const s of ["before_draft", "repair_round", "repair_round", "before_cutover"]) out.push(fc.runWithCallerGone(gone(), () => fc.callerCutCheckpoint(s, p)));
+        for (const s of ["before_draft", "repair_round", "repair_round", "before_cutover"]) out.push(fc_callerGone.runWithCallerGone(gone(), () => fc.callerCutCheckpoint(s, p)));
         await settle();
       } finally { c.restore(); }
       expect({ name, out }).toEqual({ name, out: [null, null, null, null] });

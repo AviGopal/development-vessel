@@ -1,10 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  verifyPatchAddressesGap,
-  draftReachability,
-  enclosingTopLevelSymbol,
-  type ReachabilityFact,
-} from "../../src/resolvers/feature-compose.js";
+import { enclosingTopLevelSymbol } from "../../src/resolvers/feature-compose.js";
+import { verifyPatchAddressesGap, draftReachability, type ReachabilityFact } from "../../src/gates/semantic-gate.js";
 
 // OVER-REFUSAL CONTROLS for the self-reference rule (a reference from inside a symbol's own body, or from another added
 // symbol that is not live, is not a caller). A false hard_fail blocks a legitimate edit with no LLM call and teaches the

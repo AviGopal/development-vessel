@@ -44,7 +44,8 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, any>;
-const has = (name: string): boolean => typeof supply[name] === "function";
+const supply_checkSupplyDispatch = (await import("../../src/landing/check-supply-dispatch.js")) as Record<string, any>;
+const has = (name: string): boolean => typeof (supply[name] ?? supply_checkSupplyDispatch[name]) === "function";
 
 type Row = Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -98,7 +99,7 @@ describe("dispatchVerdict: every outcome class (G1), unknown never failed (G3)",
   for (const [label, ledger, probe, kind, detail] of cases) {
     it(`${label} → ${kind}${detail && (kind === "lost" || kind === "wait") ? ` (${detail})` : ""}`, () => {
       expect(has("dispatchVerdict")).toBe(true);
-      const v = supply.dispatchVerdict(ledger, probe, NOW, BOUNDS, "node-a");
+      const v = supply_checkSupplyDispatch.dispatchVerdict(ledger, probe, NOW, BOUNDS, "node-a");
       expect(v.kind).toBe(kind);
       if (kind === "lost" || kind === "wait") expect(v.why).toBe(detail);
       if (kind === "failed") expect(v.reason).toContain(detail);
@@ -108,7 +109,7 @@ describe("dispatchVerdict: every outcome class (G1), unknown never failed (G3)",
 
   it("a legacy ledger's lost reason says the dispatching node was not recorded", () => {
     expect(has("dispatchVerdict")).toBe(true);
-    const v = supply.dispatchVerdict({ dispatch_id: "d-9", last_dispatch_at: sentAgo(30) }, { http: 404 }, NOW, BOUNDS, "node-a");
+    const v = supply_checkSupplyDispatch.dispatchVerdict({ dispatch_id: "d-9", last_dispatch_at: sentAgo(30) }, { http: 404 }, NOW, BOUNDS, "node-a");
     expect(v.reason).toContain("the dispatching node was not recorded");
   });
 

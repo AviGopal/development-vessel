@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const FC = "../../src/resolvers/feature-compose.js";
+const FC = "../../src/gates/semantic-gate.js";
 const REAL_FC = { ...(await import(FC)) } as Record<string, unknown>;
 const gtf = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as { isInfraRefusalBody: (b: Record<string, unknown>) => boolean };
 const gtfElig = (await import("../../src/judge/gap-eligibility.js")) as unknown as { isInfraRefusalBody: (b: Record<string, unknown>) => boolean };

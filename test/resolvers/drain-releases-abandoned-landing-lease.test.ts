@@ -24,11 +24,12 @@ const ROOT = join(tmpdir(), `drain-landing-lease-${Date.now()}-${Math.random().t
 mkdirSync(ROOT, { recursive: true });
 await isolateRuntimeRoot("drain-releases-abandoned-landing-lease", { who: "drain-releases-abandoned-landing-lease.test.ts" });
 const fc = await import("../../src/resolvers/feature-compose.js");
+const fc_callerGone = await import("../../src/landing/caller-gone.js");
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const { __setComposeCapacityReaderForTests } = await import("../../src/compose-slots.js");
 const { thisNode } = await import("../../src/resolvers/self-fact-reconcile.js");
 const { resolveFeatureCompose } = fc;
-const releaseAbandoned = (fc as unknown as { releaseAbandonedLandingLeases?: () => Promise<number> }).releaseAbandonedLandingLeases;
+const releaseAbandoned = (fc_callerGone as unknown as { releaseAbandonedLandingLeases?: () => Promise<number> }).releaseAbandonedLandingLeases;
 
 const SLOTS = join(ROOT, "compose-slots");
 const AT = "2026-10-30T10:00:00Z";

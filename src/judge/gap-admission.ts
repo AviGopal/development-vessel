@@ -16,7 +16,7 @@ import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "../resolvers/types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, DETECTOR_ROW_UNARMABLE_REASON, DETECTOR_READING_FIELD, type MintedBirthVerdict } from "../resolvers/substrate-gap.js";
-import { isDissentChild, dissentChildCheckRefusal } from "../resolvers/feature-compose.js";
+import { isDissentChild, dissentChildCheckRefusal } from "../landing/dissent.js";
 import { testTitleInSource } from "../resolvers/retry-evidence.js";
 import { gateLanding, landingsStopped } from "../resolvers/push-policy.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";

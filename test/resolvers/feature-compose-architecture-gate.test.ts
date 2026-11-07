@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { detectArchitectureViolation } from "../../src/resolvers/feature-compose";
+import { detectArchitectureViolation } from "../../src/gates/patch-gates";
 
 // The architecture-conformance scan (2026-07-27). Self-authored patches must conform to
 // the substrate's OWN laws; these tests pin the two high-precision, law-backed rules and

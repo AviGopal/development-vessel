@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+const fc_testFileGates = (await import("../../src/gates/test-file-gates.js")) as Record<string, any>;
 
 const RUN = Math.random().toString(36).slice(2, 8);
 const ROOT = join(tmpdir(), `fc-test-defect-${Date.now()}-${RUN}`);
@@ -111,10 +112,10 @@ describe("the admission decision", () => {
     expect(logs.filter((l) => l.includes("would certify (certifier passes")).length).toBe(2);
   });
   it("[CONTROL] the record: a certifier naming another file, or another shape, is no record", () => {
-    expect(fc.testDefectRecordFor(tdMeta(), TEST_FILE, VESSEL)).toEqual({ decision_id: DECISION });
-    expect(fc.testDefectRecordFor(tdMeta("test/other.test.ts"), TEST_FILE, VESSEL)).toBeNull();
-    expect(fc.testDefectRecordFor({ test_defect: { certifier: { shape: "other", test_file: TEST_FILE } } }, TEST_FILE, VESSEL)).toBeNull();
-    expect(fc.testDefectRecordFor({}, TEST_FILE, VESSEL)).toBeNull();
+    expect(fc_testFileGates.testDefectRecordFor(tdMeta(), TEST_FILE, VESSEL)).toEqual({ decision_id: DECISION });
+    expect(fc_testFileGates.testDefectRecordFor(tdMeta("test/other.test.ts"), TEST_FILE, VESSEL)).toBeNull();
+    expect(fc_testFileGates.testDefectRecordFor({ test_defect: { certifier: { shape: "other", test_file: TEST_FILE } } }, TEST_FILE, VESSEL)).toBeNull();
+    expect(fc_testFileGates.testDefectRecordFor({}, TEST_FILE, VESSEL)).toBeNull();
   });
   it("[CONTROL] the compose's own contract check sees an assertion removed from the check file (staticExpectCount)", () => {
     const fewer = FIXED.replace('    expect(1).toBe(1);\n', "");

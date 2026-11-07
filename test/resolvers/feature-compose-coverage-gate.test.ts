@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { cjsInEsmRefusal } from "../../src/resolvers/feature-compose.js";
+import { cjsInEsmRefusal } from "../../src/gates/patch-gates.js";
 
 // Pins the COVERAGE-ROUTED REFUSAL gate (2026-09-02).
 //

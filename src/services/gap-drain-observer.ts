@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFi
 import { join } from "path";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ComposeEligibilitySkipReason } from "../judge/gap-eligibility.js";
-import type { CHECK_SUPPLY_FAMILY, checkSupplyNode, dispatchVerdict, outcomeBoundsOf, probeDispatch } from "../resolvers/gap-check-supply.js";
+import type { CHECK_SUPPLY_FAMILY, checkSupplyNode, dispatchVerdict, outcomeBoundsOf, probeDispatch } from "../landing/check-supply-dispatch.js";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";

@@ -28,6 +28,7 @@ mkdirSync(ROOT, { recursive: true });
 // (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.
 await isolateRuntimeRoot("compose-landing-lease-admission", { who: "compose-landing-lease-admission.test.ts" });
 const fc = await import("../../src/resolvers/feature-compose.js");
+const fc_callerGone = await import("../../src/landing/caller-gone.js");
 const sg = await import("../../src/resolvers/substrate-gap.js");
 // The shaped compose capacity (compose-slots.ts) reads a composeCapacity pool record at slot claim: answer "no record" (today's
 // cap) so the claim this file drives makes no network read of its own.
@@ -152,7 +153,7 @@ describe("feature_compose admission takes the gap's landing lease at the store h
 });
 
 describe("the landing lease outlives the compose slot while its cutover is pending", () => {
-  const exit = (l: unknown, o: unknown) => (fc as unknown as { releaseOrKeepLandingLease: (l: unknown, o: unknown) => Promise<void> }).releaseOrKeepLandingLease(l, o);
+  const exit = (l: unknown, o: unknown) => (fc_callerGone as unknown as { releaseOrKeepLandingLease: (l: unknown, o: unknown) => Promise<void> }).releaseOrKeepLandingLease(l, o);
   const A = () => ({ gapId: GAP, holder: thisNode(), attempt: "a-slot" });
   const report = (result: Record<string, unknown>) => ({ shape: "featureComposeReport", body: { ok: false, verdict: "UNFAVORABLE", cutovers: [{ vessel: "activity-api", result }] } });
 

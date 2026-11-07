@@ -45,6 +45,7 @@ const ROOT = join(tmpdir(), `compose-observe-${Date.now()}-${Math.random().toStr
 mkdirSync(ROOT, { recursive: true });
 await isolateRuntimeRoot("compose-observe", { who: "compose-observe.test.ts" });
 const fc = await import("../../src/resolvers/feature-compose.js");
+const fc_dissent = await import("../../src/landing/dissent.js");
 const co = await import("../../src/resolvers/compose-observe.js");
 const { __setComposeCapacityReaderForTests } = await import("../../src/compose-slots.js");
 const { resolveFeatureCompose } = fc;
@@ -151,8 +152,8 @@ describe("inside an observe compose no gap-store write reaches the store", () =>
   const dissent = { reason: "fixture dissent", gate_verdict: "UNFAVORABLE", at: AT, later_outcome: null } as never;
   it("[MUST-FAIL] observe: the dissent writer (the store's own writer, default deps) writes nothing; the skip is recorded once", async () => {
     await co.composeObserveContext.run({ observe: true, announced: new Set() }, async () => {
-      await fc.recordSemanticDissent(ARMED, dissent);
-      await fc.recordSemanticDissent(ARMED, dissent);
+      await fc_dissent.recordSemanticDissent(ARMED, dissent);
+      await fc_dissent.recordSemanticDissent(ARMED, dissent);
     });
     expect(gapWrites).toBe(0);
     expect(logs.filter((l) => l === "[observe] skipped gap_store_write (compose observe)").length).toBe(1);
@@ -183,7 +184,7 @@ describe("inside an observe compose no gap-store write reaches the store", () =>
     expect(co.composeObserveSkip("gap_store_write")).toBe(false);
   });
   it("[CONTROL] learn: the same write reaches the store", async () => {
-    await co.composeObserveContext.run({ observe: false, announced: new Set() }, async () => { await fc.recordSemanticDissent(ARMED, dissent); });
+    await co.composeObserveContext.run({ observe: false, announced: new Set() }, async () => { await fc_dissent.recordSemanticDissent(ARMED, dissent); });
     expect(gapWrites).toBe(1);
   });
 });
@@ -241,8 +242,9 @@ describe("an observe compose never lands", () => {
     expect(FC_SRC).toMatch(/export async function writeParkedLanding\(park: ParkedLanding\): Promise<void> \{\n\s*if \(composeObserveSkip\("parked_landing"\)\) return;/);
     expect(FC_SRC).toMatch(/export async function appendComposeLesson\([^\n]*\n\s*if \(composeObserveSkip\("compose_lesson"\)\) return;/);
     expect(FC_SRC).toContain('if (composeObserveSkip("gap_store_write")) break;');
-    // every gap-store write in the file goes through the observe-aware writer
-    expect(FC_SRC.match(/resolveSubstrateGapWriteStore\(/g)?.length).toBe(1);
+    // every gap-store write in the file goes through the observe-aware writer (lifted with its users to src/landing/dissent.ts)
+    const DISSENT_SRC = readFileSync(join(import.meta.dir, "../../src/landing/dissent.ts"), "utf8");
+    expect((FC_SRC + DISSENT_SRC).match(/resolveSubstrateGapWriteStore\(/g)?.length).toBe(1);
     expect(co.observeReportFields([{ op: "edit", path: EDIT }])).toEqual({ observe: true, landed: false, reason: "observe: dry run, not landed", would_be_ops: [{ op: "edit", path: EDIT }] });
   });
 });

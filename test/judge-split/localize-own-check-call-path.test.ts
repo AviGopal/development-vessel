@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { beginPin, endPin, restoreHarness, seed, writesFor, calls, git, route, SCRATCH, RUN, type Row } from "./harness.js";
 import { autoPick, PICK_LOG } from "./pick-fixture.js";
 
-const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2f = await import("../../src/landing/gap-localize.js");
 const VESSEL = "activity-api";
 const CLONE = join(SCRATCH, "clones", VESSEL);
 const TF = "src/lib/caller-fault-abstains.test.ts";

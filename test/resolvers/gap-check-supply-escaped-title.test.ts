@@ -15,7 +15,8 @@
 //   [CONTROL]   a template title with a placeholder is still skipped.
 //   [CONTROL]   `describe > it` run names still match segment by segment.
 import { describe, expect, it } from "bun:test";
-import { declaredTestTitles, existenceOnlyCheck, splitRedGreen } from "../../src/resolvers/gap-check-supply.js";
+import { existenceOnlyCheck } from "../../src/resolvers/gap-check-supply.js";
+import { declaredTestTitles, splitRedGreen } from "../../src/resolvers/check-supply-admission.js";
 import { testTitleInSource, testTitleSegmentOffset } from "../../src/resolvers/retry-evidence.js";
 
 const SINGLE = String.raw`import { expect, it } from "bun:test";

@@ -70,7 +70,9 @@ import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test"
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import * as fc from "../../src/resolvers/feature-compose.js";
-import { verifyPatchAddressesGap, type ReachabilityFact, type SemanticGateVerdict } from "../../src/resolvers/feature-compose.js";
+import * as fc_dissent from "../../src/landing/dissent.js";
+import { verifyPatchAddressesGap, type ReachabilityFact } from "../../src/gates/semantic-gate.js";
+import { type SemanticGateVerdict } from "../../src/gates/contract-narrowing.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
@@ -81,7 +83,7 @@ type Disposition = { land: boolean; veto: string | null; semantic_dissent?: Diss
 type GapDeps = { readGap: (id: string) => Promise<Record<string, unknown> | null>; writeGap: (row: Record<string, unknown>) => Promise<void> };
 
 function exported<T>(name: string): T {
-  const f = (fc as unknown as Record<string, unknown>)[name];
+  const f = ({ ...fc, ...fc_dissent } as unknown as Record<string, unknown>)[name];
   expect(typeof f, `src/resolvers/feature-compose.ts must export ${name}`).toBe("function");
   return f as T;
 }
@@ -452,7 +454,8 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
     expect([...landed.others.keys()]).toEqual(["g1-dissent-narrowed"]);
 
     // And the compose records through the settler only, after the cutover answered.
-    const direct = callSitesInFile(FC_PATH, "recordSemanticDissent").map((c) => c.fn);
+    // recordSemanticDissent and its settler were lifted to src/landing/dissent.ts: the writers are read across both files.
+    const direct = [FC_PATH, new URL("../../src/landing/dissent.ts", import.meta.url).pathname].flatMap((p) => callSitesInFile(p, "recordSemanticDissent")).map((c) => c.fn);
     const settled = callSitesInFile(FC_PATH, "settleSemanticDissent");
     const afterCutover = settled.every((s) => {
       const cut = callsTo(fnNamed(FC_PATH, s.fn), "resolveVesselMitosisCutover").map((c) => c.getStart());

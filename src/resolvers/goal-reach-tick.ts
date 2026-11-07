@@ -1353,7 +1353,7 @@ export async function vesselOfResolver(resolver: string, deps: { repoExists?: (r
 
 /** The file the failing step lives in: the existing localizer's grep over the vessel, with the resolver and the failure evidence as its ONLY terms. */
 async function locateStepFile(vessel: string, resolver: string, excerpt: string | undefined): Promise<{ file: string; method: string } | null> {
-  const { localizeGap } = await import("./gap-to-feature.js");
+  const { localizeGap } = await import("../landing/gap-localize.js");
   const loc = await localizeGap({ summary: "", classification_metadata: { vessel, live_resolver: resolver, ...(excerpt ? { matched_excerpt: excerpt } : {}) } }, { useLlm: false });
   return loc ? { file: loc.file, method: loc.method } : null;
 }

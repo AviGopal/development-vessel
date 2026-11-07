@@ -1,9 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  enclosingTopLevelSymbol,
-  draftReachability,
-  type ReachabilityFact,
-} from "../../src/resolvers/feature-compose.js";
+import { enclosingTopLevelSymbol } from "../../src/resolvers/feature-compose.js";
+import { draftReachability, type ReachabilityFact } from "../../src/gates/semantic-gate.js";
 
 // The resolver places each caller line the reachability grep returns inside its enclosing top-level symbol, so the
 // semantic gate can tell a real caller from a reference inside the draft's own added code (draftReachability).

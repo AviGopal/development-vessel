@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { inertRegexEditRefusal } from "../../src/resolvers/feature-compose.js";
+import { inertRegexEditRefusal } from "../../src/gates/patch-gates.js";
 
 /**
  * A PATCH THAT CHANGES BYTES BUT NOT BEHAVIOUR.

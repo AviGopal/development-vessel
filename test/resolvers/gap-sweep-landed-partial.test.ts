@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { gapCheckIdentity } from "../../src/resolvers/feature-compose.js";
+import { gapCheckIdentity } from "../../src/landing/dissent.js";
 
 const ROOT = join(tmpdir(), `sweep-landed-partial-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");

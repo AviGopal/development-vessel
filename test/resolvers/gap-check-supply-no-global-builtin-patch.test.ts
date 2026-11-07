@@ -14,7 +14,7 @@ describe("gap-check-supply does not patch the global Object.keys", () => {
   });
 
   it("CONTROL: siteRegionSource is still exported and callable", async () => {
-    const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, unknown>;
+    const supply = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, unknown>;
     expect(typeof supply.siteRegionSource).toBe("function");
     const siteRegionSource = supply.siteRegionSource as (siteSrc: string, checkSrc: string) => string;
     const out = siteRegionSource("export function foo() { return 1; }", "foo");

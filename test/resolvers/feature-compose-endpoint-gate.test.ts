@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { unresolvableImpulseEndpointRefusal } from "../../src/resolvers/feature-compose.js";
+import { unresolvableImpulseEndpointRefusal } from "../../src/gates/patch-gates.js";
 
 // Pins the IMPULSE-ENDPOINT RESOLVE GATE (2026-09-02).
 //

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import * as mod from "../../src/resolvers/gap-to-feature.js";
+import * as mod from "../../src/landing/gap-decompose.js";
 
 describe("Reproduce typecheck_dangling_reference from route-edit-ef9810e8", () => {
   test("property access on string array elements demonstrates type confusion", () => {

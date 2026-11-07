@@ -35,6 +35,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -190,8 +191,8 @@ describe("token anchors skip their declaration occurrences", () => {
   it("[PAIR] 84460a91: the gate applies (its literal is in another repo) and it is UNMEASURED, for an exact reason", () => {
     const e = ev("84460a91-row-evidence.json");
     const site = fixture("libp2p-federation-transport-index.84460a91.ts.txt");
-    expect(supply.regionGateApplies({ region: e.region }, site)).toBe(true);
-    const x = supply.explainedTextRegion(site, "src/index.ts", e.summary, e.falsifier_spec ?? "");
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, site)).toBe(true);
+    const x = supply_checkSupplyAdmission.explainedTextRegion(site, "src/index.ts", e.summary, e.falsifier_spec ?? "");
     expect(x.region).toBeNull();
     // Its only site identifiers occur once each, at their own declarations; it quotes no observed output.
     expect(x.why).toBe("token resolveViaLibp2p: 0 non-declaration occurrence(s) of 1; token resolveViaHttp: 0 non-declaration occurrence(s) of 1");
@@ -199,7 +200,7 @@ describe("token anchors skip their declaration occurrences", () => {
   it("[PAIR] 40d50487: NOT GATED, because its literal region occurs in its own edit site (the ribosome control's class); a derived region would be the token test_file", () => {
     const e = ev("40d50487-row-evidence.json");
     expect(DV_SITE.split(String(e.region)).length - 1).toBe(1);
-    expect(supply.regionGateApplies({ region: e.region }, DV_SITE)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, DV_SITE)).toBe(false);
     expect(supply.derivedTextRegion(DV_SITE, DV_REL, e.summary, e.falsifier_spec ?? "")).toMatchObject({ anchor: "test_file", kind: "token", occurrences: 4 });
   });
   it("[CONTROL] end to end: a row whose evidence names only a declared-and-assigned name records unmeasured: no region WITH its reason", async () => {

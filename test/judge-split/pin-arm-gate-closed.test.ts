@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { beginPin, endPin, restoreHarness, seed, store, route, hitsOf, tick, RUN, SCRATCH, STORE_URL, type Row } from "./harness.js";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
-const { decomposeGap } = await import("../../src/resolvers/gap-to-feature.js");
+const { decomposeGap } = await import("../../src/landing/gap-decompose.js");
 const { armDecomposition, decompositionRefusal } = await import("../../src/judge/gap-admission.js");
 
 const VESSEL = `pinarmgate-${RUN}`;

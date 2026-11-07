@@ -66,11 +66,12 @@ await import("../../src/resolvers/gap-to-feature.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const slots = await import("../../src/compose-slots.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyDispatch = await import("../../src/landing/check-supply-dispatch.js");
 
 type Row = Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
 const VESSEL = "local-tools-vessel";
-const LOCAL = supply.checkSupplyNode();
+const LOCAL = supply_checkSupplyDispatch.checkSupplyNode();
 
 /** A peer compose producer as discovery lists it and as it answers a placement query. */
 type Peer = { id: string; url: string; node: string; owns: string[]; free: number | null; visible: boolean | null; excludes: string[]; fail?: "throw" | "http500"; origin?: string; readsNoDispatch?: boolean };
@@ -576,14 +577,14 @@ describe("check-supply placement: the compose runs where a slot is free", () => 
   });
 
   it("[MUST-FAIL] a placed dispatch nobody here reads settles by the dispatch timeout, not the foreign bound", () => {
-    const bounds = supply.outcomeBoundsOf({});
+    const bounds = supply_checkSupplyDispatch.outcomeBoundsOf({});
     const sent = new Date(Date.now() - bounds.timeout_ms - 60_000).toISOString();
     const base = { state: "goal_dispatched", dispatch_id: "p-1", dispatch_node: "node-b", last_dispatch_at: sent };
-    const placed = supply.dispatchVerdict({ ...base, placed_by: LOCAL } as never, null, Date.now(), bounds, LOCAL);
+    const placed = supply_checkSupplyDispatch.dispatchVerdict({ ...base, placed_by: LOCAL } as never, null, Date.now(), bounds, LOCAL);
     expect(placed.kind).toBe("lost");
     expect((placed as { why?: string }).why).toBe("owning_node_never_settled");
     // a dispatch another sender made keeps the foreign bound, as today
-    expect(supply.dispatchVerdict(base as never, null, Date.now(), bounds, LOCAL).kind).toBe("wait");
+    expect(supply_checkSupplyDispatch.dispatchVerdict(base as never, null, Date.now(), bounds, LOCAL).kind).toBe("wait");
   });
 });
 

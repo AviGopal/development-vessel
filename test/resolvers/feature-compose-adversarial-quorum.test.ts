@@ -3,7 +3,7 @@
 // to addresses:false, but a low-confidence / vague / errored refuter leaves the pass intact
 // (fail-open — no over-rejection). Fake `llm` returns the judge response first, the refuter second.
 import { describe, it, expect } from "bun:test";
-import { verifyPatchAddressesGap, type ReachabilityFact } from "../../src/resolvers/feature-compose";
+import { verifyPatchAddressesGap, type ReachabilityFact } from "../../src/gates/semantic-gate";
 
 // A real, reachable, non-header, non-vacuous change so the deterministic floors pass and the LLM
 // judge (then the refuter) actually run.

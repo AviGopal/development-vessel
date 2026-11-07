@@ -1,4 +1,4 @@
-import * as mod from "../../src/resolvers/gap-check-supply";
+import * as mod from "../../src/resolvers/check-supply-admission";
 import { describe, expect, test } from "bun:test";
 import type { Row } from "../../src/resolvers/types";
 

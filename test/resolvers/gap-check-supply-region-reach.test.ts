@@ -45,6 +45,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
 
@@ -172,7 +173,7 @@ describe("the arm step refuses a check whose calls never reach the gap's region"
   });
 
   it("[CONTROL] the refusal is static: no region on the site, nothing decided", () => {
-    const refusal = supply["checkMissesRegionRefusal"] as undefined | ((siteSrc: string, siteRel: string, checkSrc: string, region: string) => { reason: string } | null);
+    const refusal = supply_checkSupplyAdmission["checkMissesRegionRefusal"] as undefined | ((siteSrc: string, siteRel: string, checkSrc: string, region: string) => { reason: string } | null);
     expect(typeof refusal).toBe("function");
     const check = fixture("6c6d632-containment-refused.check.ts.txt");
     expect(refusal!(TREE[SITE_REL]!, SITE_REL, check, REGION)?.reason).toContain("check_call_misses_region");

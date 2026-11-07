@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as mod from "../../src/resolvers/gap-check-supply.js";
+import * as mod from "../../src/resolvers/check-supply-admission.js";
 
 describe("gap-check-supply declaredTestTitles — escape handling", () => {
   test("MUST-FAIL: keeps a test whose title contains an escape — expected to include MUST-FAIL: goal's expected", () => {

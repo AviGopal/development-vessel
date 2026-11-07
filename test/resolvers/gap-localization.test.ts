@@ -153,7 +153,8 @@ describe("variant-1", () => {
 describe("the callers", () => {
   it("[MUST-FAIL] decomposeGap, the compose pick and the check supply each record the answer they used", () => {
     const src = (f: string) => readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", f), "utf8");
-    const g2f = src("gap-to-feature.ts");
+    // decomposeGap was lifted to src/landing/gap-decompose.ts: its record is read there, the compose pick's in gap-to-feature.
+    const g2f = src("gap-to-feature.ts") + "\n" + readFileSync(join(import.meta.dir, "..", "..", "src", "landing", "gap-decompose.ts"), "utf8");
     expect(g2f).toContain('const loc = await localizeGap(parent, { useLlm: true });\n    await noteGapLocalization({ caller: "decompose", gap: parent, answer: loc });');
     expect(g2f).toMatch(/catch \{ localized = null; \}\n    await noteGapLocalization\(\{ caller: "compose_pick", gap, answer: localized \}\);/);
     const gcs = src("gap-check-supply.ts");

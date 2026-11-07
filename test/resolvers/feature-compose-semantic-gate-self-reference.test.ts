@@ -1,8 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import {
-  verifyPatchAddressesGap,
-  type ReachabilityFact,
-} from "../../src/resolvers/feature-compose.js";
+import { verifyPatchAddressesGap, type ReachabilityFact } from "../../src/gates/semantic-gate.js";
 
 // A draft whose added symbols are all unreachable is refused deterministically, whatever the LLM judge says. A
 // reference from inside a symbol's own body (recursion), or from another symbol the same draft added that nothing

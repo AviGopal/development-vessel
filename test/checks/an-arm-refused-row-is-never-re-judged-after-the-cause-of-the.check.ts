@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as mod from "../../src/resolvers/gap-check-supply";
+import * as mod from "../../src/landing/check-supply-dispatch";
 
 describe("check supply settlement — an arm_refused row is not a permanent judgement", () => {
   test("an arm_refused row is NOT a settled verdict (JUDGED_NOT_ARMED excludes arm_refused)", () => {

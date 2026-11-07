@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import * as mod from "../../src/resolvers/gap-check-supply.js";
+import * as mod_checkSupplyAdmission from "../../src/resolvers/check-supply-admission.js";
+import * as mod_checkSupplyDispatch from "../../src/landing/check-supply-dispatch.js";
 
 // DEFECT REPRO: dispatchVerdict writes a failure reason solely from AGE (title_grace_ms)
 // without checking the file content, while declaredTestTitles would see a new title.
@@ -11,7 +13,7 @@ test("check-supply records 'no new test title' from age alone while its reader s
     import { test } from "bun:test";
     test("${measuredTitle}", () => {});
   `;
-  const titles = mod.declaredTestTitles(src);
+  const titles = mod_checkSupplyAdmission.declaredTestTitles(src);
   // Sanity: the arm-reader sees the title we just added.
   expect(titles.includes(measuredTitle)).toBe(true);
 
@@ -38,7 +40,7 @@ test("check-supply records 'no new test title' from age alone while its reader s
   // when the reader can see a new title — so this should fail today.
   const statuses = ["succeeded", "completed", "failed"]; // typical terminal statuses
   const withNoTitleReason = statuses
-    .map((status) => mod.dispatchVerdict(ledger, { http: 200, status, reached: true }, now, bounds, "self-node"))
+    .map((status) => mod_checkSupplyDispatch.dispatchVerdict(ledger, { http: 200, status, reached: true }, now, bounds, "self-node"))
     .filter((v) => v.kind === "failed" && typeof (v as { reason?: string }).reason === "string" && ((v as { reason?: string }).reason ?? "").includes("reached, but no new test title appeared"));
 
   // EXPECTED (correct) behavior: since a new title exists, dispatchVerdict should NOT

@@ -291,7 +291,7 @@ describe("red before write, with the store held here (GAP_STORE_ENDPOINT unset; 
   // gap-lifecycle-scan calls; decompose_gap_id never asks for it.
   describe("parent-check mode (decomposeGap with parentCheck, as gap-lifecycle-scan calls it)", () => {
     const decomposeParentCheck = async (id: string) => {
-      const { decomposeGap } = await import("../../src/resolvers/gap-to-feature.js");
+      const { decomposeGap } = await import("../../src/landing/gap-decompose.js");
       const row = await readLocal(id);
       return tick(() => decomposeGap(row!, { parentCheck: true }));
     };

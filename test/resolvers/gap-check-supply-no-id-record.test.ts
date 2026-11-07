@@ -44,6 +44,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, any>;
+const supply_checkSupplyDispatch = (await import("../../src/landing/check-supply-dispatch.js")) as Record<string, any>;
 const { rhythmDueScore } = await import("../../src/resolvers/rhythm-conductor-tick.js");
 
 type Row = Record<string, unknown>;
@@ -246,17 +247,17 @@ describe("an id-less record is recovered by its own node, never settled as lost"
 
   it("[MUST-FAIL] the verdict on an id-less record: owner, no goal text -> non_attempt; owner, goal text -> failed; another node's, however old -> wait for its owner; never lost", () => {
     const base = { last_dispatch_at: iso(NOW0 - 30 * H), test_file: "test/checks/x.check.ts" };
-    expect(supply.dispatchVerdict({ ...base, dispatch_node: "node-a" }, null, NOW0, BOUNDS, "node-a").kind).toBe("non_attempt");
-    const sentNoId = supply.dispatchVerdict({ ...base, dispatch_node: "node-a", goal: "Write ONE failing test" }, null, NOW0, BOUNDS, "node-a");
+    expect(supply_checkSupplyDispatch.dispatchVerdict({ ...base, dispatch_node: "node-a" }, null, NOW0, BOUNDS, "node-a").kind).toBe("non_attempt");
+    const sentNoId = supply_checkSupplyDispatch.dispatchVerdict({ ...base, dispatch_node: "node-a", goal: "Write ONE failing test" }, null, NOW0, BOUNDS, "node-a");
     expect(sentNoId.kind).toBe("failed");
     expect(String(sentNoId.reason)).toContain("send_without_id");
-    const foreign = supply.dispatchVerdict({ ...base, dispatch_node: "node-b", last_dispatch_at: iso(NOW0 - 200 * H) }, null, NOW0, BOUNDS, "node-a");
+    const foreign = supply_checkSupplyDispatch.dispatchVerdict({ ...base, dispatch_node: "node-b", last_dispatch_at: iso(NOW0 - 200 * H) }, null, NOW0, BOUNDS, "node-a");
     expect(foreign.kind).toBe("wait");
     expect(foreign.why).toBe("owning_node_never_settled");
   });
 
   it("[CONTROL] a record WITH an id still waits while its outcome is unreadable (young), as before", () => {
-    const v = supply.dispatchVerdict({ dispatch_id: "d-1", dispatch_node: "node-a", last_dispatch_at: iso(NOW0 - H) }, { http: 404 }, NOW0, BOUNDS, "node-a");
+    const v = supply_checkSupplyDispatch.dispatchVerdict({ dispatch_id: "d-1", dispatch_node: "node-a", last_dispatch_at: iso(NOW0 - H) }, { http: 404 }, NOW0, BOUNDS, "node-a");
     expect(v.kind).toBe("wait");
     expect(v.why).toBe("not_found_on_host");
   });

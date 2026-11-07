@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
+const supply_checkSupplyAdmission = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const FIX = join(import.meta.dir, "..", "fixtures", "check-asserts-defect-output");
 const SITE = readFileSync(join(FIX, "gap-check-supply.bf88c790.ts.txt"), "utf8");
 const ROW = JSON.parse(readFileSync(join(FIX, "5e69d7a0-row-evidence.json"), "utf8")) as { summary: string; must_fail: string; control: string; falsifier_spec: string };
@@ -36,14 +37,14 @@ describe("the region gate's anchor sources", () => {
   });
 
   it("[CONTROL] the check goal's anchors are unchanged: no token anchors without site_tokens", () => {
-    const goal = supply.falsifiableAnchors(ROW.summary, SITE, ROW.falsifier_spec);
+    const goal = supply_checkSupplyAdmission.falsifiableAnchors(ROW.summary, SITE, ROW.falsifier_spec);
     expect(goal.some((a) => a.kind === "token")).toBe(false);
-    expect(supply.falsifiableAnchors(ROW.summary, SITE, ROW.falsifier_spec, null, { ...more, site_tokens: true }).some((a) => a.kind === "token" && a.value === "red_independent_of_edit_site")).toBe(true);
+    expect(supply_checkSupplyAdmission.falsifiableAnchors(ROW.summary, SITE, ROW.falsifier_spec, null, { ...more, site_tokens: true }).some((a) => a.kind === "token" && a.value === "red_independent_of_edit_site")).toBe(true);
   });
 
   it("[CONTROL] a token is counted in code and strings, never comments", () => {
     const src = "// only_in_comment is named here\n/* and only_in_comment here */\nexport function f(x: number): string {\n  if (x > 1) return \"seen_twice\";\n  return \"seen_twice again\";\n}\n";
-    const a = supply.falsifiableAnchors("gap: only_in_comment and seen_twice", src, "", null, { site_tokens: true }).filter((x) => x.kind === "token").map((x) => x.value);
+    const a = supply_checkSupplyAdmission.falsifiableAnchors("gap: only_in_comment and seen_twice", src, "", null, { site_tokens: true }).filter((x) => x.kind === "token").map((x) => x.value);
     expect(a).toEqual(["seen_twice"]);
     const r = supply.derivedTextRegion(src, "src/f.ts", "gap: only_in_comment and seen_twice");
     expect(r).toMatchObject({ anchor: "seen_twice", occurrences: 2 });
@@ -67,17 +68,17 @@ describe("the region gate's anchor sources", () => {
 describe("[REPLAY] 40d50487 and 84460a91 under the broadened anchor sources", () => {
   const ev = (f: string) => JSON.parse(readFileSync(join(FIX, f), "utf8")) as { summary: string; falsifier_spec: string | null; region: string | null };
   const tokens = (site: string, e: { summary: string; falsifier_spec: string | null }) => {
-    const free = supply.commentFreeSource(site);
-    return supply.falsifiableAnchors(e.summary, site, e.falsifier_spec ?? "", null, { site_tokens: true }).filter((a) => a.kind === "token").map((a) => [a.value, supply.anchorOccurrences(free, a).length]);
+    const free = supply_checkSupplyAdmission.commentFreeSource(site);
+    return supply_checkSupplyAdmission.falsifiableAnchors(e.summary, site, e.falsifier_spec ?? "", null, { site_tokens: true }).filter((a) => a.kind === "token").map((a) => [a.value, supply_checkSupplyAdmission.anchorOccurrences(free, a).length]);
   };
   it("development-vessel 40d50487: a literal region in its own site (no gate)", () => {
     const e = ev("40d50487-row-evidence.json");
-    expect(supply.regionGateApplies({ region: e.region }, SITE)).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region }, SITE)).toBe(false);
   });
   it("libp2p-federation-transport 84460a91: a literal region in another repo (no gate); its tokens occur only at their declarations", () => {
     const e = ev("84460a91-row-evidence.json");
     const site = readFileSync(join(FIX, "libp2p-federation-transport-index.84460a91.ts.txt"), "utf8");
-    expect(supply.regionGateApplies({ region: e.region })).toBe(false);
+    expect(supply_checkSupplyAdmission.regionGateApplies({ region: e.region })).toBe(false);
     expect(tokens(site, e)).toEqual([["resolveViaLibp2p", 1], ["resolveViaHttp", 1]]);
     expect(supply.derivedTextRegion(site, "src/index.ts", e.summary, e.falsifier_spec ?? "")).toBeNull();
   });

@@ -1,18 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import {
-  extractChangedSymbols,
-  reachabilityHardFail,
-  changesAreTestOnly,
-  verifyPatchAddressesGap,
-  regionContainmentVerdict,
-  regionFromProposalText,
-  diffIsCreateHeavy,
-  detectNewCapabilityStub,
-  stripCommentsAndStrings,
-  computeDataFlowFacts,
-  type ReachabilityFact,
-  type DataFlowFact,
-} from "../../src/resolvers/feature-compose.js";
+import { extractChangedSymbols, computeDataFlowFacts } from "../../src/resolvers/feature-compose.js";
+import { reachabilityHardFail, changesAreTestOnly, verifyPatchAddressesGap, type ReachabilityFact, type DataFlowFact } from "../../src/gates/semantic-gate.js";
+import { regionContainmentVerdict, diffIsCreateHeavy, detectNewCapabilityStub, stripCommentsAndStrings } from "../../src/gates/patch-gates.js";
+import { regionFromProposalText } from "../../src/lib/region-literal.js";
 
 // Pins the SEMANTIC cutover-verification gate (2026-06-25, lever 5) — the reach-gate
 // applied to code. typecheck=clean ≠ gap-fixed. The hollow landing this gate exists

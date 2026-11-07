@@ -20,7 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const FC = "../../src/resolvers/feature-compose.js";
+const FC = "../../src/gates/contract-narrowing.js";
 const REAL_FC = { ...(await import(FC)) } as Record<string, unknown>;
 const elig = (await import("../../src/judge/gap-eligibility.js")) as unknown as { isInfraRefusalBody: (b: Record<string, unknown>) => boolean };
 const restoreFc = () => { mock.module(FC, () => ({ ...REAL_FC })); };

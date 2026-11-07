@@ -993,7 +993,7 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     // `### NEW FILE` header (the form feature-compose builds → diffIsCreateHeavy true).
     // Overwrite edits are excluded (whole-content `+`-prefixing would misread an edit).
     if (newFiles.length > 0) {
-      const { detectNewCapabilityStub } = await import("./feature-compose.js");
+      const { detectNewCapabilityStub } = await import("../gates/patch-gates.js");
       const newFileDiff = newFiles
         .map((nf) => `### NEW FILE ${nf.path}\n` + String(nf.content ?? "").split("\n").map((l) => `+${l}`).join("\n"))
         .join("\n\n");
@@ -1315,7 +1315,7 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     try {
       const stubMitosisRoot = (result.body as { mitosis_root?: string }).mitosis_root;
       if (stubMitosisRoot) {
-        const { detectNewCapabilityStub } = await import("./feature-compose.js");
+        const { detectNewCapabilityStub } = await import("../gates/patch-gates.js");
         const stagedContent = await readFile(join(stubMitosisRoot, subPath), "utf-8");
         const newFileDiff = `### NEW FILE ${subPath}\n` + stagedContent.split("\n").map((l) => `+${l}`).join("\n");
         const stub = detectNewCapabilityStub(newFileDiff);

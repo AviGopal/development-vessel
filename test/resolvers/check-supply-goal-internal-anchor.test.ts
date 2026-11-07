@@ -12,6 +12,7 @@
 import { describe, expect, it } from "bun:test";
 
 const supply = (await import("../../src/resolvers/gap-check-supply.js")) as Record<string, any>;
+const supply_checkSupplyAdmission = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, any>;
 type Reader = { read: (rel: string) => string | null; list: (dir: string) => string[] };
 const reader = (files: Record<string, string>): Reader => ({ read: (rel) => files[rel] ?? null, list: () => [] });
 
@@ -31,7 +32,7 @@ const LABEL = "(internal to src/index.ts, not exported: the test cannot call it,
 
 describe("a symbol anchor the edit site does not export is not offered as a callable", () => {
   it("[MUST-FAIL] the internal anchor is labelled internal and to be reached through an export; the exported one is not", () => {
-    const anchors = supply.falsifiableAnchors(SUMMARY, SITE_SRC);
+    const anchors = supply_checkSupplyAdmission.falsifiableAnchors(SUMMARY, SITE_SRC);
     expect(anchors).toContainEqual({ kind: "symbol", value: "universalToolFallback" });
     expect(anchors).toContainEqual({ kind: "symbol", value: "runGroundedToolLoop" });
     const goal: string = supply.checkSupplyGoal(GH, CHECK, SUMMARY, SITE, reader(FILES), anchors);

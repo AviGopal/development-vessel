@@ -33,7 +33,8 @@ import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test"
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import * as fc from "../../src/resolvers/feature-compose.js";
-import type { SemanticGateVerdict } from "../../src/resolvers/feature-compose.js";
+import * as fc_dissent from "../../src/landing/dissent.js";
+import type { SemanticGateVerdict } from "../../src/gates/contract-narrowing.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
@@ -42,7 +43,7 @@ type OwnCheck = { test_file: string; ran: boolean; tc_ok: boolean; base_red: str
 type Disposition = { land: boolean; veto: string | null; semantic_dissent?: Record<string, unknown>; landed_unverified: boolean };
 
 function exported<T>(name: string): T {
-  const f = (fc as unknown as Record<string, unknown>)[name];
+  const f = ({ ...fc, ...fc_dissent } as unknown as Record<string, unknown>)[name];
   expect(typeof f, `src/resolvers/feature-compose.ts must export ${name}`).toBe("function");
   return f as T;
 }
@@ -348,7 +349,7 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     // gap-to-feature judge split, A2): decomposeGap calls both, so the wiring is read across the three functions.
     const ADM = new URL("../../src/judge/gap-admission.ts", import.meta.url).pathname;
     const called = new Set<string>();
-    const dg = fnNamed(GTF_PATH, "decomposeGap");
+    const dg = fnNamed(new URL("../../src/landing/gap-decompose.ts", import.meta.url).pathname, "decomposeGap");
     walk(dg, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) called.add(n.expression.text); });
     expect({ decompositionRefusal: called.has("decompositionRefusal"), armDecomposition: called.has("armDecomposition") }).toEqual({ decompositionRefusal: true, armDecomposition: true });
     for (const fn of ["decompositionRefusal", "armDecomposition"]) walk(fnNamed(ADM, fn), (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) called.add(n.expression.text); });

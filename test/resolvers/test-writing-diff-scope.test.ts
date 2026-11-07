@@ -31,7 +31,8 @@ import { join } from "node:path";
 const mod = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const outside = mod["testWritingDiffOutsideTests"] as undefined | ((composeMode: unknown, paths: string[], gapId?: unknown) => string[]);
 const checkFile = mod["checkSupplyCheckFile"] as undefined | ((gapId: string) => string);
-const FC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts"), "utf-8");
+// The semantic gate (verifyPatchAddressesGap) was lifted to src/gates/semantic-gate.ts: its compose_mode reads are read with the file.
+const FC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "feature-compose.ts"), "utf-8") + "\n" + readFileSync(join(import.meta.dir, "..", "..", "src", "gates", "semantic-gate.ts"), "utf-8");
 
 const GAP = "gap-Env_gated SF.discount";
 const CHECK = "test/checks/gap-env-gated-sf-discount.check.ts";

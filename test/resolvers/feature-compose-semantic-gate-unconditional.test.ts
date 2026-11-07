@@ -215,7 +215,11 @@ let seq = 0;
 async function freshFc(mode: "off" | "unset"): Promise<Fc> {
   if (mode === "off") process.env["SEMANTIC_CUTOVER_GATE"] = "0";
   else delete process.env["SEMANTIC_CUTOVER_GATE"];
-  return (await import(`../../src/resolvers/feature-compose.ts?semgate=${mode}-${++seq}`)) as Fc;
+  const n = ++seq;
+  // verifyPatchAddressesGap was lifted to src/gates/semantic-gate.ts: that module is loaded fresh under the same mode too.
+  const fc = await import(`../../src/resolvers/feature-compose.ts?semgate=${mode}-${n}`);
+  const gate = await import(`../../src/gates/semantic-gate.ts?semgate=${mode}-${n}`);
+  return { ...fc, verifyPatchAddressesGap: gate.verifyPatchAddressesGap } as unknown as Fc;
 }
 
 const T = `repos/${VESSEL}/${TARGET}`;

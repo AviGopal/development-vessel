@@ -61,15 +61,16 @@ const EXCLUDED_SRC_MIRROR = [
   "src/lib/operator-direct.ts", "src/resolvers/intervention-evaluate.ts",
   // The §14 evaluator's operator-acts reader (qa 10-22, TIGHTENING).
   "src/resolvers/operator-acts.ts",
+  // The code-change-path cut's one-time bootstrap move: the declarations kept code took from feature-compose,
+  // gap-to-feature and gap-check-supply, lifted as-is into these modules, closed as the files they came from were.
+  "src/gates/contract-narrowing.ts", "src/gates/own-check-static.ts", "src/gates/patch-gates.ts", "src/gates/semantic-gate.ts", "src/gates/test-file-gates.ts", "src/landing/caller-gone.ts", "src/landing/check-supply-dispatch.ts", "src/landing/dissent.ts", "src/landing/gap-decompose.ts", "src/landing/gap-localize.ts",
 ];
 /** The closed->residue edges, each by design (BOUNDARY.md 3.1), pinned exactly, by the residue SYMBOL each takes, so a
  *  new edge or a new symbol on an existing edge reddens (qa Q1: all four are routing/entry, none a judge input):
- *  feature-compose hands escalations to the residue's escalateToDecomposition (two callbacks); gap-lifecycle-scan asks
- *  the residue's decomposeGap for a parent check (the arming itself is the closed armDecomposition); routes/impulses
+ *  feature-compose hands escalations to the residue's escalateToDecomposition (two callbacks); routes/impulses
  *  dispatches the resolver entry, resolveGapToFeature. None of them reads a verdict from the residue. */
 const KNOWN_RESIDUE_EDGES: Record<string, string[]> = {
   "src/resolvers/feature-compose.ts": ["escalateToDecomposition", "escalateToDecomposition"],
-  "src/resolvers/gap-lifecycle-scan.ts": ["decomposeGap"],
   "src/routes/impulses.ts": ["resolveGapToFeature"],
 };
 const DECOMPOSE_JUDGE = /\bdeps\s*:\s*\{[^}]*?\bjudge\b\s*[:,}]/;

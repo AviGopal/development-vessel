@@ -67,7 +67,7 @@ export async function gateProbeCases(): Promise<GateProbeCase[]> {
   // first invocation reads as a failure to any scheduler, which is precisely the wrong
   // signal from the component whose job is to say whether the gates still work.
   const { inertRegexEditRefusal, cjsInEsmRefusal, unresolvableImpulseEndpointRefusal } =
-    await import("./feature-compose.js");
+    await import("../gates/patch-gates.js");
   const { surqlBreakingFieldRefusal } = await import("./vessel-mitosis-evaluate.js");
   return [
     {

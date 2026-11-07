@@ -1,8 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import {
-  verifyPatchAddressesGap,
-  type ReachabilityFact,
-} from "../../src/resolvers/feature-compose.js";
+import { verifyPatchAddressesGap, type ReachabilityFact } from "../../src/gates/semantic-gate.js";
 
 // The B7 row (a landed draft is not required to be wired or to carry a non-self-confirming check, so dead and
 // tautological code lands as a fix), case by case.

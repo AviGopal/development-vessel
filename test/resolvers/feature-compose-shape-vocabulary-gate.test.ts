@@ -1,10 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  detectUnadvertisedShapeLiteral,
-  loadFleetShapeVocabulary,
-  unadvertisedShapeRefusalReason,
-  shapeVocabularyRefusal,
-} from "../../src/resolvers/feature-compose";
+import { detectUnadvertisedShapeLiteral, unadvertisedShapeRefusalReason, shapeVocabularyRefusal } from "../../src/resolvers/feature-compose";
+import { loadFleetShapeVocabulary } from "../../src/shape-vocabulary";
 
 // The EXECUTING shape-vocabulary gate (2026-09-01). Every other compose gate READS the
 // diff; this one RESOLVES a name against the advertised vocabulary. It exists because the

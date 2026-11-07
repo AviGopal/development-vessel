@@ -38,6 +38,7 @@ mock.module("../../src/resolvers/vessel-mitosis-cutover.js", () => ({
   },
 }));
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+const fc_shellQuote = (await import("../../src/resolvers/shell-quote.js")) as Record<string, any>;
 
 const VESSEL = "development-vessel";
 const F = "src/resolvers/target.ts";
@@ -187,14 +188,14 @@ const exists = (p: string) => readFile(p).then(() => true, () => false);
 
 describe("shq: a single-quoted shell word", () => {
   it("MUST-FAIL: bash reads a command substitution inside shq(...) literally", async () => {
-    expect(typeof fc.shq).toBe("function");
+    expect(typeof fc_shellQuote.shq).toBe("function");
     const box = join(ROOT, `quote-${Math.random().toString(36).slice(2, 8)}`);
     await mkdir(box, { recursive: true }); // the payload's target dir exists, so an expansion WOULD create Y
     const payload = `$(touch ${box}/Y)`;
-    const r = spawnSync("bash", ["-c", `echo ${fc.shq(payload)}`], { encoding: "utf8" });
+    const r = spawnSync("bash", ["-c", `echo ${fc_shellQuote.shq(payload)}`], { encoding: "utf8" });
     expect(r.stdout).toBe(`${payload}\n`);
     expect(existsSync(join(box, "Y"))).toBe(false);
-    const q = spawnSync("bash", ["-c", `printf %s ${fc.shq("it's a 'quoted' word")}`], { encoding: "utf8" });
+    const q = spawnSync("bash", ["-c", `printf %s ${fc_shellQuote.shq("it's a 'quoted' word")}`], { encoding: "utf8" });
     expect(q.stdout).toBe("it's a 'quoted' word");
   });
 });

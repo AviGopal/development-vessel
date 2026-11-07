@@ -1535,7 +1535,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 // both genuine fabricated-host egress), zero false positives — comment lines are skipped by
 // the check, so revert commits quoting a bad URL do not trip it.
 {
-  const { detectArchitectureViolation } = await import("./feature-compose.js");
+  const { detectArchitectureViolation } = await import("../gates/patch-gates.js");
   const pseudoDiff =
     baseContent.split("\n").filter((l) => { const t = l.trim(); return t !== "" && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*"); }).map((l) => `-${l}`).join("\n") + "\n" +
     afterSrc.split("\n").map((l) => `+${l}`).join("\n");
@@ -1566,7 +1566,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 // cannot fire on it. Stripping comments and strings from both images and comparing what
 // remains is the same test vessel-mitosis-cutover already uses for "no functional change".
 {
-  const { stripCommentsAndStrings } = await import("./feature-compose.js");
+  const { stripCommentsAndStrings } = await import("../gates/patch-gates.js");
   function stripCommentsOnly(src: string): string {
     let result = '';
     let i = 0;
@@ -1643,7 +1643,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 //
 // Gated ONLY when the proposal names a region, so every other patch is unaffected.
 {
-  const { regionContainmentVerdict, regionFromProposalText } = await import("./feature-compose.js");
+  const { regionContainmentVerdict } = await import("../gates/patch-gates.js");
+  const { regionFromProposalText } = await import("../lib/region-literal.js");
   const region = String(pointer.region ?? "").trim() || regionFromProposalText(String(pointer.proposal_text ?? ""));
   if (region) {
     // Touched lines = the multiset difference both ways. A line present in equal
@@ -1702,7 +1703,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   {
     let narrowed: { reason: string } | null = null;
     try {
-      const { contractNarrowingRefusal } = await import("./feature-compose.js");
+      const { contractNarrowingRefusal } = await import("../gates/contract-narrowing.js");
       narrowed = contractNarrowingRefusal([{ path: pointer.target_file, pre: baseContent, post: afterSrc }], "");
     } catch (e) {
       console.warn(`[pwt-semantic-gate] REFUSED as infrastructure: the documented-contract floor threw (${(e as Error).message})`);
@@ -1750,7 +1751,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     const proposalText = String(pointer.proposal_text ?? "").trim();
     if (proposalText && llmEndpoints.length > 0) {
       try {
-        const { verifyPatchAddressesGap, semanticGateInfraRefusal } = await import("./feature-compose.js");
+        const { verifyPatchAddressesGap, semanticGateInfraRefusal } = await import("../gates/semantic-gate.js");
         const beforeLines2 = baseContent.split("\n");
         const afterLines2 = afterSrc.split("\n");
         const bCount = new Map<string, number>();

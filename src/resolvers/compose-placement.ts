@@ -52,7 +52,7 @@ import { peekComposeCapacity } from "../compose-slots.js";
 import { autonomyScope, autonomyScopeExcludes, ownedVessels } from "../judge/gap-policy.js";
 import { sampleBeta } from "../selector/thompson-score.js";
 import type { DispatchGoalPointer } from "./dispatch-goal.js";
-import type { DispatchProbe } from "./gap-check-supply.js";
+import type { DispatchProbe } from "../landing/check-supply-dispatch.js";
 import type { ResolverResult } from "./types.js";
 
 type Row = Record<string, unknown>;
@@ -134,7 +134,7 @@ export async function composePlacementAnswer(pointer: Row): Promise<ComposePlace
     }
   }
   // gap-check-supply imports this module, so its probe is imported at call time.
-  const supply = await import("./gap-check-supply.js");
+  const supply = await import("../landing/check-supply-dispatch.js");
   const dispatch = dispatchId ? await supply.probeDispatch(dispatchId) : null;
   // THE ARM RECORD (a placement query only): this node's recent arm verdicts as a composer, read from the gap store the
   // placer shares (gap_row_visible), so the placer weighs this node by how the checks it wrote were judged. The window

@@ -945,7 +945,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
           decomposed++;
           console.log(`[gap-falsify] decomposing ${g.id} before admission (${decomposed}/${maxDecompose})`);
           try {
-            const { decomposeGap } = await import("./gap-to-feature.js");
+            const { decomposeGap } = await import("../landing/gap-decompose.js");
             const d = await decomposeGap(g as unknown as Record<string, unknown>, { parentCheck: true });
             if (d.parent_check === "written") falsified.push(g.id);
           } catch (err) {

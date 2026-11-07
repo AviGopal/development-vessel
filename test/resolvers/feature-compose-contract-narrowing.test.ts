@@ -25,6 +25,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const fc = (await import("../../src/resolvers/feature-compose.js")) as unknown as Record<string, any>;
+const fc_semanticGate = (await import("../../src/gates/semantic-gate.js")) as unknown as Record<string, any>;
+const fc_contractNarrowing = (await import("../../src/gates/contract-narrowing.js")) as unknown as Record<string, any>;
 const FIX = join(import.meta.dir, "../fixtures/contract-narrowing");
 const fx = (n: string) => readFileSync(join(FIX, n), "utf8");
 
@@ -45,7 +47,7 @@ const passing = async (p: string) => p.includes("ADVERSARIAL reviewer")
   : JSON.stringify({ addresses: true, on_live_path: true, reason: "judged: it does what the gap asks" });
 
 function gate(path: string, pre: string, post: string, diff: string, checkText = ""): Promise<Record<string, any>> {
-  return fc.verifyPatchAddressesGap({
+  return fc_semanticGate.verifyPatchAddressesGap({
     gapSummary: "make the route report what it measures",
     diff: `### ${path}\n${diff}`,
     reachability: [],
@@ -207,7 +209,7 @@ describe("the contract extract runs in linear time on pathological lines (must-f
     const script = `
       const write = process.stdout.write.bind(process.stdout);
       console.log = () => {}; console.info = () => {}; console.warn = () => {};
-      const m = await import(${JSON.stringify(join(import.meta.dir, "../../src/resolvers/feature-compose.js"))});
+      const m = await import(${JSON.stringify(join(import.meta.dir, "../../src/gates/contract-narrowing.js"))});
       const et = await Bun.file(${JSON.stringify(join(FIX, "execution-traces.before-ddf9b46.excerpt.txt"))}).text();
       const sp = " ".repeat(8192);
       const lines = { read: "({ limit }" + sp + ":" + sp, head: sp + sp + "x = 1; // c", max: " * - limit: max" + sp + sp + ".", def: " * - offset: default" + sp + sp };
@@ -237,15 +239,15 @@ describe("the contract extract runs in linear time on pathological lines (must-f
 
 describe("the documented-contract extract (deterministic, pre-image only)", () => {
   it("reads the maxima, defaults and optional parameters both fixtures document", () => {
-    const agg = fc.documentedContract(AGG_PRE) as Array<Record<string, unknown>>;
+    const agg = fc_contractNarrowing.documentedContract(AGG_PRE) as Array<Record<string, unknown>>;
     expect(agg.find((d) => d.name === "group_by")).toMatchObject({ default: "activity_id", optional: true });
     expect(agg.find((d) => d.name === "limit")).toMatchObject({ max: 1000, default: "10", optional: true });
-    const et = fc.documentedContract(ET_PRE) as Array<Record<string, unknown>>;
+    const et = fc_contractNarrowing.documentedContract(ET_PRE) as Array<Record<string, unknown>>;
     expect(et.find((d) => d.name === "limit")).toMatchObject({ max: 500, default: "50" });
     expect(et.some((d) => d.name === "variant_id")).toBe(true);
   });
   it("(1) contractFiles is read only by the deterministic floor, before the LLM prompt is built: the judge never sees it", () => {
-    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/feature-compose.ts"), "utf8");
+    const src = readFileSync(join(import.meta.dir, "../../src/gates/semantic-gate.ts"), "utf8");
     const body = src.slice(src.indexOf("export async function verifyPatchAddressesGap("));
     const fnBody = body.slice(0, body.indexOf("\n}\n"));
     const uses = [...fnBody.matchAll(/args\.(contractFiles|checkText)\b/g)].map((m) => m.index!);
@@ -263,7 +265,7 @@ describe("the documented-contract extract (deterministic, pre-image only)", () =
     expect(fc.contractAddedTestText([{ path: AGG_PATH, pre: AGG_PRE, post: AGG_POST }])).toBe("");
   });
   it("names exactly one narrowing per real landing", () => {
-    expect((fc.contractNarrowings(AGG_PRE, AGG_POST) as Array<{ kind: string; param: string }>).map((n) => `${n.kind}:${n.param}`)).toEqual(["omitted_refused:group_by"]);
-    expect((fc.contractNarrowings(ET_PRE, ET_POST) as Array<{ kind: string; param: string }>).map((n) => `${n.kind}:${n.param}`)).toEqual(["lowered_max:limit"]);
+    expect((fc_contractNarrowing.contractNarrowings(AGG_PRE, AGG_POST) as Array<{ kind: string; param: string }>).map((n) => `${n.kind}:${n.param}`)).toEqual(["omitted_refused:group_by"]);
+    expect((fc_contractNarrowing.contractNarrowings(ET_PRE, ET_POST) as Array<{ kind: string; param: string }>).map((n) => `${n.kind}:${n.param}`)).toEqual(["lowered_max:limit"]);
   });
 });

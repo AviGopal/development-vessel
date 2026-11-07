@@ -20,7 +20,7 @@ import { rm } from "node:fs/promises";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const { root: ROOT } = await isolateRuntimeRoot("fc-semgate-tw-refuter", { superRepo: true, who: "feature-compose-semantic-gate-test-writing-refuter.test.ts" });
-const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
+const fc = (await import("../../src/gates/semantic-gate.js")) as Record<string, any>;
 const csa = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, any>;
 afterAll(async () => { await rm(ROOT, { recursive: true, force: true }); });
 

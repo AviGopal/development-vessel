@@ -175,11 +175,9 @@ describe("pre-registered replays of the five still-armed wrong checks", () => {
     expect(regionGateOf(row)).toMatchObject({ region: "derived_from_token_anchor", anchor: "dispatchRecommendationForProbe", changed: 0 });
     expect(lessonsOf(row).map((l) => [l["class"], l["stage"]])).toEqual([["red_independent_of_edit_site", "arm"]]);
   }, 240_000);
-  it("[REPLAY] dv 5e69d7a0: REFUSED region_red_unchanged, one arm lesson", async () => {
-    const row = await landAndArm("rp-5e69", fixture("5e69d7a0-mutation-gate-refusal-logs.check.ts.txt"));
-    expect(String(ledgerOf(row)["reason"])).toStartWith("region_red_unchanged:");
-    expect(lessonsOf(row).map((l) => [l["class"], l["stage"]])).toEqual([["region_red_unchanged", "arm"]]);
-  }, 240_000);
+  // [REPLAY] dv 5e69d7a0 is removed: it replayed a decision about where outcomeKindOf lived (gap-check-supply.ts), and
+  // the code-change-path cut moved that code to src/landing/check-supply-dispatch.ts, so no mutant of the old site
+  // moves it. Its fixtures stay as they were.
   it("[REPLAY] cdb 23f78717: its region is derived (text anchor), refused end to end in the region-mutant test", () => {
     const r = supply.derivedTextRegion(fixture("concept-db-impulses.extract-78b70967.ts.txt"), "src/routes/impulses.ts", "The resolver case at ~:713-717 throws \"not yet implemented\" for all three.");
     expect(r).toMatchObject({ anchor: "not yet implemented", kind: "text" });

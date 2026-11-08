@@ -2472,3 +2472,8 @@ async function supplyPass(pointer: GapCheckSupplyTickPointer): Promise<ResolverR
     },
   };
 }
+
+// The export surface this module had before its declarations were lifted into src/gates/ and src/landing/: re-exported
+// from where they now live, so a caller or frozen check that imports a name from here still finds it.
+export { CHECK_SUPPLY_FAMILY, JUDGED_NOT_ARMED, RUNNING_STATUSES, TEST_WRITING_STAGE_RE, checkSupplyNode, dispatchVerdict, outcomeBoundsOf, outcomeKindOf, probeDispatch, reachReasonText } from "../landing/check-supply-dispatch.js";
+export type { DispatchProbe, DispatchVerdict, LostWhy, OutcomeBounds } from "../landing/check-supply-dispatch.js";

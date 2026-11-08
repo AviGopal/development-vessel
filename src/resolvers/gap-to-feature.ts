@@ -2926,3 +2926,9 @@ const familySample: string[] = await (async () => {
     },
   };
 }
+
+// The export surface this module had before its declarations were lifted into src/gates/ and src/landing/: re-exported
+// from where they now live, so a caller or frozen check that imports a name from here still finds it.
+export { DECOMPOSE_MAX_STEPS, advertisedReadShapesBlock, decomposeGap, decomposeReplyMaxTokens, decomposeSummaryTerms, quotedSiteExcerpt, vesselTestInventory } from "../landing/gap-decompose.js";
+export { localizeGap } from "../landing/gap-localize.js";
+export type { LocalizeResult } from "../landing/gap-localize.js";

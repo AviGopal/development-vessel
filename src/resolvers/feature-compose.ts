@@ -10635,3 +10635,18 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
     },
   };
 }
+
+// The export surface this module had before its declarations were lifted into src/gates/ and src/landing/: re-exported
+// from where they now live, so a caller or frozen check that imports a name from here still finds it.
+export { contractNarrowingRefusal, contractNarrowingTested, contractNarrowings, documentedContract } from "../gates/contract-narrowing.js";
+export type { ContractNarrowing, DocumentedParam, SemanticGateVerdict } from "../gates/contract-narrowing.js";
+export { failingTestBody, relativeImportBindings, resolveVesselImport, staticCheckCallPath } from "../gates/own-check-static.js";
+export { cjsInEsmRefusal, detectArchitectureViolation, detectNewCapabilityStub, diffIsCreateHeavy, inertRegexEditRefusal, regexLiteralOfLine, regionContainmentVerdict, stripCommentsAndStrings, unresolvableImpulseEndpointRefusal } from "../gates/patch-gates.js";
+export type { StubVerdict } from "../gates/patch-gates.js";
+export { changesAreTestOnly, detectEffectlessHeaderOnlyDiff, detectZeroBehaviorDelta, draftReachability, reachabilityHardFail, semanticGateInfraRefusal, verifyPatchAddressesGap } from "../gates/semantic-gate.js";
+export type { DataFlowFact, ReachabilityFact } from "../gates/semantic-gate.js";
+export { strayTestEdits, testDefectRecordFor } from "../gates/test-file-gates.js";
+export { bindCallerGone, cutoverPendingIn, cutoverResultPending, releaseAbandonedLandingLeases, releaseOrKeepLandingLease, runWithCallerGone } from "../landing/caller-gone.js";
+export { LANDING_LABELER, checksDistinct, dissentChildCheckRefusal, gapCheckIdentity, isDissentChild, landedCloseReason, landedUnderDissent, landedUnverifiedHere, landingLabelHere, recordSemanticDissent, resolveDissentOutcome, settleSemanticDissent } from "../landing/dissent.js";
+export type { CheckIdentity, GoalVerificationLabel, SemanticDissent } from "../landing/dissent.js";
+export { regionFromProposalText } from "../lib/region-literal.js";
